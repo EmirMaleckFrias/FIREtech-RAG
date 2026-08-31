@@ -116,6 +116,8 @@ def ensure_collection() -> None:
         ("source_file", models.PayloadSchemaType.KEYWORD),
         ("has_price", models.PayloadSchemaType.BOOL),
         ("skus", models.PayloadSchemaType.KEYWORD),
+        ("supplier", models.PayloadSchemaType.KEYWORD),
+        ("chunk_type", models.PayloadSchemaType.KEYWORD),
     ):
         try:
             client.create_payload_index(
@@ -259,6 +261,89 @@ def _build_filter(filters: SearchFilters) -> models.Filter | None:
             )
         )
     return models.Filter(must=must) if must else None
+
+
+def index_inventory() -> dict:
+    """Inventario EN VIVO del índice: totales, archivos, suplidores y marcas.
+
+    Todo sale de facets/counts de Qdrant en el momento de la llamada, así el
+    agente responde preguntas sobre el corpus con datos reales (incluidos los
+    documentos subidos después de la ingesta inicial), sin nada hardcodeado.
+    """
+    settings = get_settings()
+    client = get_client()
+    name = settings.qdrant_collection
+
+    def _facet(key: str) -> list[dict]:
+        res = client.facet(collection_name=name, key=key, limit=60, exact=True)
+        # count > 0: el facet devuelve "lápidas" de valores cuyos puntos ya
+        # fueron borrados (documentos eliminados) con conteo cero.
+        return [
+            {"valor": str(h.value), "chunks": h.count}
+            for h in res.hits
+            if str(h.value).strip() and h.count > 0
+        ]
+
+    total = client.count(collection_name=name, exact=True).count
+    products = client.count(
+        collection_name=name,
+        exact=True,
+        count_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="chunk_type", match=models.MatchValue(value="product")
+                )
+            ]
+        ),
+    ).count
+    return {
+        "total_chunks": total,
+        "productos": products,
+        "archivos": _facet("source_file"),
+        "suplidores": _facet("supplier"),
+        "marcas": _facet("brand"),
+    }
+
+
+_KNOWN_BRANDS: list[str] | None = None
+
+
+def resolve_brand(marca: str | None) -> str | None:
+    """Mapea la marca que escribe el usuario/LLM al valor EXACTO del payload.
+
+    'aleum' → 'ALEUM CO.', 'rasco' → 'Reliable', 'agf' → 'AGF Manufacturing
+    Inc.'. Los filtros de Qdrant son case-sensitive y exactos: sin esto, un
+    filtro por 'Aleum' devuelve 0 resultados en silencio. None si no matchea
+    (mejor sin filtro que con filtro imposible).
+    """
+    global _KNOWN_BRANDS
+    if not marca:
+        return None
+    if _KNOWN_BRANDS is None:
+        try:
+            settings = get_settings()
+            res = get_client().facet(
+                collection_name=settings.qdrant_collection,
+                key="brand",
+                limit=100,
+            )
+            _KNOWN_BRANDS = [str(h.value) for h in res.hits]
+        except Exception as exc:
+            logger.warning("No se pudo facetar brands (%s).", exc)
+            return marca  # sin lista: usa el valor tal cual
+    needle = marca.strip().lower()
+    if not needle:
+        return None
+    # RASCO es el nombre comercial de Reliable en los catálogos.
+    if "rasco" in needle:
+        needle = "reliable"
+    for known in _KNOWN_BRANDS:
+        kl = known.lower()
+        if not kl:
+            continue  # docs subidos sin marca: '' matchearía cualquier cosa
+        if needle == kl or needle in kl or kl in needle:
+            return known
+    return None
 
 
 def find_by_skus(skus: list[str], limit: int = 8) -> list[Chunk]:

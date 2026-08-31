@@ -17,7 +17,12 @@ from openai import AsyncOpenAI
 
 from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
-from app.services.qdrant import find_by_skus, hybrid_search
+from app.services.qdrant import (
+    find_by_skus,
+    hybrid_search,
+    index_inventory,
+    resolve_brand,
+)
 from app.services.reranker import rerank
 
 logger = logging.getLogger(__name__)
@@ -61,6 +66,15 @@ o cualquier superlativo de precio, usa OBLIGATORIAMENTE la herramienta \
 algo es "el mejor precio" o "el más barato" basándote solo en `buscar_productos`: \
 si por alguna razón no usaste `buscar_por_precio`, di "el más barato entre lo \
 consultado", nunca un superlativo absoluto.
+
+11. Para preguntas sobre el corpus en sí (cuántos catálogos, suplidores, marcas \
+o productos hay; qué catálogos o marcas existen) usa la herramienta \
+`inventario_del_indice`, que consulta el índice REAL en este momento, y cita \
+esos datos como [inventario del índice]. Nunca respondas conteos del corpus \
+desde fragmentos de búsqueda.
+12. Para "el más barato/mejor precio de CADA suplidor o marca": primero \
+`inventario_del_indice` para conocer las marcas existentes, y luego UNA llamada \
+a `buscar_por_precio` por cada marca principal usando su nombre exacto.
 
 Responde siempre en español, de forma clara, estructurada y concisa. Nunca uses \
 el guion largo (—) en tus respuestas: separa las ideas con comas, puntos o dos puntos.\
@@ -148,6 +162,37 @@ _PRICE_TOOL = {
 }
 
 
+_INVENTORY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "inventario_del_indice",
+        "description": (
+            "Devuelve el inventario REAL del índice en este momento, calculado "
+            "en vivo: total de productos, archivos/catálogos indexados, "
+            "suplidores y marcas con su cantidad de chunks. Úsala para toda "
+            "pregunta sobre el corpus (cuántos catálogos/suplidores/marcas/"
+            "productos hay, qué catálogos existen) y para conocer los nombres "
+            "exactos de marca antes de iterar búsquedas por marca."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def _format_inventory(inv: dict) -> str:
+    lines = [
+        "Inventario del índice (calculado en vivo; cítalo como [inventario del índice]):",
+        f"- Chunks totales: {inv['total_chunks']} | Productos: {inv['productos']}",
+        "- Archivos/catálogos indexados:",
+    ]
+    lines += [f"    {a['valor']} ({a['chunks']} chunks)" for a in inv["archivos"]]
+    lines.append("- Suplidores (líneas comerciales):")
+    lines += [f"    {s['valor']} ({s['chunks']} chunks)" for s in inv["suplidores"]]
+    lines.append("- Marcas (valores exactos para el filtro `marca`):")
+    lines += [f"    {m['valor']} ({m['chunks']} chunks)" for m in inv["marcas"]]
+    return "\n".join(lines)
+
+
 @dataclass
 class AgentEvent:
     """Evento emitido por el agente hacia la capa SSE."""
@@ -192,6 +237,7 @@ def _extract_sku_candidates(query: str) -> list[str]:
 
 async def _execute_search(query: str, marca: str | None, categoria: str | None) -> list[Chunk]:
     settings = get_settings()
+    marca = resolve_brand(marca)
     filters = SearchFilters(brand=marca or None, category=categoria or None)
 
     # Fast-path de SKU exacto: si la consulta trae códigos tipo SKU, se
@@ -251,9 +297,13 @@ async def _execute_price_search(
     dentro de lo que el pool semántico alcanzó a cubrir.
     """
     limite = max(1, min(int(limite or 10), 20))
+    marca_original = marca
+    marca = resolve_brand(marca)
     filters = SearchFilters(brand=marca or None, category=None)
     pool = await hybrid_search(query, filters, _PRICE_POOL)
-    if not pool and marca:
+    if not pool and marca_original and not marca:
+        # Marca no reconocida: se busca sin filtro, pero el caller lo sabrá
+        # porque el propio pool trae las marcas reales en el texto.
         pool = await hybrid_search(query, SearchFilters(), _PRICE_POOL)
 
     priced = [
@@ -323,7 +373,7 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             "model": settings.openai_model,
             "messages": messages,
             "stream": True,
-            "tools": [_TOOL, _PRICE_TOOL],
+            "tools": [_TOOL, _PRICE_TOOL, _INVENTORY_TOOL],
             # Tras MAX_HOPS tool calls se fuerza la respuesta final.
             "tool_choice": "none" if force_final else "auto",
         }
@@ -403,14 +453,25 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 query = str(args.get("query") or "").strip() or message
                 marca = args.get("marca") or None
                 is_price_tool = tc["name"] == "buscar_por_precio"
+                is_inventory_tool = tc["name"] == "inventario_del_indice"
 
-                hop_label = f"por precio: {query}" if is_price_tool else query
+                if is_inventory_tool:
+                    hop_label = "inventario del índice"
+                elif is_price_tool:
+                    hop_label = f"por precio: {query}"
+                else:
+                    hop_label = query
                 hop_info = {"n": hop_count, "query": hop_label}
                 hops.append(hop_info)
                 yield AgentEvent("hop", hop_info)
 
                 try:
-                    if is_price_tool:
+                    if is_inventory_tool:
+                        chunks = []
+                        result_text = _format_inventory(
+                            await asyncio.to_thread(index_inventory)
+                        )
+                    elif is_price_tool:
                         orden = args.get("orden") or "asc"
                         limite = args.get("limite") or 10
                         chunks = await _execute_price_search(query, marca, orden, limite)

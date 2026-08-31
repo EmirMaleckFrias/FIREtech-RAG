@@ -23,7 +23,7 @@ const EXAMPLES: { icon: ReactNode; question: string }[] = [
   },
   {
     icon: <IconArchive />,
-    question: '¿Qué gabinetes Aleum existen y en qué medidas se ofrecen?',
+    question: '¿Qué gabinetes Croker existen y en qué medidas se ofrecen?',
   },
 ];
 
