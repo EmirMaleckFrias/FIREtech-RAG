@@ -1,0 +1,3093 @@
+/* ==========================================================================
+   FIREtech RAG: sistema visual
+   --------------------------------------------------------------------------
+   Lenguaje: calma, denso en calidad, minimal. Neutros cálidos con un único
+   acento rojo FIREtech usado con moderación. Light y dark de primera clase
+   vía prefers-color-scheme.
+
+   Índice:
+     1. Tokens de diseño (light / dark)
+     2. Base, tipografía, focus, scrollbars
+     3. Estructura de la app + scrims
+     4. Sidebar de sesiones
+     5. Header
+     6. Conversación (mensajes)
+     7. Razonamiento del agente (hops)
+     8. Markdown del asistente
+     9. Citas inline
+    10. Composer
+    11. Bienvenida
+    12. Panel de fuentes
+    12b. Panel de documentos (gestión de la indexación)
+    13. Responsive
+    14. Movimiento reducido
+   ========================================================================== */
+
+/* ----------------------------------------------------------------------
+   1. Tokens de diseño
+   ---------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light dark;
+
+  /* superficies (neutros cálidos) */
+  --bg: #fafaf9;
+  --surface: #ffffff;
+  --elevated: #ffffff;
+  --sidebar-bg: #f4f3f1;
+  --inset: #f2f1ef;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --hover: rgba(0, 0, 0, 0.045);
+  --active: rgba(0, 0, 0, 0.075);
+
+  /* texto */
+  --text: #1c1917;
+  --text-2: #78716c;
+  --text-3: #a5a19c;
+
+  /* acento FIREtech: el rojo de marca, un solo color, usado con moderación */
+  --accent: #d6001c;
+  --accent-strong: #b00017;
+  --accent-contrast: #ffffff;
+  --accent-soft: rgba(214, 0, 28, 0.08);
+  --accent-soft-2: rgba(214, 0, 28, 0.15);
+  --accent-border: rgba(214, 0, 28, 0.38);
+  --chip-text: #b50019;
+
+  /* placa de marca: el rojo intenso del logo real, con texto siempre blanco.
+     Se define una sola vez: la placa es idéntica en light y dark. */
+  --brand-plate: #f00728;
+  --brand-plate-text: #ffffff;
+
+  /* semánticos */
+  --green: #16a34a;
+  --red: #dc2626;
+  --amber: #d97706;
+  --gray-dot: #a8a29e;
+
+  --user-bubble: #f0eeeb;
+  --code-bg: rgba(0, 0, 0, 0.05);
+
+  /* sombras multicapa, solo en elementos flotantes */
+  --shadow-soft:
+    0 1px 2px rgba(28, 25, 23, 0.04),
+    0 2px 8px rgba(28, 25, 23, 0.04);
+  --shadow-float:
+    0 1px 2px rgba(28, 25, 23, 0.05),
+    0 4px 14px rgba(28, 25, 23, 0.06),
+    0 14px 36px rgba(28, 25, 23, 0.07);
+  --shadow-overlay: 0 10px 44px rgba(24, 18, 12, 0.26);
+  --shadow-lift:
+    0 2px 6px rgba(28, 25, 23, 0.05),
+    0 6px 18px rgba(28, 25, 23, 0.07),
+    0 16px 40px rgba(28, 25, 23, 0.09);
+
+  --font-sans:
+    'Inter Variable',
+    Inter,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  --font-mono:
+    ui-monospace,
+    'Cascadia Code',
+    'SF Mono',
+    Consolas,
+    'Courier New',
+    monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101010;
+    --surface: #171717;
+    --elevated: #1f1f1f;
+    --sidebar-bg: #0b0b0b;
+    --inset: #1d1d1c;
+    --border: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.17);
+    --hover: rgba(255, 255, 255, 0.06);
+    --active: rgba(255, 255, 255, 0.1);
+
+    --text: #ededec;
+    --text-2: #a3a3a0;
+    --text-3: #6f6f6c;
+
+    /* rojo FIREtech aclarado: ~6.3:1 sobre #101010 (AA para texto normal) */
+    --accent: #ff5a63;
+    --accent-strong: #ff747c;
+    --accent-contrast: #2b060a;
+    --accent-soft: rgba(255, 90, 99, 0.1);
+    --accent-soft-2: rgba(255, 90, 99, 0.18);
+    --accent-border: rgba(255, 90, 99, 0.42);
+    --chip-text: #ff8087;
+
+    --green: #4ade80;
+    --red: #f87171;
+    --amber: #f59e0b;
+    --gray-dot: #57534e;
+
+    --user-bubble: #1f1f1e;
+    --code-bg: rgba(255, 255, 255, 0.065);
+
+    --shadow-soft:
+      0 1px 2px rgba(0, 0, 0, 0.3),
+      0 2px 8px rgba(0, 0, 0, 0.25);
+    --shadow-float:
+      0 1px 2px rgba(0, 0, 0, 0.4),
+      0 4px 14px rgba(0, 0, 0, 0.35),
+      0 14px 36px rgba(0, 0, 0, 0.3);
+    --shadow-overlay: 0 10px 44px rgba(0, 0, 0, 0.6);
+    --shadow-lift:
+      0 2px 6px rgba(0, 0, 0, 0.45),
+      0 8px 22px rgba(0, 0, 0, 0.4),
+      0 18px 44px rgba(0, 0, 0, 0.38);
+  }
+}
+
+/* ----------------------------------------------------------------------
+   2. Base, tipografía, focus, scrollbars
+   ---------------------------------------------------------------------- */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  /* sin flash gris/azul al tocar: el feedback lo dan los estados :active */
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+html,
+body {
+  /* app-like: sin pull-to-refresh accidental, sin rebote del documento y
+     sin scroll horizontal del layout raíz */
+  overscroll-behavior: none;
+  overflow-x: clip;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* mata el delay de doble tap en todos los controles */
+button,
+a,
+input,
+select,
+textarea,
+label {
+  touch-action: manipulation;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+::selection {
+  background: var(--accent-soft-2);
+}
+
+/* focus visible accesible en toda la app */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* scrollbars finos */
+.chat-scroll,
+.session-list,
+.sources-list,
+.md-table-wrap,
+.md-pre,
+textarea {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* scrollers internos: sin scroll-chaining hacia el documento */
+.session-list,
+.sources-list,
+.docs-list {
+  overscroll-behavior: contain;
+}
+
+.md-table-wrap,
+.md-pre {
+  overscroll-behavior-x: contain;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* utilidades de animación */
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* entrada de mensajes: fade + subida + escala mínima, ease-out-expo suave */
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* bloques nuevos del markdown durante el streaming */
+@keyframes stream-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* hops del razonamiento */
+@keyframes hop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* pop del botón de envío al pasar de inactivo a activo */
+@keyframes pop-in {
+  from {
+    opacity: 0.4;
+    transform: scale(0.7);
+  }
+}
+
+/* barra de score: crece de 0 hasta su transform inline (scaleX) */
+@keyframes score-in {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/* texto shimmer para estados de razonamiento: gradiente que barre el texto
+   vía background-clip: text; los extremos del gradiente comparten color, así
+   el tile repetido no muestra costuras */
+.shimmer-text {
+  color: var(--text-2);
+  background-image: linear-gradient(
+    100deg,
+    var(--text-3) 44%,
+    var(--text) 50%,
+    var(--text-3) 56%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer-bg 2s linear infinite;
+}
+
+@keyframes shimmer-bg {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -30% 0;
+  }
+}
+
+/* skeletons: bloque base + barrido por transform (compositable, 60fps) */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--hover);
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--active), transparent);
+  animation: shimmer-slide 1.6s ease-in-out infinite;
+  animation-delay: inherit; /* permite desfasar el barrido por fila */
+}
+
+@keyframes shimmer-slide {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* ----------------------------------------------------------------------
+   3. Estructura de la app + scrims
+   ---------------------------------------------------------------------- */
+
+.app {
+  display: flex;
+  height: 100vh; /* fallback para navegadores sin dvh */
+  height: 100dvh; /* no salta cuando la barra del navegador se colapsa */
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* scrims para paneles en modo slide-over (solo visibles vía media queries) */
+.scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(12, 10, 8, 0.34);
+  animation: fade-in 0.2s ease;
+}
+
+/* ----------------------------------------------------------------------
+   4. Sidebar de sesiones
+   ---------------------------------------------------------------------- */
+
+.sidebar {
+  width: 272px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  transition: width 0.2s ease, border-color 0.2s ease;
+}
+
+.sidebar-closed {
+  width: 0;
+  border-right-color: transparent;
+  visibility: hidden;
+  transition:
+    width 0.2s ease,
+    border-color 0.2s ease,
+    visibility 0s linear 0.2s;
+}
+
+.sidebar-inner {
+  width: 272px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 12px 10px;
+}
+
+/* marca */
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 6px 16px;
+}
+
+/* placa FIREtech: wordmark tipográfico al estilo del logo real: texto
+   blanco sobre el rojo de marca, sin imágenes. Idéntica en ambos temas. */
+.brand-plate {
+  display: inline-flex;
+  align-items: baseline;
+  padding: 4px 11px 5px;
+  border-radius: 9px;
+  background: var(--brand-plate);
+  color: var(--brand-plate-text);
+  font-size: 15px;
+  line-height: 1.2;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.brand-fire {
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+}
+
+.brand-tech {
+  font-weight: 400;
+}
+
+/* variante grande (bienvenida) */
+.brand-plate-lg {
+  padding: 12px 26px 14px;
+  border-radius: 12px;
+  font-size: 24px;
+}
+
+.brand-badge {
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--chip-text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* nueva conversación: primario sutil (borde + hover) */
+.new-chat-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  box-shadow: var(--shadow-soft);
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.new-chat-btn svg {
+  color: var(--text-2);
+  transition: color 0.15s ease;
+}
+
+.new-chat-btn:hover {
+  border-color: var(--accent-border);
+}
+
+.new-chat-btn:hover svg {
+  color: var(--accent);
+}
+
+/* lista de sesiones */
+.session-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 4px -4px 0;
+  padding: 0 4px;
+}
+
+.session-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 16px 10px 5px;
+}
+
+.session-group:first-of-type .session-group-label {
+  padding-top: 10px;
+}
+
+.session-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--text);
+  transition: background 0.15s ease;
+}
+
+.session-item:hover {
+  background: var(--hover);
+}
+
+.session-active,
+.session-active:hover {
+  background: var(--active);
+}
+
+.session-title {
+  display: block;
+  font-size: 13.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-empty {
+  padding: 22px 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-2);
+  text-align: center;
+}
+
+.sidebar-empty p {
+  margin: 0 0 6px;
+}
+
+/* skeleton de la lista de sesiones */
+.session-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  padding: 16px 10px 0;
+}
+
+.skel-label {
+  height: 9px;
+  border-radius: 5px;
+  opacity: 0.75;
+}
+
+.skel-row {
+  height: 13px;
+  border-radius: 6px;
+}
+
+.sidebar-empty-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* pie del sidebar: entrada "Documentos" + estado del backend */
+.sidebar-bottom {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-docs-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-docs-btn svg {
+  color: var(--text-3);
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.sidebar-docs-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.sidebar-docs-btn:hover svg {
+  color: var(--accent);
+}
+
+.sidebar-docs-btn[aria-expanded='true'] {
+  background: var(--active);
+  color: var(--text);
+}
+
+/* footer: estado del backend */
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 5px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.sidebar-status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-green {
+  position: relative;
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
+}
+
+/* pulso suave, solo cuando todo está ok (transform + opacity, compositable) */
+.dot-green::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse-ring 2.4s cubic-bezier(0.25, 0.6, 0.35, 1) infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+  65%,
+  100% {
+    transform: scale(2.7);
+    opacity: 0;
+  }
+}
+
+.dot-red {
+  background: var(--red);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 18%, transparent);
+}
+
+.dot-amber {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 18%, transparent);
+}
+
+.dot-gray {
+  background: var(--gray-dot);
+}
+
+/* ----------------------------------------------------------------------
+   5. Header (mínimo, sticky, translúcido)
+   ---------------------------------------------------------------------- */
+
+.header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 52px;
+  height: calc(52px + env(safe-area-inset-top));
+  padding: 0 12px;
+  padding: env(safe-area-inset-top) calc(12px + env(safe-area-inset-right)) 0
+    calc(12px + env(safe-area-inset-left));
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.header-left,
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.header-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 8px;
+}
+
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--text-2);
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.icon-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.icon-btn-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.icon-btn-active:hover {
+  color: var(--accent);
+  background: var(--accent-soft-2);
+}
+
+/* ----------------------------------------------------------------------
+   6. Conversación
+   ---------------------------------------------------------------------- */
+
+.chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding-top: 52px; /* deja pasar el contenido bajo el header translúcido */
+  padding-top: calc(52px + env(safe-area-inset-top));
+  scroll-behavior: auto;
+  /* el hilo no encadena scroll al documento ni dispara pull-to-refresh */
+  overscroll-behavior: contain;
+}
+
+/* skeletons del historial al cambiar de sesión (sustituyen al "Cargando…") */
+.chat-skeleton {
+  animation: fade-in 0.25s ease 0.12s both; /* el delay evita el flash en cargas rápidas */
+}
+
+.skel-user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.skel-bubble {
+  height: 42px;
+  border-radius: 18px;
+}
+
+.skel-assistant {
+  display: flex;
+  gap: 14px;
+}
+
+.skel-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.skel-lines {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding-top: 6px;
+}
+
+.skel-line {
+  height: 13px;
+  border-radius: 6px;
+}
+
+/* columna centrada estilo Claude/ChatGPT */
+.message-list {
+  max-width: 768px;
+  margin: 0 auto;
+  padding: 20px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.msg {
+  animation: msg-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* --- usuario: contenedor suave a la derecha --- */
+.msg-user {
+  display: flex;
+  justify-content: flex-end;
+  transform-origin: 100% 100%; /* la entrada escala desde abajo a la derecha */
+}
+
+.msg-user-bubble {
+  max-width: 80%;
+  background: var(--user-bubble);
+  border-radius: 18px;
+  padding: 10px 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* --- asistente: texto full-width con avatar pequeño de marca --- */
+.msg-assistant {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+/* avatar del asistente: monograma "F" blanco sobre el rojo de marca
+   (a 26px no cabe el wordmark completo) */
+.msg-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--brand-plate);
+  color: var(--brand-plate-text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 3px;
+  user-select: none;
+  transition: box-shadow 0.2s ease;
+}
+
+.msg-panel-target .msg-avatar {
+  box-shadow: 0 0 0 3px var(--accent-soft-2);
+}
+
+.msg-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* indicador "pensando" antes del primer hop */
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 0;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+
+.thinking svg {
+  color: var(--accent);
+}
+
+/* caret de escritura: fino y parpadeante */
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 3px;
+  border-radius: 1px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* --- borde de escritura durante el streaming ---------------------------
+   El caret vive inline en el punto exacto de escritura (lo ancla el
+   renderizador de markdown como "tail" del último bloque). Su ::before es
+   un velo de gradiente hacia el fondo que desvanece los últimos ~3ch: como
+   es un overlay estático que solo se mueve con el layout, no hay nada que
+   se re-anime al llegar cada token. */
+.stream-caret {
+  position: relative;
+}
+
+.stream-caret::before {
+  content: '';
+  position: absolute;
+  right: calc(100% + 2px);
+  bottom: -0.18em;
+  width: 3.5ch;
+  height: 1.55em;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--bg) 92%);
+}
+
+/* Los bloques nuevos del markdown montan una sola vez (keys estables por
+   posición, el texto solo se anexa), así que este fade no se re-dispara
+   por token: cada párrafo/lista/tabla aparece una única vez. */
+.msg-streaming .md > *,
+.msg-streaming .md li {
+  animation: stream-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.msg-streaming .md tbody tr {
+  animation: fade-in 0.3s ease both;
+}
+
+/* error del mensaje */
+.msg-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 10px 13px;
+  border: 1px solid color-mix(in srgb, var(--red) 28%, transparent);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+  border-radius: 10px;
+  color: var(--red);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.msg-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* pie del mensaje: fuentes + feedback */
+.msg-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  min-height: 28px;
+}
+
+.sources-count-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.sources-count-btn svg {
+  opacity: 0.8;
+}
+
+.sources-count-btn:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--chip-text);
+}
+
+/* pulgares: aparecen al hover del mensaje */
+.feedback {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.msg-assistant:hover .feedback,
+.msg-assistant:focus-within .feedback,
+.msg-footer-voted .feedback {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .feedback {
+    opacity: 1;
+  }
+}
+
+.feedback-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: var(--text-3);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.feedback-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.feedback-btn:disabled:not(.feedback-active) {
+  opacity: 0.4;
+}
+
+.feedback-active,
+.feedback-active:disabled {
+  color: var(--accent);
+}
+
+/* mini-toast "Gracias": entra desde abajo, se queda y sale sola */
+.feedback-thanks {
+  font-size: 12px;
+  color: var(--text-2);
+  margin-left: 4px;
+  animation: thanks-toast 2.6s ease both;
+}
+
+@keyframes thanks-toast {
+  0% {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  10%,
+  80% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+/* ----------------------------------------------------------------------
+   7. Razonamiento del agente (hops de búsqueda)
+   ---------------------------------------------------------------------- */
+
+/* Un único contenedor que muta de tarjeta en vivo a resumen colapsado: al
+   ser el mismo elemento, el borde/fondo/padding transicionan y la altura
+   colapsa con grid-template-rows 1fr→0fr en vez de saltar. */
+.reasoning {
+  margin: 2px 0 14px;
+  font-size: 13px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition:
+    border-color 0.3s ease,
+    background 0.3s ease,
+    padding 0.3s ease;
+}
+
+/* en vivo: tarjeta discreta con spinner, texto shimmer y pasos */
+.reasoning-live {
+  border-color: var(--border);
+  background: var(--surface);
+  padding: 10px 14px;
+  animation: fade-up 0.3s ease both;
+}
+
+.reasoning-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.reasoning-head svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* colapsado al terminar: una sola línea con chevron */
+.reasoning-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  margin-left: -10px;
+  border-radius: 8px;
+  user-select: none;
+  color: var(--text-2);
+  font-size: 12.5px;
+  animation: fade-in 0.25s ease both;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.reasoning-toggle:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.reasoning-chevron {
+  transition: transform 0.2s ease;
+}
+
+.reasoning-toggle[aria-expanded='true'] .reasoning-chevron {
+  transform: rotate(180deg);
+}
+
+/* colapso/expansión de altura: grid-template-rows 0fr ⇄ 1fr */
+.reasoning-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.reasoning-body-open {
+  grid-template-rows: 1fr;
+}
+
+.reasoning-clip {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.reasoning-body-open .reasoning-clip {
+  opacity: 1;
+}
+
+.reasoning-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 9px;
+}
+
+/* cada hop entra con fade + subida; el stagger (40ms por índice) llega por
+   animation-delay inline y solo corre al montar, nunca por re-render */
+.reasoning-step {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--text-2);
+  animation: hop-in 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.reasoning-step svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.reasoning-query {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reasoning-done .reasoning-steps {
+  margin-left: 5px;
+  padding: 8px 2px 4px 12px;
+  border-left: 2px solid var(--border);
+}
+
+/* ----------------------------------------------------------------------
+   8. Markdown del asistente
+   ---------------------------------------------------------------------- */
+
+.md {
+  word-break: break-word;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p {
+  margin: 0.6em 0;
+}
+
+.md strong {
+  font-weight: 600;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 1.1em 0 0.45em;
+  line-height: 1.35;
+}
+
+.md h1 {
+  font-size: 1.2em;
+}
+
+.md h2 {
+  font-size: 1.12em;
+}
+
+.md h3 {
+  font-size: 1.05em;
+}
+
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 1em;
+}
+
+.md ul,
+.md ol {
+  margin: 0.55em 0;
+  padding-left: 24px;
+}
+
+.md li {
+  margin: 0.3em 0;
+}
+
+.md li::marker {
+  color: var(--text-3);
+}
+
+.md blockquote {
+  margin: 0.7em 0;
+  padding: 4px 16px;
+  border-left: 2px solid var(--accent-border);
+  color: var(--text-2);
+}
+
+.md blockquote p {
+  margin: 0.35em 0;
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.2em 0;
+}
+
+/* código: SKUs y precios en monospace con fondo suave */
+.md-code {
+  background: var(--code-bg);
+  border-radius: 5px;
+  padding: 1.5px 6px;
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+
+.md-pre {
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 15px;
+  overflow-x: auto;
+  margin: 0.7em 0;
+}
+
+.md-pre code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  white-space: pre;
+}
+
+/* tablas: bordes hairline, header sutil, scroll horizontal propio */
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 0.8em 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.md table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+
+.md th,
+.md td {
+  padding: 8px 13px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.md th {
+  background: var(--inset);
+  font-weight: 600;
+  font-size: 0.95em;
+  white-space: nowrap;
+}
+
+.md td {
+  font-variant-numeric: tabular-nums;
+}
+
+.md tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ----------------------------------------------------------------------
+   9. Citas inline [archivo, pág. X]
+   ---------------------------------------------------------------------- */
+
+.citation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 9px;
+  margin: 0 2px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--chip-text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.65;
+  vertical-align: baseline;
+  white-space: nowrap;
+  max-width: 100%;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.citation-chip:hover {
+  background: var(--accent-soft-2);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-soft);
+}
+
+.citation-chip:active {
+  transform: none;
+  box-shadow: none;
+}
+
+.citation-doc {
+  display: inline-flex;
+  opacity: 0.75;
+}
+
+.citation-file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.citation-page {
+  opacity: 0.85;
+}
+
+/* ----------------------------------------------------------------------
+   10. Composer flotante
+   ---------------------------------------------------------------------- */
+
+.composer-area {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 816px; /* 768 + padding lateral de la columna */
+  margin: 0 auto;
+  padding: 6px 24px 10px;
+  /* zona segura del gesto home; en desktop env() vale 0 */
+  padding-bottom: calc(10px + env(safe-area-inset-bottom));
+}
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 9px 9px 9px 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: 24px;
+  background: var(--elevated);
+  box-shadow: var(--shadow-float);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* al enfocar, la sombra se eleva sutilmente además del anillo de acento */
+.composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lift), 0 0 0 3px var(--accent-soft);
+}
+
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  padding: 6px 0;
+  min-height: 23px;
+  max-height: 204px; /* ~8 líneas */
+}
+
+.composer textarea::placeholder {
+  color: var(--text-3);
+}
+
+.composer textarea:disabled {
+  opacity: 0.6;
+}
+
+/* botón circular de envío: se enciende con el acento cuando hay texto */
+.send-btn {
+  width: 35px;
+  height: 35px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--inset);
+  color: var(--text-3);
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1); /* vuelta con muelle */
+}
+
+/* micro-scale al pulsar: bajada rápida, retorno con el spring de arriba */
+.send-btn:active:not(:disabled) {
+  transform: scale(0.92);
+  transition-duration: 0.15s, 0.15s, 0.08s;
+}
+
+.send-ready {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  animation: pop-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.send-ready:hover {
+  background: var(--accent-strong);
+}
+
+.send-stop {
+  background: var(--text);
+  color: var(--bg);
+  animation: pop-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.send-stop:hover {
+  opacity: 0.85;
+}
+
+.composer-meta {
+  text-align: center;
+  padding: 7px 12px 0;
+}
+
+.composer-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.composer-note {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* ----------------------------------------------------------------------
+   11. Bienvenida (estado vacío)
+   ---------------------------------------------------------------------- */
+
+.welcome-wrap {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.welcome {
+  width: 100%;
+  max-width: 620px;
+  text-align: center;
+  animation: fade-up 0.3s ease both;
+}
+
+/* la placa de marca en grande; hereda fondo/tipografía de .brand-plate */
+.welcome-logo {
+  margin-bottom: 20px;
+  animation: logo-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes logo-in {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.welcome h1 {
+  margin: 0 0 10px;
+  font-size: 27px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.welcome-sub {
+  margin: 0 0 34px;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.example-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.example-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  text-align: left;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  /* entrada con stagger: el delay (60ms por tarjeta) llega inline */
+  animation: msg-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.example-card:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-soft);
+}
+
+.example-card:disabled {
+  opacity: 0.55;
+}
+
+.example-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--text-2);
+  transition: color 0.15s ease;
+}
+
+.example-card:hover:not(:disabled) .example-icon {
+  color: var(--accent);
+}
+
+/* ----------------------------------------------------------------------
+   12. Panel de fuentes
+   ---------------------------------------------------------------------- */
+
+.sources-panel {
+  width: 320px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  transition: width 0.2s ease, border-color 0.2s ease;
+}
+
+.sources-closed {
+  width: 0;
+  border-left-color: transparent;
+  visibility: hidden;
+  transition:
+    width 0.2s ease,
+    border-color 0.2s ease,
+    visibility 0s linear 0.2s;
+}
+
+.sources-inner {
+  width: 320px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.sources-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 17px 18px 11px;
+}
+
+.sources-header h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.sources-badge-count {
+  background: var(--accent-soft);
+  color: var(--chip-text);
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "· M citadas" junto al contador del header */
+.sources-cited-note {
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sources-empty {
+  padding: 44px 26px;
+  text-align: center;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sources-empty-icon,
+.docs-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  margin-bottom: 14px;
+}
+
+.sources-empty p {
+  margin: 0;
+}
+
+.sources-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* --- grupos por documento (encabezado colapsable) --- */
+
+.source-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px 6px 5px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: left;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.source-group-head:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.source-group-head:active {
+  background: var(--active);
+}
+
+.source-group-icon {
+  display: inline-flex;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.source-group-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-group-count {
+  color: var(--text-3);
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.source-group-cited {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--chip-text);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.source-group-head .source-chevron {
+  margin-top: 0;
+  margin-left: auto;
+}
+
+.source-group-head[aria-expanded='true'] .source-chevron {
+  transform: rotate(180deg);
+}
+
+.source-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* --- tarjetas --- */
+
+.source-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease,
+    opacity 0.2s ease;
+  animation: fade-up 0.3s ease both;
+}
+
+/* fuentes consultadas pero no citadas en la respuesta: levemente atenuadas */
+.source-uncited {
+  opacity: 0.82;
+}
+
+.source-uncited:hover {
+  opacity: 1;
+}
+
+.source-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-soft);
+  transform: translateY(-1px);
+}
+
+.source-open,
+.source-open:hover {
+  border-color: var(--accent-border);
+}
+
+.source-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  text-align: left;
+}
+
+.source-doc-icon {
+  display: inline-flex;
+  color: var(--text-3);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.source-badge {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.source-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.source-title {
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* badges de la tarjeta: "Citada" (acento sutil) y tipo de chunk (neutro) */
+.badge-cited,
+.badge-type {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.badge-cited {
+  background: var(--accent-soft);
+  color: var(--chip-text);
+  font-weight: 600;
+}
+
+.badge-type {
+  background: var(--inset);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.source-meta {
+  display: flex;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.source-meta-item {
+  display: inline-flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.source-meta-item + .source-meta-item {
+  margin-left: 5px;
+}
+
+.source-meta-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-sep {
+  color: var(--text-3);
+}
+
+.source-chevron {
+  color: var(--text-3);
+  flex-shrink: 0;
+  margin-top: 3px;
+  transition: transform 0.2s ease;
+}
+
+.source-open .source-chevron {
+  transform: rotate(180deg);
+}
+
+/* fila de SKUs: chips monospace, clic = copiar (feedback "Copiado" breve) */
+.source-skus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0 12px 10px 37px;
+  margin-top: -3px;
+}
+
+.sku-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  cursor: copy;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.sku-chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--hover);
+}
+
+.sku-chip:active {
+  background: var(--active);
+}
+
+.sku-chip svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* feedback tras copiar */
+.sku-copied,
+.sku-copied:hover {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 45%, transparent);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+}
+
+.sku-copied svg {
+  opacity: 1;
+}
+
+/* "+N": revela el resto de SKUs de la tarjeta */
+.sku-more {
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-snippet {
+  padding: 0 14px 10px 37px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: fade-up 0.2s ease both;
+}
+
+/* barra de score de 2px con el acento */
+.source-score {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 11px 37px;
+}
+
+.score-bar {
+  flex: 1;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+/* se anima de 0 a su valor al montar vía scaleX (el valor llega inline) */
+.score-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transform-origin: 0 50%;
+  animation: score-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.score-num {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ----------------------------------------------------------------------
+   12b. Panel de documentos (gestión de la indexación)
+   --------------------------------------------------------------------
+   Slide-over desde la derecha en TODOS los anchos (misma animación que el
+   panel de fuentes en modo overlay): es una superficie de gestión
+   transitoria, no un panel persistente. Con scrim propio (clic fuera
+   cierra) y focus trap ligero. */
+
+.docs-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: min(380px, 100vw);
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  transform: translateX(105%);
+  visibility: hidden;
+  transition: transform 0.2s ease, visibility 0s linear 0.2s;
+}
+
+.docs-panel:not(.docs-closed) {
+  transform: none;
+  visibility: visible;
+  box-shadow: var(--shadow-overlay);
+  transition: transform 0.2s ease;
+}
+
+.scrim-docs {
+  display: block;
+}
+
+.docs-inner {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.docs-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 14px 9px 18px;
+}
+
+.docs-header h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.docs-close {
+  margin-left: auto;
+}
+
+.docs-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- zona de subida --- */
+.docs-upload {
+  flex-shrink: 0;
+  padding: 4px 14px 12px;
+}
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 20px 16px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface);
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.dropzone svg {
+  color: var(--text-3);
+  margin-bottom: 3px;
+  transition: color 0.15s ease, transform 0.2s ease;
+}
+
+.dropzone:hover,
+.dropzone-active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.dropzone:hover svg,
+.dropzone-active svg {
+  color: var(--accent);
+}
+
+.dropzone-active svg {
+  transform: translateY(-2px);
+}
+
+.dropzone-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.dropzone-hint {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+/* subida en curso: tarjeta con barra de progreso */
+.upload-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  animation: fade-up 0.25s ease both;
+}
+
+.upload-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.upload-file {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.upload-cancel {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--text-2);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.upload-cancel:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.upload-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+/* progreso real (XHR): el valor llega inline vía transform scaleX */
+.upload-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transform-origin: 0 50%;
+  transition: transform 0.2s ease;
+}
+
+/* fallback indeterminado: segmento que barre la pista */
+.upload-fill-indeterminate {
+  width: 40%;
+  animation: upload-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes upload-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+.upload-status {
+  font-size: 12px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* error de validación/subida, inline bajo la dropzone */
+.upload-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--red) 28%, transparent);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+  border-radius: 10px;
+  color: var(--red);
+  font-size: 12.5px;
+  line-height: 1.5;
+  animation: fade-up 0.2s ease both;
+}
+
+.upload-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* aviso: el sondeo del estado se detuvo tras fallos consecutivos */
+.docs-poll-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 14px 8px;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  background: color-mix(in srgb, var(--amber) 7%, transparent);
+  border-radius: 10px;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.docs-poll-warn button {
+  font-size: 12px;
+  font-weight: 600;
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* --- listado --- */
+.docs-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 2px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.doc-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  transition: border-color 0.15s ease, box-shadow 0.2s ease;
+  animation: fade-up 0.3s ease both;
+}
+
+.doc-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-soft);
+}
+
+/* micro-animación de éxito al pasar a "ready": anillo verde que se disipa */
+.doc-card-ready-flash {
+  animation: doc-flash 1.4s ease both;
+}
+
+@keyframes doc-flash {
+  0% {
+    border-color: color-mix(in srgb, var(--green) 55%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent);
+  }
+  100% {
+    border-color: var(--border);
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+.doc-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+}
+
+.doc-icon {
+  display: inline-flex;
+  color: var(--text-3);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.doc-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.doc-file {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.doc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.doc-sep {
+  color: var(--text-3);
+}
+
+.doc-side {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* badges de estado */
+.doc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.doc-badge-ready {
+  background: color-mix(in srgb, var(--green) 11%, transparent);
+  color: var(--green);
+}
+
+.doc-badge-processing {
+  background: var(--hover);
+  color: var(--text-2);
+}
+
+.doc-badge-processing svg {
+  color: var(--text-3);
+}
+
+.doc-badge-failed {
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+  color: var(--red);
+  transition: background 0.15s ease;
+}
+
+button.doc-badge-failed:hover {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+}
+
+/* pop del badge "Listo" recién llegado (reutiliza pop-in con muelle) */
+.doc-badge-pop {
+  animation: pop-in 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* detalle expandible del error de ingesta */
+.doc-error-detail {
+  padding: 0 12px 11px 37px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--red);
+  word-break: break-word;
+  animation: fade-up 0.2s ease both;
+}
+
+/* error puntual de una acción de fila (p. ej. DELETE fallido) */
+.doc-row-error {
+  padding: 0 12px 10px 37px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--red);
+  animation: fade-up 0.2s ease both;
+}
+
+/* acciones: papelera / candado / confirmación en dos pasos */
+.doc-action-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: var(--text-3);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.doc-action-btn:hover {
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+  color: var(--red);
+}
+
+.doc-lock {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+}
+
+.doc-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  animation: fade-in 0.15s ease both;
+}
+
+.doc-confirm-btn {
+  padding: 3px 10px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.doc-confirm-yes {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+}
+
+.doc-confirm-yes:hover {
+  background: color-mix(in srgb, var(--red) 17%, transparent);
+}
+
+.doc-confirm-no {
+  color: var(--text-2);
+}
+
+.doc-confirm-no:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* estados vacío / no disponible + skeleton */
+.docs-empty {
+  padding: 34px 26px;
+  text-align: center;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.docs-empty p {
+  margin: 0 0 6px;
+}
+
+.docs-empty-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.docs-retry-btn {
+  margin-top: 10px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  box-shadow: var(--shadow-soft);
+  transition: border-color 0.15s ease;
+}
+
+.docs-retry-btn:hover {
+  border-color: var(--accent-border);
+}
+
+.docs-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 14px;
+}
+
+.skel-doc {
+  height: 56px;
+  border-radius: 12px;
+}
+
+/* ----------------------------------------------------------------------
+   13. Responsive
+   ---------------------------------------------------------------------- */
+
+/* panel de fuentes: slide-over con overlay en pantallas medianas */
+@media (max-width: 1100px) {
+  .sources-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    width: 320px;
+    border-left: 1px solid var(--border);
+    transform: translateX(105%);
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
+  }
+
+  .sources-panel:not(.sources-closed) {
+    transform: none;
+    visibility: visible;
+    box-shadow: var(--shadow-overlay);
+    transition: transform 0.2s ease;
+  }
+
+  .scrim-right {
+    display: block;
+  }
+}
+
+/* sidebar: slide-over con overlay en pantallas estrechas */
+@media (max-width: 820px) {
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 40;
+    width: min(85vw, 320px);
+    border-right: 1px solid var(--border);
+    transform: translateX(-105%);
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
+  }
+
+  .sidebar:not(.sidebar-closed) {
+    transform: none;
+    visibility: visible;
+    box-shadow: var(--shadow-overlay);
+    transition: transform 0.2s ease;
+  }
+
+  .sidebar-inner {
+    width: 100%;
+    padding-top: calc(14px + env(safe-area-inset-top));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left));
+  }
+
+  .scrim-left {
+    display: block;
+  }
+
+  .msg-user-bubble {
+    max-width: 90%;
+  }
+
+  .welcome h1 {
+    white-space: normal;
+    font-size: 23px;
+  }
+
+  .example-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .composer-hint {
+    display: none;
+  }
+
+  /* columna de mensajes a 16px + zonas seguras laterales en landscape */
+  .message-list {
+    padding-left: calc(16px + env(safe-area-inset-left));
+    padding-right: calc(16px + env(safe-area-inset-right));
+  }
+
+  .composer-area {
+    padding-left: calc(16px + env(safe-area-inset-left));
+    padding-right: calc(16px + env(safe-area-inset-right));
+  }
+
+  /* iOS hace zoom automático al enfocar campos con fuente < 16px */
+  .composer textarea,
+  .unlock-input {
+    font-size: 16px;
+  }
+}
+
+/* paneles overlay laterales: respetan la zona segura superior/derecha */
+@media (max-width: 1100px) {
+  .sources-inner {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
+.docs-inner {
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* ----------------------------------------------------------------------
+   13b. Bottom sheets en móvil (≤600px): fuentes y documentos suben desde
+        abajo con asa; el slide-over lateral se mantiene en tablet.
+   ---------------------------------------------------------------------- */
+
+/* asa/grabber: solo visible en modo bottom sheet */
+.sheet-grabber {
+  display: none;
+}
+
+@media (max-width: 600px) {
+  .sources-panel,
+  .docs-panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: auto;
+    max-height: 85vh;
+    max-height: 85dvh;
+    display: flex;
+    flex-direction: column;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    overflow: hidden;
+    transform: translateY(100%);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .sources-inner,
+  .docs-inner {
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    flex: 1 1 auto;
+    padding-top: 0;
+    padding-right: 0;
+  }
+
+  .sheet-grabber {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    height: 24px;
+    padding-top: 6px;
+    touch-action: none;
+    cursor: grab;
+  }
+
+  .sheet-grabber::before {
+    content: '';
+    width: 40px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--border-strong);
+  }
+
+  .sources-header {
+    padding-top: 6px;
+  }
+
+  .docs-header {
+    padding-top: 4px;
+  }
+
+  /* composer a todo el ancho con radio algo menor */
+  .composer {
+    border-radius: 18px;
+  }
+
+  .composer-area {
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+  }
+}
+
+/* ----------------------------------------------------------------------
+   13c. Táctil: targets ≥44px y estados :active (hover no existe en touch)
+   ---------------------------------------------------------------------- */
+
+/* estados :active visibles en todos los controles interactivos */
+.icon-btn:active,
+.feedback-btn:active:not(:disabled),
+.doc-action-btn:active,
+.reasoning-toggle:active,
+.upload-cancel:active,
+.doc-confirm-no:active {
+  background: var(--active);
+  color: var(--text);
+}
+
+.session-item:active {
+  background: var(--active);
+}
+
+.new-chat-btn:active,
+.docs-retry-btn:active {
+  border-color: var(--accent-border);
+  background: var(--hover);
+}
+
+.sidebar-docs-btn:active {
+  background: var(--active);
+  color: var(--text);
+}
+
+.sources-count-btn:active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--chip-text);
+}
+
+.citation-chip:active {
+  background: var(--accent-soft-2);
+}
+
+.example-card:active:not(:disabled) {
+  border-color: var(--accent-border);
+  background: var(--hover);
+}
+
+.source-head:active {
+  background: var(--hover);
+}
+
+.dropzone:active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.doc-confirm-yes:active {
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+}
+
+button.doc-badge-failed:active {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+}
+
+.unlock-submit:active:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+/* targets táctiles ≥44px sin agrandar lo visual: el área de toque se
+   extiende con un pseudo-elemento transparente centrado */
+@media (pointer: coarse) {
+  .icon-btn,
+  .feedback-btn,
+  .doc-action-btn,
+  .send-btn,
+  .sources-count-btn,
+  .reasoning-toggle,
+  .upload-cancel,
+  .doc-confirm-btn,
+  button.doc-badge-failed,
+  .citation-chip,
+  .docs-retry-btn,
+  .docs-poll-warn button {
+    position: relative;
+  }
+
+  .icon-btn::after,
+  .feedback-btn::after,
+  .doc-action-btn::after,
+  .send-btn::after,
+  .sources-count-btn::after,
+  .reasoning-toggle::after,
+  .upload-cancel::after,
+  .doc-confirm-btn::after,
+  button.doc-badge-failed::after,
+  .citation-chip::after,
+  .docs-retry-btn::after,
+  .docs-poll-warn button::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+
+  /* filas de lista: crecen a ≥44px vía padding (siguen viéndose iguales) */
+  .session-item {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
+  /* encabezado de grupo de fuentes y chips de SKU: targets más generosos */
+  .source-group-head {
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+
+  .sku-chip {
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+
+  .sidebar-docs-btn,
+  .new-chat-btn {
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+}
+
+/* ----------------------------------------------------------------------
+   14. Movimiento reducido
+   ---------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0s !important; /* sin staggers que retrasen el contenido */
+    transition-duration: 0.01ms !important;
+  }
+
+  .caret {
+    animation: none;
+    opacity: 1;
+  }
+
+  .spin {
+    animation: none;
+  }
+
+  /* el velo del borde de escritura no es una animación, pero sí movimiento
+     percibido: fuera, el texto aparece nítido de inmediato */
+  .stream-caret::before {
+    content: none;
+  }
+
+  .shimmer-text {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--text-2);
+  }
+
+  .skeleton::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  .dot-green::after {
+    content: none;
+  }
+
+  /* sin auto-salida: el "Gracias" queda visible en vez de desvanecerse */
+  .feedback-thanks {
+    animation: none;
+  }
+
+  .msg,
+  .msg-streaming .md > *,
+  .msg-streaming .md li,
+  .msg-streaming .md tbody tr,
+  .reasoning-live,
+  .reasoning-toggle,
+  .reasoning-step,
+  .score-fill,
+  .send-ready,
+  .send-stop,
+  .example-card,
+  .welcome-logo,
+  .welcome,
+  .source-card,
+  .source-snippet,
+  .chat-skeleton,
+  .doc-card,
+  .doc-card-ready-flash,
+  .doc-badge-pop,
+  .doc-confirm,
+  .doc-error-detail,
+  .doc-row-error,
+  .upload-progress,
+  .upload-error {
+    animation: none;
+  }
+
+  /* barra indeterminada: sin barrido, pista llena atenuada */
+  .upload-fill-indeterminate {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
+
+  /* la dropzone no "salta" al arrastrar encima */
+  .dropzone-active svg {
+    transform: none;
+  }
+}
+
+/* ----------------------------------------------------------------------
+   15. Pantalla de desbloqueo (gate de acceso por clave, solo despliegues
+       con APP_ACCESS_KEY; en dev local nunca aparece)
+   ---------------------------------------------------------------------- */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.unlock-screen {
+  min-height: 100vh; /* fallback para navegadores sin dvh */
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  padding: calc(24px + env(safe-area-inset-top)) calc(24px + env(safe-area-inset-right))
+    calc(24px + env(safe-area-inset-bottom)) calc(24px + env(safe-area-inset-left));
+  background: var(--bg);
+}
+
+.unlock-card {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 28px 26px 26px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-float);
+}
+
+.unlock-brand {
+  padding: 0 0 2px;
+  justify-content: center;
+}
+
+.unlock-hint {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  text-align: center;
+}
+
+.unlock-input {
+  width: 100%;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--inset);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  outline: none;
+}
+
+.unlock-input:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-soft-2);
+}
+
+.unlock-error {
+  margin: -4px 0 0;
+  font-size: 12.5px;
+  color: var(--red);
+  text-align: center;
+}
+
+.unlock-submit {
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.unlock-submit:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.unlock-submit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

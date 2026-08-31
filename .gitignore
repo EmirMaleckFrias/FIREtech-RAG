@@ -1,0 +1,29 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Secretos (el .env.example SÍ se versiona)
+backend/.env
+.env
+.env*
+!backend/.env.example
+!.env.example
+backend/.supabase_db_password.txt
+backend/.app_access_key.txt
+
+# Datos del negocio: catálogos con costos internos confidenciales.
+# No se versionan; la ingesta los espera en data/raw (PDF) y data/raw_xlsx (Excel).
+data/
+
+# Vercel
+.vercel
+
+# SO / IDE
+.DS_Store
+Thumbs.db
+.vscode/

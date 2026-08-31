@@ -1,0 +1,21 @@
+# Dependencias de la función serverless (api/index.py → backend/app).
+# Igual que backend/requirements.txt EXCEPTO:
+#   - sin uvicorn:   el runtime Python de Vercel sirve la app ASGI él mismo.
+#   - sin fastembed: arrastra onnxruntime (~200 MB) y reventaría el límite de
+#     250 MB de la función. app/services/qdrant.py ya trae guard de import y
+#     cae a búsqueda dense-only sin romper (verificado con import-hook).
+# openpyxl SÍ es necesario: documents.py importa app.ingest.pipeline →
+# parse_xlsx.py, que hace `import openpyxl` a nivel de módulo (y generic.py
+# lo usa para .xlsx subidos). pdfplumber ídem (parse.py, nivel de módulo).
+fastapi>=0.115
+pydantic>=2.9
+pydantic-settings>=2.6
+openai>=1.55
+qdrant-client>=1.12
+pdfplumber>=0.11
+openpyxl>=3.1
+supabase>=2.10
+httpx>=0.27
+python-dotenv>=1.0
+sse-starlette>=2.1
+python-multipart>=0.0.9

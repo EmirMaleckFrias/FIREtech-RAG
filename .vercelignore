@@ -1,0 +1,28 @@
+# Lo que NO se sube a Vercel. La función Python solo necesita backend/app +
+# api/ (el builder de Python empaqueta todos los archivos subidos, así que
+# esto también controla el tamaño de la lambda). El frontend solo necesita
+# frontend/ sin node_modules ni dist (se reconstruye con buildCommand).
+
+# Datos y documentación (pesados, irrelevantes en runtime)
+data/
+docs/
+evals/
+infra/
+supabase/
+scratch/
+
+# Binarios de catálogo en cualquier ruta
+*.pdf
+*.xlsx
+
+# Entornos y artefactos locales
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+
+# Secretos: JAMÁS al bundle (las env se configuran en Vercel)
+backend/.env
+backend/.supabase_db_password.txt
+.env

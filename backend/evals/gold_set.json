@@ -1,0 +1,1458 @@
+{
+  "meta": {
+    "generated_at": "2026-08-29T21:54:51+00:00",
+    "seed": 20260829,
+    "paraphrase_model": "gpt-5.4-mini",
+    "total": 60,
+    "by_type": {
+      "sku_directo": 20,
+      "parafraseo_natural": 30,
+      "rango_familia": 10
+    },
+    "by_file": {
+      "Catalogo_Aleum.pdf": 14,
+      "Catalogo_Croker__2.pdf": 4,
+      "Catalogo_Reliable_1.pdf": 7,
+      "Catalogo_Reliable_2.pdf": 10,
+      "Catalogo_Reliable_3.pdf": 7,
+      "Notifier_.pdf": 18
+    }
+  },
+  "questions": [
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienen la válvula mariposa ranurada de 8\" de hierro dúctil, 300 PSI, normalmente abierta con doble switch de supervisión?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "59b71390-1f2a-4765-b884-04bb13179d66",
+      "ref_sku": "HPGT800",
+      "ref_page": 12,
+      "ref_product": "8\" Ductile Butterfly Valve, Grooved Ends, HPGT, 300PSI Normally Open with Supervisory Switch UL/FM",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "HPGT800"
+      ],
+      "accept_ids": [
+        "629aa3d1-9797-41b6-9a2d-d262a7ab3f31",
+        "59b71390-1f2a-4765-b884-04bb13179d66"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "las especificaciones técnicas",
+      "qid": "q001",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienen la válvula de compuerta ALEUM CO. de 4\" NRS con extremos de junta mecánica y 300 PSI?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "77ae4c3f-e52f-4914-8b5d-b638bf0f27ae",
+      "ref_sku": "ANRS3-MM-040",
+      "ref_page": 36,
+      "ref_product": "4\" ANRS-MM, NRS Gate Valve Mechanical Joint Ends; 300PSI; UL/FM",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "ANRS3-MM-040"
+      ],
+      "accept_ids": [
+        "77ae4c3f-e52f-4914-8b5d-b638bf0f27ae",
+        "8cac5e6c-4ba3-466f-a181-00100f073f99"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "las especificaciones técnicas",
+      "qid": "q002",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan la brida partida de 10\" ALEUM CO. Class 150, 300 PSI?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "218f4f16-a4a2-4ae1-999b-79f935d6fc0f",
+      "ref_sku": "ALGF150-1000",
+      "ref_page": 54,
+      "ref_product": "10\" Split Flange Class 150; 300PSI UL/FM",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "ALGF150-1000"
+      ],
+      "accept_ids": [
+        "1aee15a9-3764-4608-bfd1-a48ce32c4b20",
+        "218f4f16-a4a2-4ae1-999b-79f935d6fc0f"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q003",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "Me cotizas una tee mecánica ranurada de 5 x 3 para obra?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "ee87bd93-d983-4baf-962c-0ff82f182adc",
+      "ref_sku": "ALGMT-5300",
+      "ref_page": 90,
+      "ref_product": "5\" x 3\" Mechanical Tee, Grooved Outlet, UL/FM, 300PSI, EPDM Gasket",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "ALGMT-5300"
+      ],
+      "accept_ids": [
+        "e31272d0-1b85-4eaa-bef3-33bb7d0be70a",
+        "ee87bd93-d983-4baf-962c-0ff82f182adc"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q004",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Me cotizas el reductor excéntrico ranurado 4 x 1 1/2 de ALEUM CO. para obra?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "da2ba1a8-fb46-4407-90d3-530900cdf6b9",
+      "ref_sku": "ALEGR-4150-C",
+      "ref_page": 114,
+      "ref_product": "4 x 1 ½\" Grooved Eccentric Reducer, UL/FM, 300PSI",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "ALEGR-4150-C"
+      ],
+      "accept_ids": [
+        "f86a52a0-020d-4ce2-8641-f0b28efeb7a6",
+        "da2ba1a8-fb46-4407-90d3-530900cdf6b9"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q005",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienen el gabinete contra incendios de acero inoxidable de montaje superficial, con puerta de vidrio completo y capacidad para manguera de 1 1/2\" y extintor de 5 lb?",
+      "source_file": "Catalogo_Croker__2.pdf",
+      "chunk_id": "bc8687fe-4d8d-49ed-acd0-4ea97a4b1f5c",
+      "ref_sku": "1018",
+      "ref_page": 1,
+      "ref_product": "Stainless Steel Fire Cabinets",
+      "brand": "Croker",
+      "accept_skus": [
+        "1018"
+      ],
+      "accept_ids": [
+        "bc8687fe-4d8d-49ed-acd0-4ea97a4b1f5c"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "las especificaciones técnicas",
+      "qid": "q006",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Cuánto cuesta la válvula angular Croker de 1.5\" para bomberos?",
+      "source_file": "Catalogo_Croker__2.pdf",
+      "chunk_id": "0348ed6b-3919-4e99-b2b5-d5eb47bfe597",
+      "ref_sku": "5030",
+      "ref_page": 2,
+      "ref_product": "1.5\" Angle Fire Department Valve 300lbs",
+      "brand": "Croker",
+      "accept_skus": [
+        "5030"
+      ],
+      "accept_ids": [
+        "0348ed6b-3919-4e99-b2b5-d5eb47bfe597"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "el precio",
+      "qid": "q007",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan escudete empotrado de 1/2\" blanco, de 2 piezas?",
+      "source_file": "Catalogo_Reliable_1.pdf",
+      "chunk_id": "c4d2ebd2-3491-46fc-942c-03e1b6bcdbde",
+      "ref_sku": "6800640001",
+      "ref_page": 35,
+      "ref_product": "RASCO/Reliable Escutcheon, 2-piece, Recessed F1, 1/2″, White",
+      "brand": "Reliable",
+      "accept_skus": [
+        "6800640001",
+        "GF1W"
+      ],
+      "accept_ids": [
+        "c4d2ebd2-3491-46fc-942c-03e1b6bcdbde"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q008",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan el rociador colgante Reliable de 1/2\" en bronce, K5.6?",
+      "source_file": "Catalogo_Reliable_1.pdf",
+      "chunk_id": "8ebd86dc-8f2b-4e46-9c5d-9e7e55425129",
+      "ref_sku": "BG171132S9",
+      "ref_page": 49,
+      "ref_product": "Fire Sprinkler Head F1FR56P5B3N Pendent K5.6 (80) Threads 1/2\" (15mm) 300psi RA2614",
+      "brand": "Reliable",
+      "accept_skus": [
+        "BG171132S9",
+        "F1FR56P5B3N"
+      ],
+      "accept_ids": [
+        "8ebd86dc-8f2b-4e46-9c5d-9e7e55425129"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q009",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan el rociador Reliable vertical sidewall de 1/2\" en blanco, K5.6, 175°F?",
+      "source_file": "Catalogo_Reliable_1.pdf",
+      "chunk_id": "cc774022-1bfe-428d-9511-65ef1ee8f3c3",
+      "ref_sku": "BE178732S9",
+      "ref_page": 68,
+      "ref_product": "Fire Sprinkler Head F1FR56V5WN Vertical Sidewall K5.6 (80) Threads 1/2\" RA1485",
+      "brand": "Reliable",
+      "accept_skus": [
+        "BE178732S9",
+        "F1FR56V5WN"
+      ],
+      "accept_ids": [
+        "cc774022-1bfe-428d-9511-65ef1ee8f3c3"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q010",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienen Llave, W14? ¿Qué precio tiene?",
+      "source_file": "Catalogo_Reliable_1.pdf",
+      "chunk_id": "c5ee2613-3513-4a4d-9e94-f605411fb8dc",
+      "ref_sku": "6880108100",
+      "ref_page": 93,
+      "ref_product": "Wrench, W14",
+      "brand": "Reliable",
+      "accept_skus": [
+        "6880108100",
+        "W14"
+      ],
+      "accept_ids": [
+        "c5ee2613-3513-4a4d-9e94-f605411fb8dc"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q011",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Cuál es el precio del acoplamiento reductor ranurado de 8 x 6 pintado con anillo de acero inoxidable?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "ea7feb2b-8568-4f48-b021-41223c06a124",
+      "ref_sku": "7R99000571",
+      "ref_page": 20,
+      "ref_product": "86RCR RASCO, #RCD1 8″ x 6″ Reducing Coupling with Stainless Steel Ring",
+      "brand": "Reliable",
+      "accept_skus": [
+        "7R99000571",
+        "86RCR"
+      ],
+      "accept_ids": [
+        "9a17f6ac-b469-4c44-b44e-de59dfa01b83",
+        "ea7feb2b-8568-4f48-b021-41223c06a124"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "el precio",
+      "qid": "q012",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienes el codo ranurado de 90° de radio corto galvanizado de 12 pulgadas?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "4c3b7d02-78b9-417e-8df2-33f14e217ced",
+      "ref_sku": "7R99000350",
+      "ref_page": 33,
+      "ref_product": "1290SRRG RASCO, #E90S1 12″ Grooved Elbow 90° Short Radius Galvanized",
+      "brand": "Reliable",
+      "accept_skus": [
+        "1290SRRG",
+        "7R99000350"
+      ],
+      "accept_ids": [
+        "695b51b5-7f37-4c42-80cc-f411296949be",
+        "4c3b7d02-78b9-417e-8df2-33f14e217ced"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "las especificaciones técnicas",
+      "qid": "q013",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan tee mecánica roscada galvanizada de 2 x 1 1/4?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "53942694-35bd-4b7e-8a34-eeeae4b08c8a",
+      "ref_sku": "7R99000419",
+      "ref_page": 65,
+      "ref_product": "2125MTTRG RASCO, #MTT2, 2″ x 1 1/4″ Threaded Mechanical Tee, Galvanized",
+      "brand": "Reliable",
+      "accept_skus": [
+        "2125MTTRG",
+        "7R99000419"
+      ],
+      "accept_ids": [
+        "4cd4564b-a8cf-4373-beee-8b7abc356c4a",
+        "53942694-35bd-4b7e-8a34-eeeae4b08c8a"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q014",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Me cotizas una cruz ranurada de 4 pulgadas galvanizada para la obra?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "bffa8bca-3ed7-4604-a3c4-3b7572a2c86b",
+      "ref_sku": "7R99000388",
+      "ref_page": 94,
+      "ref_product": "4CRSRG RASCO, CRS1 4″ Grooved Cross Short Radius, Galvanized",
+      "brand": "Reliable",
+      "accept_skus": [
+        "4CRSRG",
+        "7R99000388"
+      ],
+      "accept_ids": [
+        "9c449fbe-0c21-4e91-a7fd-679c23fc7d42",
+        "bffa8bca-3ed7-4604-a3c4-3b7572a2c86b"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q015",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienen codo CPVC de 45° de 3 pulgadas, tipo socket?",
+      "source_file": "Catalogo_Reliable_3.pdf",
+      "chunk_id": "28fa12dd-4907-4c63-81bf-49f6430881bc",
+      "ref_sku": "7103121200",
+      "ref_page": 8,
+      "ref_product": "45° Elbow 3″",
+      "brand": "Reliable",
+      "accept_skus": [
+        "7103121200",
+        "P345"
+      ],
+      "accept_ids": [
+        "377bf8a9-f2a0-4181-994c-8159da9393c4",
+        "28fa12dd-4907-4c63-81bf-49f6430881bc"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "las especificaciones técnicas",
+      "qid": "q016",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Me cotizas la cruz reductora CPVC de 1 x 1 x 3/4 x 3/4 para una obra?",
+      "source_file": "Catalogo_Reliable_3.pdf",
+      "chunk_id": "7cb24730-8875-4a5f-8c52-12425303a276",
+      "ref_sku": "7173040403",
+      "ref_page": 53,
+      "ref_product": "Cross Reducing 1″ x 1″ x 3/4″ x 3/4″",
+      "brand": "Reliable",
+      "accept_skus": [
+        "7173040403",
+        "P117575CRS"
+      ],
+      "accept_ids": [
+        "5c8ac2f5-a58f-4174-a8c9-48f382b06765",
+        "7cb24730-8875-4a5f-8c52-12425303a276"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q017",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Cuánto cuesta el cemento de un paso Reliable de cuarto de galón?",
+      "source_file": "Catalogo_Reliable_3.pdf",
+      "chunk_id": "249afcdc-9e77-4a6d-84ef-71d872af1dc5",
+      "ref_sku": "7175050001",
+      "ref_page": 54,
+      "ref_product": "One-Step Cement – Qrt",
+      "brand": "Reliable",
+      "accept_skus": [
+        "1STEPQT",
+        "7175050001"
+      ],
+      "accept_ids": [
+        "9540da1c-0bcd-4c34-99f7-44ddd1bbe1c3",
+        "249afcdc-9e77-4a6d-84ef-71d872af1dc5"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "el precio",
+      "qid": "q018",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienes el codo CPVC de 3/4\" a 90° para tubería de muestreo, paquete de 20?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "10673fec-e498-4111-829c-c04a9b1ac0cf",
+      "ref_sku": "VP-ELB-90",
+      "ref_page": 2,
+      "ref_product": "3/4 Inch 90 Degree CPVC Elbow, Sampling Pipe, Pack of 20",
+      "brand": "VESDA",
+      "accept_skus": [
+        "VP-ELB-90"
+      ],
+      "accept_ids": [
+        "10673fec-e498-4111-829c-c04a9b1ac0cf"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "las especificaciones técnicas",
+      "qid": "q019",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan tees CPVC de 3/4\" para red de muestreo ASD?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "ec72f02e-78b6-44dd-9feb-fe25a285cdab",
+      "ref_sku": "VP-TEE",
+      "ref_page": 3,
+      "ref_product": "3/4″ CPVC Pipe Tees (pack of 15) for aspirating smoke detection (ASD) sampling networks",
+      "brand": "VESDA",
+      "accept_skus": [
+        "VP-TEE"
+      ],
+      "accept_ids": [
+        "ec72f02e-78b6-44dd-9feb-fe25a285cdab"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q020",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Tienen el espaciador transparente de policarbonato Edwards Signaling para la serie Stopper II, con 2 pulgadas de profundidad y para conduit de 1/2 o 3/4?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "763712ca-e631-4919-94ee-b2b0d21683b0",
+      "ref_sku": "STI3100",
+      "ref_page": 6,
+      "ref_product": "Clear Conduit Spacer for Stopper II® Series",
+      "brand": "Edwards Signaling",
+      "accept_skus": [
+        "STI3100"
+      ],
+      "accept_ids": [
+        "763712ca-e631-4919-94ee-b2b0d21683b0"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "las especificaciones técnicas",
+      "qid": "q021",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Cuánto cuesta el gabinete Notifier para chasis CHS-6?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "e8191793-ba06-431c-829a-8ee255a504fa",
+      "ref_sku": "BB-25",
+      "ref_page": 6,
+      "ref_product": "Notifier BB-25, Cabinet for CHS-6 Chassis",
+      "brand": "Notifier",
+      "accept_skus": [
+        "BB-25"
+      ],
+      "accept_ids": [
+        "e8191793-ba06-431c-829a-8ee255a504fa"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "el precio",
+      "qid": "q022",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Me cotizas la cortadora VESDA para tubería CPVC de hasta 1-1/2”?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "14dfd4f3-d0e0-4b94-ba89-4f19b542b106",
+      "ref_sku": "VP-CUTTER",
+      "ref_page": 7,
+      "ref_product": "Vesda VP-CUTTER, CPVC Pipe Cutters, up to 1-1/2″ Pipe in diameter. For VESDA aspirating smoke detection pipe preparation.",
+      "brand": "VESDA",
+      "accept_skus": [
+        "VP-CUTTER"
+      ],
+      "accept_ids": [
+        "14dfd4f3-d0e0-4b94-ba89-4f19b542b106"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q023",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Cuánto cuesta la estación manual direccionable de doble acción bilingüe para incendio?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "1b299a09-d6a1-4c66-a02e-3a6d8089b651",
+      "ref_sku": "NBG-12LXSP-BP",
+      "ref_page": 30,
+      "ref_product": "NBG-12LXSP Addressable dual-action Manual Pull Station. Spanish/English labelled version. Can be surface mounted (with SB-10 or SB-I/O) or semi-flush mounted. Includes key locking feature.For use indoors in a dry location. Bulk Pack of 10.",
+      "brand": "Notifier",
+      "accept_skus": [
+        "NBG-12LXSP-BP"
+      ],
+      "accept_ids": [
+        "1b299a09-d6a1-4c66-a02e-3a6d8089b651"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "el precio",
+      "qid": "q024",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan estación manual inalámbrica en español para sistema contra incendio?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "61db58d6-1794-4f57-8554-0ad71714f132",
+      "ref_sku": "NBG-12WLSP",
+      "ref_page": 40,
+      "ref_product": "WIRELESS PULL STATION - SPANISH",
+      "brand": "Notifier",
+      "accept_skus": [
+        "NBG-12WLSP"
+      ],
+      "accept_ids": [
+        "61db58d6-1794-4f57-8554-0ad71714f132"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q025",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan baterías de 12 V y 18 Ah para sistema contra incendio?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "678c9079-b1a5-4ac1-ac97-803debe0eff1",
+      "ref_sku": "BAT-12180-BP",
+      "ref_page": 53,
+      "ref_product": "TWO (2) BAT-12180 (12V, 18AH)",
+      "brand": "Notifier",
+      "accept_skus": [
+        "BAT-12180-BP"
+      ],
+      "accept_ids": [
+        "678c9079-b1a5-4ac1-ac97-803debe0eff1"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q026",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Me cotizas la tarjeta de reemplazo para panel de control NFS-320E de 240 VAC?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "bdc72f72-d684-4db3-bbeb-ea952033d722",
+      "ref_sku": "NFS-320-RBE",
+      "ref_page": 142,
+      "ref_product": "NFS-320-RBE: Replacement Board for NFS-320E, 240 VAC",
+      "brand": "Notifier",
+      "accept_skus": [
+        "NFS-320-RBE"
+      ],
+      "accept_ids": [
+        "bdc72f72-d684-4db3-bbeb-ea952033d722"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q027",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Cuánto cuesta el subrack VE con pantalla remota y sin relés?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "0adf5d95-5a2c-4a38-845f-3dd21ee7598d",
+      "ref_sku": "VEK-A10-0",
+      "ref_page": 223,
+      "ref_product": "VE SUB-RACK REMOTE DISPLAY NO RELAYS",
+      "brand": "VESDA",
+      "accept_skus": [
+        "VEK-A10-0"
+      ],
+      "accept_ids": [
+        "0adf5d95-5a2c-4a38-845f-3dd21ee7598d"
+      ],
+      "gen_include_brand": false,
+      "gen_aspect": "el precio",
+      "qid": "q028",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Manejan la sirena estroboscópica LED de baja frecuencia System Sensor para montaje en pared, roja y con leyenda FIRE?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "ef71a26b-ddaa-45c5-8984-6e2b34de1456",
+      "ref_sku": "P2RLED-LF",
+      "ref_page": 245,
+      "ref_product": "LED Low Frequency Sounder Strobe; Wall; Red; \"FIRE\"",
+      "brand": "System Sensor",
+      "accept_skus": [
+        "P2RLED-LF"
+      ],
+      "accept_ids": [
+        "ef71a26b-ddaa-45c5-8984-6e2b34de1456"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "la disponibilidad / si lo manejan",
+      "qid": "q029",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "parafraseo_natural",
+      "question": "¿Me cotizas el retenedor de puerta RSG empotrado, recubierto en polvo y cromo para una obra?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "e7a0e844-43e5-4226-9c36-aebfc6504e77",
+      "ref_sku": "DH24120WPC",
+      "ref_page": 246,
+      "ref_product": "RECESSED, POWDER COATED, CHROME",
+      "brand": "RSG",
+      "accept_skus": [
+        "DH24120WPC"
+      ],
+      "accept_ids": [
+        "e7a0e844-43e5-4226-9c36-aebfc6504e77"
+      ],
+      "gen_include_brand": true,
+      "gen_aspect": "una cotización para una obra",
+      "qid": "q030",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿Qué medidas hay de Válvula de Mariposa / GBTS / Extremos Ranurados?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "ed98d0b1-5785-474b-94a1-6ea5be96bec8",
+      "ref_sku": "GBTS-300-200",
+      "ref_page": 4,
+      "ref_product": "Butterfly Valve / GBTS / Grooved Ends",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "GBTS-300-1000",
+        "GBTS-300-1200",
+        "GBTS-300-200",
+        "GBTS-300-500"
+      ],
+      "accept_ids": [
+        "1bfb4ffb-9f4a-42f1-9434-c3fa7346aeda",
+        "3670051a-5846-4764-aaf9-394602db7970",
+        "7000a749-7593-4d9d-b505-4112720ea28b",
+        "871cd1ff-3506-4905-a503-b0f2e3ad2cbd",
+        "ed98d0b1-5785-474b-94a1-6ea5be96bec8"
+      ],
+      "qid": "q031",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿Qué opciones de Válvula de Mariposa / HPGT / Extremos Ranurados manejan?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "629aa3d1-9797-41b6-9a2d-d262a7ab3f31",
+      "ref_sku": "HPGT250",
+      "ref_page": 11,
+      "ref_product": "Butterfly Valve / HPGT / Grooved Ends",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "HPGT250",
+        "HPGT300",
+        "HPGT400",
+        "HPGT600",
+        "HPGT800"
+      ],
+      "accept_ids": [
+        "39932951-1556-4a8c-80e4-5178f27ceb56",
+        "59b71390-1f2a-4765-b884-04bb13179d66",
+        "629aa3d1-9797-41b6-9a2d-d262a7ab3f31",
+        "7ad5beeb-8482-45b3-a2ab-31c98ba3d5f1",
+        "b237ff5a-17cf-4b9b-8a56-e16b21c6a783",
+        "cfd47811-774e-4016-8cc4-0655d932689d"
+      ],
+      "qid": "q032",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿Qué Válvula Check / Columpio / Ranurado tienen en catálogo y en qué medidas?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "71d18667-d9c5-46af-a2fb-391a3e7b8649",
+      "ref_sku": "DGC200",
+      "ref_page": 20,
+      "ref_product": "Check Valve / Swing / Grooved",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "DGC-300-050",
+        "DGC-300-100",
+        "DGC-300-120",
+        "DGC200",
+        "DGC250",
+        "DGC300",
+        "DGC400",
+        "DGC600",
+        "DGC800"
+      ],
+      "accept_ids": [
+        "243836f4-a0c5-46d2-a554-59742bee20fc",
+        "28ce3305-cbf5-4ce5-971e-57c400711b9f",
+        "57018aac-b12d-492d-a9c7-5ae6578ef31b",
+        "6b943336-1eef-4dbf-b460-ddb954463b64",
+        "71d18667-d9c5-46af-a2fb-391a3e7b8649",
+        "792ca459-f0e0-4153-95f8-ae1779d644b8",
+        "9e0a31e1-1dc6-4e3a-bb70-34b249d26c35",
+        "e3c79c52-b0b6-49c7-b923-ab976599ddf1",
+        "ee8497de-7f8c-4fa9-9995-2612cb84d3ef",
+        "fd960910-2feb-4411-94a6-ec98ed2bfd53"
+      ],
+      "qid": "q033",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "Pásame la lista de medidas y precios de Válvula Check / Riser (Montante) / Columpio / con Resorte / Ranurado",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "983edfec-0f03-4fd1-a41a-c120a716b8e1",
+      "ref_sku": "DGCR200",
+      "ref_page": 21,
+      "ref_product": "Check Valve / Riser / Swing / Spring Loaded / Grooved",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "DGCR200",
+        "DGCR250",
+        "DGCR300",
+        "DGCR400",
+        "DGCR600",
+        "DGCR800"
+      ],
+      "accept_ids": [
+        "1363e310-9c5f-4b47-873c-7ded1f3b9418",
+        "2cb7008c-6505-4ac9-8d19-c1e63fba0486",
+        "88b6224e-4d32-4ba7-981b-6519e6827596",
+        "983edfec-0f03-4fd1-a41a-c120a716b8e1",
+        "9b856c3a-228f-4f0c-bd17-b2f64e2bc847",
+        "c2a78940-1498-471c-be3b-4c526e20e3d0",
+        "ddc2504c-ad4f-4d96-a4ad-5e25c4ab06a0"
+      ],
+      "qid": "q034",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿En qué tamaños viene Acoplamientos / Accesorios / Brida Partida de ALEUM CO.?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "1aee15a9-3764-4608-bfd1-a48ce32c4b20",
+      "ref_sku": "ALGF150-200",
+      "ref_page": 51,
+      "ref_product": "Couplings / Fittings / Split Flange",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "ALGF150-1000",
+        "ALGF150-1200",
+        "ALGF150-200",
+        "ALGF150-250",
+        "ALGF150-300",
+        "ALGF150-400",
+        "ALGF150-500",
+        "ALGF150-600",
+        "ALGF150-800"
+      ],
+      "accept_ids": [
+        "1aee15a9-3764-4608-bfd1-a48ce32c4b20",
+        "218f4f16-a4a2-4ae1-999b-79f935d6fc0f",
+        "29fae156-af79-4bf8-8172-0740712ad073",
+        "454afc79-d562-4728-9bee-8c02d85fb3e3",
+        "624b6294-d1b8-47de-ae80-9adec2b69fd4",
+        "6bd1e9cf-2b6a-4a5a-a8ab-96fea6753c47",
+        "7e86eebf-b636-4ff5-9a0c-09286e3ce954",
+        "9a80fa72-339b-4936-b621-c07893b88318",
+        "e3b87ca3-7112-46ed-a845-77b14d383ff8",
+        "f5705836-8708-42c4-9f1f-f5d06d9fbb1f"
+      ],
+      "qid": "q035",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿En qué tamaños viene Codo de ° de Reliable?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "52e59dd2-8db5-4f0f-a723-423abd09dde4",
+      "ref_sku": "7R99000129",
+      "ref_page": 42,
+      "ref_product": "11.25° Elbow",
+      "brand": "Reliable",
+      "accept_skus": [
+        "1251125R",
+        "151125R",
+        "21125R",
+        "251125R",
+        "31125R",
+        "41125R",
+        "61125R",
+        "7R99000129",
+        "7R99000130",
+        "7R99000131",
+        "7R99000132",
+        "7R99000133",
+        "7R99000134",
+        "7R99000135",
+        "7R99000136",
+        "81125R"
+      ],
+      "accept_ids": [
+        "52e59dd2-8db5-4f0f-a723-423abd09dde4",
+        "6737e045-8a9f-421a-9ec7-cbf3333bafda",
+        "6a916782-3835-4ef6-b028-83e4db9f7d82",
+        "7e28530c-9003-4953-82c4-6f3ec04980f9",
+        "8d573e34-33a3-4725-8a13-caabf902b5f6",
+        "b5ecd845-eef1-404e-bc07-8bb5ebbf316a",
+        "c5f14c8f-4bc3-46d7-8b47-55db1c2c0b60",
+        "c6c34a15-419d-4ae0-bc9a-7f23fdb52aa8",
+        "f1351ec0-9409-4b5f-9590-a4b1ffadcbe5"
+      ],
+      "qid": "q036",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿Qué opciones de Tee Ranurada de Radio Estándar manejan?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "8fde94d3-5ed8-4402-8a54-4746de455c61",
+      "ref_sku": "7R99000137",
+      "ref_page": 44,
+      "ref_product": "Grooved Tee Standard Radius",
+      "brand": "Reliable",
+      "accept_skus": [
+        "125TEER",
+        "125TEERG",
+        "15TEER",
+        "15TEERG",
+        "1TEERG",
+        "1TEESR",
+        "25TEER",
+        "25TEERG",
+        "2TEER",
+        "2TEERG",
+        "3TEER",
+        "3TEERG",
+        "4TEER",
+        "4TEERG",
+        "5TEER",
+        "5TEERG",
+        "6TEER",
+        "6TEERG",
+        "7R99000137",
+        "7R99000138",
+        "7R99000139",
+        "7R99000140",
+        "7R99000141",
+        "7R99000142",
+        "7R99000143",
+        "7R99000144",
+        "7R99000145",
+        "7R99000146",
+        "7R99000366",
+        "7R99000367",
+        "7R99000368",
+        "7R99000369",
+        "7R99000370",
+        "7R99000371",
+        "7R99000372",
+        "7R99000373",
+        "7R99000374",
+        "7R99000375",
+        "8TEER",
+        "8TEERG"
+      ],
+      "accept_ids": [
+        "1b01d491-21bd-4858-9879-9d6098a7fa25",
+        "24d13993-12bf-4f4a-a5ce-cfaa296a704e",
+        "2569adfc-a1a9-448f-810d-dc71153db24d",
+        "3f1bf9c9-abdc-4a54-a7d3-29feeaba0528",
+        "430413f7-ffe9-454e-a8bb-5c1f2016a80d",
+        "4aaaf394-2312-4555-9785-04d089d012af",
+        "5030e032-b973-4d40-bcc3-e0a30c5dbe3d",
+        "600629c8-ff5c-4caa-a253-ee3b5d3bb03f",
+        "6021c672-c51e-40b0-a76d-642b3ece7d72",
+        "851385fc-3f34-41c8-a6f5-9e31da4c5ac9",
+        "8fde94d3-5ed8-4402-8a54-4746de455c61",
+        "a177a7ff-81da-43f1-bc73-317aab406a72",
+        "acd2a12d-2096-44a3-a62f-46404d265b7a",
+        "b2215a04-240e-4e13-861b-645292eaa409",
+        "b8aa6c47-0c1e-4390-a297-2455405d2115",
+        "cb9029a3-aa35-46af-8ac1-bd3df944156a",
+        "ce77b23e-c6bb-440d-950a-5d00cf2db7d1",
+        "d8d636d3-4a3a-415f-b1ca-fee13bc1341a",
+        "e8dc9e7b-8fda-4878-b95e-93a9fde6b935",
+        "e9185751-d5b1-4c42-a67c-bd3eea461ed5",
+        "ebfed4ad-a571-493b-85dd-c0cda0f22516"
+      ],
+      "qid": "q037",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿Qué medidas hay de Adaptador de Brida?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "1d1f1303-079c-4371-92d9-993a10f7181d",
+      "ref_sku": "7R99000171",
+      "ref_page": 99,
+      "ref_product": "Flange Adaptor",
+      "brand": "Reliable",
+      "accept_skus": [
+        "25FAR",
+        "2FAR",
+        "3FAR",
+        "4FAR",
+        "5FAR",
+        "6FAR",
+        "7R99000171",
+        "7R99000172",
+        "7R99000173",
+        "7R99000174",
+        "7R99000175",
+        "7R99000176",
+        "7R99000177",
+        "8FAR"
+      ],
+      "accept_ids": [
+        "00e85a2c-3de9-4e25-ad36-4ca5a8efe2c6",
+        "0b31f38c-45b3-4d19-8977-052a280a03f6",
+        "1d1f1303-079c-4371-92d9-993a10f7181d",
+        "2fd0f6bd-67e1-4535-9c5d-e9be8d56a239",
+        "669fddf7-644e-4626-b1ce-08c2827b2096",
+        "7e37cf48-ca5c-48c1-86ea-27204d1002c6",
+        "c5ac33a8-1c91-4322-ad26-e1ad250ab2cb",
+        "c6f030c7-c7c2-437a-9be4-c403d0d680c4"
+      ],
+      "qid": "q038",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "¿Qué Tees CPVC tienen en catálogo y en qué medidas?",
+      "source_file": "Catalogo_Reliable_3.pdf",
+      "chunk_id": "8b1d0297-9290-44e5-b0b1-06ff7e8e5311",
+      "ref_sku": "7111030303",
+      "ref_page": 13,
+      "ref_product": "CPVC Tees",
+      "brand": "Reliable",
+      "accept_skus": [
+        "7111030303",
+        "7111040404",
+        "7111050505",
+        "7111060606",
+        "7111080808",
+        "7111101010",
+        "7111121212",
+        "7121040302",
+        "7121050402",
+        "7121080602",
+        "P12515SHAT",
+        "P125T",
+        "P15T",
+        "P1755SHAT",
+        "P1T",
+        "P2155SHAT",
+        "P25T",
+        "P2T",
+        "P3T",
+        "P75T"
+      ],
+      "accept_ids": [
+        "13510db5-d3d6-4b48-a4fa-cbf5df783f9f",
+        "252e61dc-66e0-4a65-9547-3aea02584983",
+        "2873b058-719e-4301-9913-1f258072f36f",
+        "32e6c689-8b68-44d0-af4c-c22d769155df",
+        "3d0de2d5-28e0-4d13-bac1-f97810395d15",
+        "4222f9d1-91d1-42f5-959d-d97eacafa81f",
+        "57f88a5a-0b19-4d43-964a-79e5068eecaa",
+        "8b1d0297-9290-44e5-b0b1-06ff7e8e5311",
+        "d4c46bb9-f2b9-4280-9231-924fd0b74f48",
+        "dc2a680a-536a-46bb-9a17-a91f7ba61fcd",
+        "f58c518a-0b1c-4a89-90e6-c93edcd01d7a"
+      ],
+      "qid": "q039",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "rango_familia",
+      "question": "Pásame la lista de medidas y precios de Adaptadores de Rociador",
+      "source_file": "Catalogo_Reliable_3.pdf",
+      "chunk_id": "eae782c9-1f6e-4f6b-96a2-c6630f008cf5",
+      "ref_sku": "7139030300",
+      "ref_page": 34,
+      "ref_product": "Sprinkler Adapters",
+      "brand": "Reliable",
+      "accept_skus": [
+        "1SPAS",
+        "7135030201",
+        "7135030202",
+        "7135030203",
+        "7135040201",
+        "7135040301",
+        "7139030200",
+        "7139030201",
+        "7139030300",
+        "7139030301",
+        "7139040200",
+        "7139040201",
+        "7139040400",
+        "7139040401",
+        "7145030200",
+        "7145040200",
+        "7145040201",
+        "7146040200",
+        "7158030000",
+        "7158030001",
+        "7158040000",
+        "7158040001",
+        "7158050000",
+        "7158050001",
+        "7158060000",
+        "7158080000",
+        "P125FMA",
+        "P125FMAS",
+        "P15FMA",
+        "P15SADJ",
+        "P15SHA",
+        "P15SHASP",
+        "P15SHASPS",
+        "P15SOCADJ",
+        "P15SPGADJ",
+        "P175SHA",
+        "P1FMA",
+        "P1FMAS",
+        "P1SPA",
+        "P2FMA",
+        "P755SADJ",
+        "P755SHA",
+        "P755SHAS401",
+        "P755SHASP",
+        "P755SHASPS",
+        "P755SHAZSR",
+        "P75FMA",
+        "P75FMAS",
+        "P75SPA",
+        "P75SPAS"
+      ],
+      "accept_ids": [
+        "03963c1b-f9b5-44ef-a016-d26a2d3cc348",
+        "121a52d9-582d-4d8f-bd2c-4583e28c6f4a",
+        "1978aaa1-b7b2-40b4-a64f-1e8e12983147",
+        "1b3112f9-fcb2-413c-aa1f-c8edbec8402f",
+        "2c66f3e0-bcbd-49c4-bde3-10866ee9b3f6",
+        "3d6a158c-1968-4511-9f20-68df4789f36d",
+        "4609fc1f-ad6b-4015-8c71-cddcc1559f19",
+        "53c4ab66-ed56-490f-b118-4c2e908d7ad1",
+        "55b97032-eab4-4d75-b9f2-ad9f2b174d48",
+        "56300660-a8c7-4348-b604-d1e866b8675a",
+        "5c122db1-e420-4c20-ab25-a5877f6ffb59",
+        "61978fa5-8fed-4bab-83f5-cd29118023cc",
+        "63765c1e-b5bd-4ab4-8448-98cd126022f1",
+        "6c877198-4afe-4f9d-8e2a-1dfa9b3e335b",
+        "6fce1577-254f-43fc-8357-03a703a6f3b4",
+        "71c17261-961d-42e7-859a-fb53a1373950",
+        "7ea89c31-0756-44f8-8d90-9bca39a3b548",
+        "8886992d-ecae-47ba-9186-ef7012596b11",
+        "8a768721-832c-485b-81cb-5d768fe53065",
+        "9161e727-2ffa-4ef1-8269-dd30a445cf3b",
+        "a7a42d3b-6494-47aa-b8e5-1bfebbd7617c",
+        "ab2618fe-5a5f-4a9a-87bc-aed487fc6d18",
+        "bcfbad9b-b0e9-481f-b0af-1f87684a61b1",
+        "eae782c9-1f6e-4f6b-96a2-c6630f008cf5",
+        "eb0c1dd2-6271-4dcb-b0f8-b0581ac2b6a0",
+        "fed70d01-5fe3-477f-af71-1084391f8b3e"
+      ],
+      "qid": "q040",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿AOSY3-FF-060 disponible?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "a4d5a8a6-c96e-4ead-8ba4-6789157e52ab",
+      "ref_sku": "AOSY3-FF-060",
+      "ref_page": 25,
+      "ref_product": "6\" OS&Y Gate Valve Resilient Seat Flanged Ends, 300PSI",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "AOSY3-FF-060"
+      ],
+      "accept_ids": [
+        "13ecdc9c-3a1c-4af2-805f-cf7799ca0234",
+        "a4d5a8a6-c96e-4ead-8ba4-6789157e52ab"
+      ],
+      "qid": "q041",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "precio del ALNRS3-FF-060",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "09fa81af-2e30-4816-a6c4-1609d3a5f71d",
+      "ref_sku": "ALNRS3-FF-060",
+      "ref_page": 32,
+      "ref_product": "6\" ALNRS3, NRS Gate Valve Flanged Ends; 300PSI; UL/FM",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "ALNRS3-FF-060"
+      ],
+      "accept_ids": [
+        "f0c08621-2411-44a4-a9ce-68ff198e6e3d",
+        "09fa81af-2e30-4816-a6c4-1609d3a5f71d"
+      ],
+      "qid": "q042",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "dame las specs del AL90ESR-250",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "b35a3695-73a7-48bf-a16e-463c575f3532",
+      "ref_sku": "AL90ESR-250",
+      "ref_page": 58,
+      "ref_product": "2 ½\" Elbow Short UL/FM, 300 PSI",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "AL90ESR-250"
+      ],
+      "accept_ids": [
+        "e7ed0f70-53be-4cec-b28d-42bcb22f3df8",
+        "b35a3695-73a7-48bf-a16e-463c575f3532"
+      ],
+      "qid": "q043",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿Cuánto cuesta el AL90RET-150050?",
+      "source_file": "Catalogo_Aleum.pdf",
+      "chunk_id": "5926f11d-98a3-4fef-888f-f61019fe3107",
+      "ref_sku": "AL90RET-150050",
+      "ref_page": 60,
+      "ref_product": "1 ½ x ½, 90° Reducing Elbow with Threaded Small End",
+      "brand": "ALEUM CO.",
+      "accept_skus": [
+        "AL90RET-150050"
+      ],
+      "accept_ids": [
+        "17ef3177-9da9-4f7f-a26b-00bb7bf0ea00",
+        "5926f11d-98a3-4fef-888f-f61019fe3107"
+      ],
+      "qid": "q044",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "ficha técnica del 1778-A por favor",
+      "source_file": "Catalogo_Croker__2.pdf",
+      "chunk_id": "c5fd7dde-4c32-4635-9a5c-2d401c8ac323",
+      "ref_sku": "1778-A",
+      "ref_page": 2,
+      "ref_product": "Cabinet 2-1/2\" fire department hose valve w/ cap and chain and a portable fire extinguisher.",
+      "brand": "Croker",
+      "accept_skus": [
+        "1778-A"
+      ],
+      "accept_ids": [
+        "c5fd7dde-4c32-4635-9a5c-2d401c8ac323"
+      ],
+      "qid": "q045",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿Tienen el 245A en stock? necesito 20 unidades",
+      "source_file": "Catalogo_Croker__2.pdf",
+      "chunk_id": "a12e9f8d-9290-42bb-80d2-834e58985106",
+      "ref_sku": "245A",
+      "ref_page": 4,
+      "ref_product": "AGF TESTanDRAIN Model 1011 valve, 2\" M1011A x ¾\" ESFR Orifice",
+      "brand": "AGF Manufacturing Inc.",
+      "accept_skus": [
+        "245A"
+      ],
+      "accept_ids": [
+        "a12e9f8d-9290-42bb-80d2-834e58985106"
+      ],
+      "qid": "q046",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿qué es el BA201032R9 y qué precio tiene?",
+      "source_file": "Catalogo_Reliable_1.pdf",
+      "chunk_id": "01700c39-9268-4c19-80a0-7b655d2d96f5",
+      "ref_sku": "BA201032R9",
+      "ref_page": 79,
+      "ref_product": "Fire Sprinkler F1FR56U2SS Upright K5.6 (80) Threads 1/2\" (15mm) RA6524",
+      "brand": "Reliable",
+      "accept_skus": [
+        "BA201032R9"
+      ],
+      "accept_ids": [
+        "01700c39-9268-4c19-80a0-7b655d2d96f5"
+      ],
+      "qid": "q047",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "info del producto 6801411000",
+      "source_file": "Catalogo_Reliable_1.pdf",
+      "chunk_id": "13557379-06d4-4acb-b7fc-bc20e90d9296",
+      "ref_sku": "6801411000",
+      "ref_page": 85,
+      "ref_product": "Escutcheon, 2-Piece, Recessed, FP, 1/2″, Stainless Steel",
+      "brand": "Reliable",
+      "accept_skus": [
+        "6801411000"
+      ],
+      "accept_ids": [
+        "13557379-06d4-4acb-b7fc-bc20e90d9296"
+      ],
+      "qid": "q048",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "sku_directo",
+      "question": "cotízame el BB202128P9",
+      "source_file": "Catalogo_Reliable_1.pdf",
+      "chunk_id": "a50777b6-528b-4c57-b679-e476892c0d2d",
+      "ref_sku": "BB202128P9",
+      "ref_page": 87,
+      "ref_product": "Fire Sprinkler Head FR42P2CLL Pendent K4.2 (60) Threads 1/2\" (15mm)",
+      "brand": "Reliable",
+      "accept_skus": [
+        "BB202128P9"
+      ],
+      "accept_ids": [
+        "a50777b6-528b-4c57-b679-e476892c0d2d"
+      ],
+      "qid": "q049",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "precio del 3RCFRG",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "511b358c-f649-493a-990e-0ccd879313ab",
+      "ref_sku": "3RCFRG",
+      "ref_page": 11,
+      "ref_product": "3RCFRG RASCO, #RGD1 3″ Angle Pad Coupling, Flush, Galvanized",
+      "brand": "Reliable",
+      "accept_skus": [
+        "3RCFRG"
+      ],
+      "accept_ids": [
+        "511b358c-f649-493a-990e-0ccd879313ab"
+      ],
+      "qid": "q050",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿me pasas precio y disponibilidad de 1255MTR?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "e148c9b8-d5a1-4517-8f2b-51fee618b825",
+      "ref_sku": "1255MTR",
+      "ref_page": 53,
+      "ref_product": "1255MTR RASCO, #041, 1 1/4″ x 1/2″ U-Bolt Mechanical Tee",
+      "brand": "Reliable",
+      "accept_skus": [
+        "1255MTR"
+      ],
+      "accept_ids": [
+        "e148c9b8-d5a1-4517-8f2b-51fee618b825"
+      ],
+      "qid": "q051",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿Cuánto cuesta el 7R99000455?",
+      "source_file": "Catalogo_Reliable_2.pdf",
+      "chunk_id": "968ed1e1-1b71-4a69-95f0-7431e91e45ac",
+      "ref_sku": "7R99000455",
+      "ref_page": 81,
+      "ref_product": "63MTGRG RASCO, #MTG1, 6″ x 3″ Grooved Mechanical Tee Galvanized",
+      "brand": "Reliable",
+      "accept_skus": [
+        "7R99000455"
+      ],
+      "accept_ids": [
+        "85784d82-219d-42e4-a141-16362f0e6141",
+        "968ed1e1-1b71-4a69-95f0-7431e91e45ac"
+      ],
+      "qid": "q052",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿125NBPHD disponible?",
+      "source_file": "Catalogo_Reliable_3.pdf",
+      "chunk_id": "4315f540-088a-4352-857c-f808769940a1",
+      "ref_sku": "125NBPHD",
+      "ref_page": 5,
+      "ref_product": "CPVC Hangers, Stand Off Fastener, 076, 1-1/4″",
+      "brand": "Reliable",
+      "accept_skus": [
+        "125NBPHD"
+      ],
+      "accept_ids": [
+        "4315f540-088a-4352-857c-f808769940a1"
+      ],
+      "qid": "q053",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "dame las specs del 7109040300",
+      "source_file": "Catalogo_Reliable_3.pdf",
+      "chunk_id": "5ef852a3-824e-4dae-aeba-82065cc8219e",
+      "ref_sku": "7109040300",
+      "ref_page": 11,
+      "ref_product": "90° Reducing Elbow 1″ x 3/4″",
+      "brand": "Reliable",
+      "accept_skus": [
+        "7109040300"
+      ],
+      "accept_ids": [
+        "377bf8a9-f2a0-4181-994c-8159da9393c4",
+        "5ef852a3-824e-4dae-aeba-82065cc8219e"
+      ],
+      "qid": "q054",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿me pasas precio y disponibilidad de VP-EC?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "5eab04a7-b1a3-4fef-9fb8-ecf8176ab5b4",
+      "ref_sku": "VP-EC",
+      "ref_page": 3,
+      "ref_product": "3/4 Inch CPVC End Cap, Pipe Termination, Pack of 25",
+      "brand": "VESDA",
+      "accept_skus": [
+        "VP-EC"
+      ],
+      "accept_ids": [
+        "5eab04a7-b1a3-4fef-9fb8-ecf8176ab5b4"
+      ],
+      "qid": "q055",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "sku_directo",
+      "question": "info del producto MRP-2002",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "d5c1029f-0126-44ab-80a7-d98b83d2a5d7",
+      "ref_sku": "MRP-2002",
+      "ref_page": 4,
+      "ref_product": "Agent Release Control Panel; six-zone FACP for single and dual hazard agent releasing applications.",
+      "brand": "Notifier",
+      "accept_skus": [
+        "MRP-2002"
+      ],
+      "accept_ids": [
+        "d5c1029f-0126-44ab-80a7-d98b83d2a5d7"
+      ],
+      "qid": "q056",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "cotízame el FDM-1",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "7b0238bc-ab36-4cd8-8dc4-e73e24ab377d",
+      "ref_sku": "FDM-1",
+      "ref_page": 11,
+      "ref_product": "Monitor Modules with FlashScan®, two Class B circuits.",
+      "brand": "Notifier",
+      "accept_skus": [
+        "FDM-1"
+      ],
+      "accept_ids": [
+        "7b0238bc-ab36-4cd8-8dc4-e73e24ab377d"
+      ],
+      "qid": "q057",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "ficha técnica del DVC-KD por favor",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "deee4ee9-0a06-47ef-ba73-511e4ae450ca",
+      "ref_sku": "DVC-KD",
+      "ref_page": 11,
+      "ref_product": "Digital Voice Command Keypad & Display",
+      "brand": "Notifier",
+      "accept_skus": [
+        "DVC-KD"
+      ],
+      "accept_ids": [
+        "deee4ee9-0a06-47ef-ba73-511e4ae450ca"
+      ],
+      "qid": "q058",
+      "fastpath_eligible": false
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿Tienen el FSP-951-BP en stock? necesito 20 unidades",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "13d62a34-ad1c-4d65-b0a7-d18966a60073",
+      "ref_sku": "FSP-951-BP",
+      "ref_page": 19,
+      "ref_product": "Notifier FSP-951-BP Intelligent Addressable Photo Detector with FlashScan – White. Bulk pack of 10 (direct replacements for the FSP-851 Series).",
+      "brand": "Notifier",
+      "accept_skus": [
+        "FSP-951-BP"
+      ],
+      "accept_ids": [
+        "13d62a34-ad1c-4d65-b0a7-d18966a60073"
+      ],
+      "qid": "q059",
+      "fastpath_eligible": true
+    },
+    {
+      "type": "sku_directo",
+      "question": "¿qué es el XAL-53 y qué precio tiene?",
+      "source_file": "Notifier_.pdf",
+      "chunk_id": "17c3da6a-9474-4f63-9b6c-7a64be74bb9d",
+      "ref_sku": "XAL-53",
+      "ref_page": 32,
+      "ref_product": "KILARK MANUAL STATION, EXPLOSION-PROOF; NO & NC CONTACTS.",
+      "brand": "Notifier",
+      "accept_skus": [
+        "XAL-53"
+      ],
+      "accept_ids": [
+        "17c3da6a-9474-4f63-9b6c-7a64be74bb9d"
+      ],
+      "qid": "q060",
+      "fastpath_eligible": true
+    }
+  ]
+}
