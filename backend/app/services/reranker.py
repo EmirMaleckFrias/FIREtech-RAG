@@ -26,6 +26,70 @@ _SYSTEM_PROMPT = (
     "consulta. No incluyas texto adicional ni explicaciones."
 )
 
+_FILTER_SYSTEM_PROMPT = (
+    "Eres un clasificador de productos de catálogos de protección contra "
+    "incendios. Recibes una consulta y una lista de productos numerados. "
+    "Devuelve SOLO un objeto JSON {\"relevantes\": [índices]} con los índices "
+    "de los productos que SON el tipo de producto que pide la consulta. "
+    "Decide por la DESCRIPCIÓN del producto (las etiquetas de tipo del "
+    "catálogo no son fiables). Excluye todo lo que no sea la unidad funcional "
+    "completa del tipo pedido: accesorios, repuestos/spares, filtros, "
+    "licencias, tuberías, puntos de muestreo, fuentes de poder, pantallas/"
+    "displays, módulos, sensores sueltos, tarjetas y kits de partes, SALVO "
+    "que la consulta pida exactamente eso. Ante la duda sobre una unidad "
+    "completa del tipo pedido, inclúyela."
+)
+
+_FILTER_TRUNCATE_CHARS = 450
+
+
+async def filter_relevant(query: str, chunks: list[Chunk]) -> list[Chunk]:
+    """Filtro binario de relevancia por ítem (para el camino de precios).
+
+    A diferencia del ranking listwise, clasificar sí/no por ítem es fiable
+    con pools grandes: el orden de entrada (por precio) se PRESERVA en la
+    salida. Ante cualquier fallo devuelve los chunks sin filtrar.
+    """
+    if len(chunks) <= 1:
+        return chunks
+    settings = get_settings()
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    numbered = "\n".join(
+        f"[{i}] {c.text[:_FILTER_TRUNCATE_CHARS]}" for i, c in enumerate(chunks)
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=settings.rerank_model_resolved,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Consulta: {query}\n\nProductos:\n{numbered}",
+                },
+            ],
+        )
+        data = json.loads(resp.choices[0].message.content or "{}")
+        raw = data.get("relevantes")
+        if not isinstance(raw, list):
+            raise ValueError("respuesta sin lista 'relevantes'")
+        keep: set[int] = set()
+        for r in raw:
+            if isinstance(r, bool):
+                continue
+            try:
+                idx = int(r)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(chunks):
+                keep.add(idx)
+        if not keep:
+            return chunks  # filtro que vacía todo = filtro roto; mejor sin filtrar
+        return [c for i, c in enumerate(chunks) if i in keep]
+    except Exception as exc:
+        logger.warning("filter_relevant falló (%s); se continúa sin filtrar.", exc)
+        return chunks
+
 
 def _apply_ranking(ranking: object, chunks: list[Chunk]) -> list[Chunk]:
     """Reordena según `ranking`; índices inválidos o duplicados se ignoran y

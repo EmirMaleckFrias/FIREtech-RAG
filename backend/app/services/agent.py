@@ -18,12 +18,13 @@ from openai import AsyncOpenAI
 from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
 from app.services.qdrant import (
+    detect_brand_in_text,
     find_by_skus,
     hybrid_search,
     index_inventory,
     resolve_brand,
 )
-from app.services.reranker import rerank
+from app.services.reranker import filter_relevant, rerank
 
 logger = logging.getLogger(__name__)
 
@@ -297,28 +298,35 @@ async def _execute_price_search(
     dentro de lo que el pool semántico alcanzó a cubrir.
     """
     limite = max(1, min(int(limite or 10), 20))
-    marca_original = marca
-    marca = resolve_brand(marca)
-    filters = SearchFilters(brand=marca or None, category=None)
-    pool = await hybrid_search(query, filters, _PRICE_POOL)
-    if not pool and marca_original and not marca:
-        # Marca no reconocida: se busca sin filtro, pero el caller lo sabrá
-        # porque el propio pool trae las marcas reales en el texto.
-        pool = await hybrid_search(query, SearchFilters(), _PRICE_POOL)
+    # La marca NO es filtro duro de payload en este camino: el origen trae
+    # marcas mal etiquetadas (p. ej. VLF-500 con brand "Fire-Lite" pese a ser
+    # VESDA) y un filtro exacto excluiría productos válidos. Se aplica como
+    # post-filtro por presencia del término en marca/categoría/texto.
+    marca_term = resolve_brand(marca) or detect_brand_in_text(query)
+    pool = await hybrid_search(query, SearchFilters(), _PRICE_POOL)
+    if marca_term:
+        needle = marca_term.lower().split()[0]
+        pool = [
+            c for c in pool
+            if needle in c.brand.lower()
+            or needle in c.category.lower()
+            or needle in c.text[:220].lower()
+        ] or pool
 
     priced = [
         c for c in pool
         if c.chunk_type == "product" and c.price is not None
         and (c.price_status or "numeric") == "numeric"
     ]
-    # Filtro de RELEVANCIA antes del orden por precio: sin esto, los N más
-    # baratos del pool son siempre accesorios/repuestos ($20-150) y el corte
-    # deja fuera al producto barato que sí responde la consulta (caso real:
-    # "detector VESDA completo más barato" cortaba el VLF-500 de $3,088).
-    if len(priced) > limite:
-        keep = min(30, len(priced))
-        priced = await rerank(query, priced, keep)
+    # Orden por precio PRIMERO y filtro de relevancia binario DESPUÉS: el
+    # reranker listwise con 100+ ítems perdía productos válidos de forma no
+    # determinista (el juez detectó que "detector VESDA más barato" daba
+    # $7,221 en vez del VLF-500 de $3,088.89). Clasificar sí/no por ítem
+    # preserva el orden por precio y es fiable: el primero que sobrevive al
+    # filtro ES el extremo verdadero del pool.
     priced.sort(key=lambda c: c.price, reverse=(orden == "desc"))
+    if len(priced) > limite:
+        priced = await filter_relevant(query, priced[:80])
     return priced[:limite]
 
 

@@ -346,6 +346,30 @@ def resolve_brand(marca: str | None) -> str | None:
     return None
 
 
+def detect_brand_in_text(text: str) -> str | None:
+    """Marca conocida mencionada en un texto libre, o None si hay 0 o varias.
+
+    Determinista y sin LLM: compara contra la lista viva de marcas del índice.
+    Se usa para auto-filtrar por payload cuando la consulta nombra una marca
+    ('detector VESDA barato' → brand=VESDA) sin depender del clasificador.
+    """
+    if not text:
+        return None
+    resolve_brand("x")  # fuerza la carga lazy de _KNOWN_BRANDS
+    if not _KNOWN_BRANDS:
+        return None
+    lowered = f" {text.lower()} "
+    matches: list[str] = []
+    for known in _KNOWN_BRANDS:
+        first_word = known.lower().split()[0] if known.strip() else ""
+        if len(first_word) >= 4 and f" {first_word}" in lowered:
+            matches.append(known)
+        elif "rasco" in lowered and known.lower() == "reliable":
+            matches.append(known)
+    matches = list(dict.fromkeys(matches))
+    return matches[0] if len(matches) == 1 else None
+
+
 def find_by_skus(skus: list[str], limit: int = 8) -> list[Chunk]:
     """Match exacto por SKU/short-code en el payload (fast-path del agente).
 
