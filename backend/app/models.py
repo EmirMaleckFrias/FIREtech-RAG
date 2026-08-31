@@ -18,9 +18,19 @@ class Chunk(BaseModel):
     has_price: bool = False
     chunk_type: str = "page"
     score: float = 0.0
+    # Precios del payload (para ordenar por precio real; None si no aplica).
+    # Nunca exponer aquí cost_internal_usd.
+    price_net_usd: float | None = None
+    price_list_usd: float | None = None
+    price_status: str = ""
 
     def cite(self) -> str:
         return f"[{self.source_file}, pág. {self.page}]"
+
+    @property
+    def price(self) -> float | None:
+        """Precio comparable: neto si existe, si no lista."""
+        return self.price_net_usd if self.price_net_usd is not None else self.price_list_usd
 
 
 class SearchFilters(BaseModel):

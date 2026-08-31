@@ -55,6 +55,13 @@ Croker, AGF, Notifier, System Sensor, VESDA...). Si un producto no aparece bajo 
 marca que el usuario supone, repite la búsqueda SIN mencionar marca: el equivalente \
 puede venir de otro fabricante del catálogo (y dilo en la respuesta).
 
+10. Si el usuario pide "el más barato", "mejor precio", "más económico", "más caro" \
+o cualquier superlativo de precio, usa OBLIGATORIAMENTE la herramienta \
+`buscar_por_precio` (ordena por el precio real del catálogo). NUNCA declares que \
+algo es "el mejor precio" o "el más barato" basándote solo en `buscar_productos`: \
+si por alguna razón no usaste `buscar_por_precio`, di "el más barato entre lo \
+consultado", nunca un superlativo absoluto.
+
 Responde siempre en español, de forma clara, estructurada y concisa. Nunca uses \
 el guion largo (—) en tus respuestas: separa las ideas con comas, puntos o dos puntos.\
 """
@@ -92,6 +99,47 @@ _TOOL = {
                         "Filtro opcional por categoría exacta (p. ej. 'sprinklers'). "
                         "Omitir para buscar en todas las categorías."
                     ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+_PRICE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "buscar_por_precio",
+        "description": (
+            "Busca productos y los devuelve ORDENADOS POR PRECIO REAL del catálogo "
+            "(no por similitud). Úsala siempre que el usuario pida el más barato, "
+            "el mejor precio, el más económico, el más caro o un ranking de precios. "
+            "Recupera un pool amplio de candidatos y los ordena por su campo de "
+            "precio exacto, así el resultado #1 sí es el extremo verdadero."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Qué producto/categoría buscar (ej. 'detector aspiración "
+                        "VESDA completo', 'coupling rígido 2\"')."
+                    ),
+                },
+                "marca": {
+                    "type": "string",
+                    "description": "Filtro opcional por marca exacta.",
+                },
+                "orden": {
+                    "type": "string",
+                    "enum": ["asc", "desc"],
+                    "description": "asc = más baratos primero (default), desc = más caros.",
+                },
+                "limite": {
+                    "type": "integer",
+                    "description": "Cuántos devolver (default 10, máx 20).",
                 },
             },
             "required": ["query"],
@@ -190,6 +238,40 @@ async def _execute_search(query: str, marca: str | None, categoria: str | None) 
     return ranked
 
 
+_PRICE_POOL = 120  # candidatos recuperados antes de ordenar por precio
+
+
+async def _execute_price_search(
+    query: str, marca: str | None, orden: str, limite: int
+) -> list[Chunk]:
+    """Recupera un pool amplio y lo ordena por el PRECIO real del payload.
+
+    A diferencia de _execute_search (similitud + rerank), aquí el orden lo da
+    el campo de precio del catálogo: el resultado #1 es el extremo verdadero
+    dentro de lo que el pool semántico alcanzó a cubrir.
+    """
+    limite = max(1, min(int(limite or 10), 20))
+    filters = SearchFilters(brand=marca or None, category=None)
+    pool = await hybrid_search(query, filters, _PRICE_POOL)
+    if not pool and marca:
+        pool = await hybrid_search(query, SearchFilters(), _PRICE_POOL)
+
+    priced = [
+        c for c in pool
+        if c.chunk_type == "product" and c.price is not None
+        and (c.price_status or "numeric") == "numeric"
+    ]
+    # Filtro de RELEVANCIA antes del orden por precio: sin esto, los N más
+    # baratos del pool son siempre accesorios/repuestos ($20-150) y el corte
+    # deja fuera al producto barato que sí responde la consulta (caso real:
+    # "detector VESDA completo más barato" cortaba el VLF-500 de $3,088).
+    if len(priced) > limite:
+        keep = min(30, len(priced))
+        priced = await rerank(query, priced, keep)
+    priced.sort(key=lambda c: c.price, reverse=(orden == "desc"))
+    return priced[:limite]
+
+
 def _sources_payload(accumulated: dict[str, Chunk]) -> list[dict]:
     return [
         SourceRef(
@@ -241,7 +323,7 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             "model": settings.openai_model,
             "messages": messages,
             "stream": True,
-            "tools": [_TOOL],
+            "tools": [_TOOL, _PRICE_TOOL],
             # Tras MAX_HOPS tool calls se fuerza la respuesta final.
             "tool_choice": "none" if force_final else "auto",
         }
@@ -320,20 +402,32 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                     args = {}
                 query = str(args.get("query") or "").strip() or message
                 marca = args.get("marca") or None
-                categoria = args.get("categoria") or None
+                is_price_tool = tc["name"] == "buscar_por_precio"
 
-                hop_info = {"n": hop_count, "query": query}
+                hop_label = f"por precio: {query}" if is_price_tool else query
+                hop_info = {"n": hop_count, "query": hop_label}
                 hops.append(hop_info)
                 yield AgentEvent("hop", hop_info)
 
                 try:
-                    chunks = await _execute_search(query, marca, categoria)
+                    if is_price_tool:
+                        orden = args.get("orden") or "asc"
+                        limite = args.get("limite") or 10
+                        chunks = await _execute_price_search(query, marca, orden, limite)
+                        etiqueta = "ascendente" if orden != "desc" else "descendente"
+                        result_text = (
+                            f"Productos ordenados por PRECIO REAL del catálogo "
+                            f"({etiqueta}); el #1 es el extremo dentro del pool "
+                            f"consultado:\n\n" + _format_results(chunks)
+                        )
+                    else:
+                        categoria = args.get("categoria") or None
+                        chunks = await _execute_search(query, marca, categoria)
+                        result_text = _format_results(chunks)
                 except Exception as exc:  # la búsqueda no debe tumbar el stream
-                    logger.warning("buscar_productos falló (hop %d): %s", hop_count, exc)
+                    logger.warning("%s falló (hop %d): %s", tc["name"], hop_count, exc)
                     chunks = []
                     result_text = f"Error al ejecutar la búsqueda: {exc}"
-                else:
-                    result_text = _format_results(chunks)
 
                 for ch in chunks:
                     if ch.id not in accumulated:

@@ -304,6 +304,9 @@ def _point_to_chunk(point: Any) -> Chunk:
         chunk_type=payload.get("chunk_type") or "page",
         # Los Records de scroll() no traen score (solo los de query_points).
         score=float(getattr(point, "score", 0.0) or 0.0),
+        price_net_usd=payload.get("price_net_usd"),
+        price_list_usd=payload.get("price_list_usd"),
+        price_status=payload.get("price_status") or "",
     )
 
 
