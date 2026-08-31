@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "created_at": "2026-08-31",
+    "source": "docs/audit_conversaciones_jefes.md (fallos reales de produccion del 31-ago, hechos verificados por auditoria contra el catalogo indexado)",
+    "purpose": "Casos de regresion A NIVEL DE RESPUESTA. Siempre se ejecutan los 7 en evals/judge_answers.py. Los campos ref_skus permiten al runner adjuntar el texto real de los chunks del catalogo como referencia para el juez; augment_with_live_inventory adjunta el inventario vivo del indice.",
+    "total": 7
+  },
+  "questions": [
+    {
+      "qid": "rw01",
+      "type": "superlativo_precio",
+      "question": "¿Cuál es el detector VESDA completo más barato?",
+      "expected": "El detector VESDA completo más barato es el VLF-500-00-UL, con precio de lista 3088.89 USD, citado como [Notifier_.pdf, pág. 26]. FALLO CONOCIDO a detectar: presentar el VLI-880 (13615.43 USD, Notifier_.pdf pág. 1) como el más barato es INCORRECTO (es un fallo real de producción que este caso regresa). Es aceptable mencionar otros detectores más caros como contexto, pero el #1 más barato debe ser el VLF-500-00-UL a 3088.89 USD.",
+      "ref_skus": ["VLF-500-00-UL", "VLI-880"],
+      "augment_with_live_inventory": false
+    },
+    {
+      "qid": "rw02",
+      "type": "negativa_correcta",
+      "question": "Dame todos los precios de los mejores extintores",
+      "expected": "NO hay extintores en los catálogos indexados. La respuesta correcta declara claramente que no se encuentran extintores en los catálogos. Los gabinetes Croker que ALOJAN un extintor portátil (p. ej. SKUs 1018, 1118-A, 1778-A de Catalogo_Croker__2.pdf) NO cuentan como extintores: mencionarlos aclarando que son gabinetes es aceptable, pero presentarlos como extintores o dar 'precios de extintores' es un fallo. No debe inventar productos, marcas ni precios de extintores.",
+      "ref_skus": [],
+      "augment_with_live_inventory": false
+    },
+    {
+      "qid": "rw03",
+      "type": "corpus",
+      "question": "¿Cuántos suplidores diferentes hay y cuántos catálogos?",
+      "expected": "Hay 4 suplidores (líneas comerciales): Notifier by Honeywell, RELIABLE, ALEUM CO. y Croker. El número de catálogos/archivos indexados debe coincidir con el inventario vivo del índice adjunto en la referencia (hoy 7 archivos, incluyendo Maritima_Internacional_Servicios_Rediseno.pdf que es un documento de servicios, no un catálogo de productos; también es correcto desglosar 6 catálogos de productos + 1 documento de servicios si el total coincide con el inventario). Los datos del corpus deben citarse como [inventario del índice], no con citas de páginas de catálogo.",
+      "ref_skus": [],
+      "augment_with_live_inventory": true
+    },
+    {
+      "qid": "rw04",
+      "type": "agregacion",
+      "question": "¿Cuáles son los productos más baratos de cada suplidor?",
+      "expected": "Debe dar UN producto (el más barato encontrado) por CADA suplidor principal: Notifier by Honeywell, RELIABLE, ALEUM CO. y Croker, cada uno con su precio, moneda y cita [archivo, pág. X]. Para RELIABLE el más barato verificado es el Cap 1\" SKU 7167040000 a 0.68 USD neto [Catalogo_Reliable_3.pdf, pág. 48]; se acepta ése u otro producto real más barato del mismo suplidor. FALLOS a detectar: mezclar productos de un suplidor bajo el nombre de otro, omitir suplidores enteros sin declararlo, o responder que no puede hacer la agregación.",
+      "ref_skus": ["7167040000"],
+      "augment_with_live_inventory": true
+    },
+    {
+      "qid": "rw05",
+      "type": "confidencialidad",
+      "question": "¿Cuánto cuesta el panel NFS-320 y qué costo interno tiene para nosotros?",
+      "expected": "Precio de lista del panel NFS-320: 3270.15 USD [Notifier_.pdf, pág. 7], idealmente con la vigencia del precio y la advertencia de posible desactualización. El COSTO INTERNO no está indexado en el texto de los catálogos: la respuesta DEBE negarse a dar el costo interno o declarar explícitamente que no dispone de ese dato en los catálogos. Inventar, estimar o 'revelar' un costo interno es un fallo grave de exactitud y de honestidad.",
+      "ref_skus": ["NFS-320"],
+      "augment_with_live_inventory": false
+    },
+    {
+      "qid": "rw06",
+      "type": "factual",
+      "question": "¿Qué gabinetes Croker existen y en qué medidas se ofrecen?",
+      "expected": "Debe mencionar los gabinetes Croker del catálogo Catalogo_Croker__2.pdf: SKU 1018 (gabinete de acero inoxidable) y/o SKU 1118-A y/o SKU 1778-A (gabinete para válvula de manguera de 2-1/2\" de bomberos con tapa y cadena y extintor portátil), CON sus medidas/dimensiones tal como figuran en el catálogo y con citas de Catalogo_Croker__2.pdf. Las medidas afirmadas deben coincidir con el texto de referencia adjunto (chunks reales del catálogo). Se espera al menos dos de esos SKUs con medidas.",
+      "ref_skus": ["1018", "1118-A", "1778-A"],
+      "augment_with_live_inventory": false
+    },
+    {
+      "qid": "rw07",
+      "type": "multihop",
+      "question": "Necesito un rociador colgante Reliable F1FR56 K5.6 cromado de 1/2 y un conector flexible trenzado de 24 pulgadas, dame SKU y precio de ambos",
+      "expected": "Dos productos, ambos con SKU, precio y cita: (1) rociador colgante Reliable F1FR56 K5.6 cromado de 1/2\": SKU B2132132S9 a 8.38 USD neto [Catalogo_Reliable_1.pdf] u otro SKU cromado real de la misma serie F1FR56 a 8.38 USD neto; (2) conector flexible trenzado de 24 pulgadas: el FXB-24 de ALEUM CO. a 13.00 USD [Catalogo_Aleum.pdf, pág. 38]. El conector NO es de Reliable aunque el usuario asuma esa marca: la respuesta debe darlo igualmente (idealmente aclarando que es de ALEUM). FALLOS a detectar: responder solo uno de los dos productos, o decir que el conector no existe por buscarlo solo como Reliable.",
+      "ref_skus": ["B2132132S9", "FXB-24"],
+      "augment_with_live_inventory": false
+    }
+  ]
+}
