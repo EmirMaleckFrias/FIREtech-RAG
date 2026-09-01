@@ -1,5 +1,5 @@
-import type { Health, SessionInfo } from '../types';
-import { IconDocument, IconPlus } from './icons';
+import type { Health, SessionInfo, UserRole } from '../types';
+import { IconDocument, IconLogout, IconPlus } from './icons';
 
 interface SessionSidebarProps {
   open: boolean;
@@ -11,10 +11,20 @@ interface SessionSidebarProps {
   healthError: boolean;
   /** Estado del slide-over de documentos (para aria-expanded del botón). */
   documentsOpen: boolean;
+  /** Correo de la sesión de Supabase (se trunca con ellipsis si no cabe). */
+  userEmail: string;
+  /** Rol de GET /api/me; null mientras no se conoce (no se pinta insignia). */
+  role: UserRole | null;
   onSelect: (id: string) => void;
   onNew: () => void;
   onOpenDocuments: () => void;
+  onSignOut: () => void;
 }
+
+const ROLE_LABEL: Record<UserRole, string> = {
+  admin: 'Administrador',
+  vendedor: 'Vendedor',
+};
 
 /** Etiqueta de grupo por fecha relativa, estilo ChatGPT/Claude. */
 function groupLabel(iso: string, now: Date): string {
@@ -55,9 +65,12 @@ export function SessionSidebar({
   health,
   healthError,
   documentsOpen,
+  userEmail,
+  role,
   onSelect,
   onNew,
   onOpenDocuments,
+  onSignOut,
 }: SessionSidebarProps) {
   const ok = !healthError && health !== null && health.status === 'ok' && health.qdrant;
 
@@ -158,6 +171,26 @@ export function SessionSidebar({
             <IconDocument size={15} />
             <span>Documentos</span>
           </button>
+
+          <div className="sidebar-user">
+            <span className="sidebar-user-email" title={userEmail}>
+              {userEmail}
+            </span>
+            {role !== null && (
+              <span className={`sidebar-role sidebar-role-${role}`}>{ROLE_LABEL[role]}</span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            className="sidebar-signout-btn"
+            onClick={onSignOut}
+            title="Cerrar sesión"
+          >
+            <IconLogout size={15} />
+            <span>Cerrar sesión</span>
+          </button>
+
           <div className="sidebar-footer" title="Estado del backend (GET /api/health)">
             <span className={`health-dot ${dotClass}`} aria-hidden="true" />
             <span className="sidebar-status-text">{statusText}</span>

@@ -1,13 +1,17 @@
-"""FastAPI app: gate de acceso + CORS + router /api + setup de Qdrant al arrancar."""
+"""FastAPI app: CORS + router /api + setup de Qdrant al arrancar.
+
+La autenticación ya no es un middleware global: cada endpoint declara
+`Depends(current_user)` (o `require_admin`) — ver app/services/auth.py.
+`GET /api/health` es el único endpoint público.
+"""
 from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app.api.documents import router as documents_router
 from app.api.routes import router
@@ -33,33 +37,6 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="RAG Productos", lifespan=lifespan)
-
-
-# ---------------------------------------------------------------------------
-# Gate de acceso por clave (env APP_ACCESS_KEY).
-#
-# - Sin APP_ACCESS_KEY (o vacía): no se exige nada — flujo dev local intacto.
-# - Con APP_ACCESS_KEY: todo /api/* excepto /api/health exige el header
-#   X-App-Key exacto; si falta o no coincide → 401 {"detail": ...}.
-# - OPTIONS queda exento: los preflight CORS nunca llevan headers custom.
-#
-# Registrado ANTES que CORSMiddleware a propósito: en Starlette el último
-# middleware añadido es el más externo, así CORS envuelve al gate y los 401
-# salen con cabeceras CORS (legibles por el navegador en despliegues
-# cross-origin vía CORS_ORIGINS).
-# ---------------------------------------------------------------------------
-@app.middleware("http")
-async def access_gate(request: Request, call_next):
-    required = get_settings().app_access_key
-    if required and request.method != "OPTIONS":
-        path = request.url.path.rstrip("/") or "/"
-        if path.startswith("/api") and path != "/api/health":
-            if request.headers.get("x-app-key") != required:
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Clave de acceso requerida"},
-                )
-    return await call_next(request)
 
 
 app.add_middleware(

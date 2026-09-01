@@ -7,6 +7,10 @@ Contrato: SPEC.md, sección "Gestión de documentos (indexación dinámica)".
                                      (parse genérico → embed → Qdrant).
 - DELETE /api/documents/{file_name}→ borra puntos de Qdrant + registro
                                      (403 para los catálogos canónicos).
+
+Autenticación (SPEC.md § "Autenticación multiusuario"): los documentos son
+compartidos — cualquier usuario autenticado los ve y los consulta —, pero
+subirlos y borrarlos es exclusivo de `admin` (403 para vendedor).
 """
 from __future__ import annotations
 
@@ -17,7 +21,14 @@ import re
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+)
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
@@ -26,6 +37,7 @@ from app.ingest.chunk import SUPPLIERS
 from app.ingest.generic import parse_generic
 from app.ingest.pipeline import CANONICAL_FILES
 from app.services import supabase_db
+from app.services.auth import AuthUser, current_user, require_admin
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +212,8 @@ def _ingest_uploaded(path: Path, file_name: str) -> str:
 # Endpoints
 # ---------------------------------------------------------------------------
 @router.get("/documents")
-async def list_documents() -> dict:
+async def list_documents(user: AuthUser = Depends(current_user)) -> dict:
+    """Abierto a cualquier usuario autenticado (documentos compartidos)."""
     rows = await run_in_threadpool(supabase_db.list_documents)
     by_name = {r.get("file_name"): r for r in rows}
 
@@ -217,7 +230,9 @@ async def list_documents() -> dict:
 
 @router.post("/documents/upload", status_code=202)
 async def upload_document(
-    background_tasks: BackgroundTasks, file: UploadFile = File(...)
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    user: AuthUser = Depends(require_admin),
 ) -> dict:
     file_name = _sanitize_file_name(file.filename or "")
     if not file_name or not Path(file_name).stem:
@@ -279,6 +294,7 @@ async def upload_document(
             chunks=0,
             brand="",
             status="processing",
+            uploaded_by=user.id,
         )
     )
 
@@ -302,7 +318,9 @@ async def upload_document(
 
 
 @router.delete("/documents/{file_name}")
-async def delete_document(file_name: str) -> dict:
+async def delete_document(
+    file_name: str, user: AuthUser = Depends(require_admin)
+) -> dict:
     if file_name in CANONICAL_FILES:
         raise HTTPException(
             status_code=403,

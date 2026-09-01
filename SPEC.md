@@ -79,6 +79,57 @@ Respuesta: `text/event-stream`, eventos:
 - `event: done` → `data: {"message_id": "uuid"}`
 - `event: error` → `data: {"detail": "..."}`
 
+## Autenticación multiusuario (Supabase Auth)
+
+Sustituye por completo al gate de clave compartida (`APP_ACCESS_KEY` y el header
+`X-App-Key` dejan de existir). Migración: `supabase/migrations/004_auth_multiusuario.sql`
+(ya aplicada en el proyecto de Supabase).
+
+**Reglas de negocio**
+- Alta con correo y contraseña. Solo dominio `@airobotix.net`; lo impone un trigger de
+  Postgres sobre `auth.users`, así que un registro con otro dominio falla aunque se llame
+  a la API de Supabase directamente.
+- Roles en `profiles.role`: `admin` y `vendedor`. `emir.malek@airobotix.net` nace admin;
+  el resto nace vendedor.
+- **Conversaciones privadas**: cada usuario ve solo las suyas (`chat_sessions.user_id`).
+  Las sesiones históricas con `user_id` nulo solo las ven los admin.
+- **Documentos compartidos**: todos los usuarios ven y consultan todos los documentos.
+  Subir y borrar es exclusivo de `admin` (403 para vendedor).
+- **Costos internos siguen ocultos para todos los roles** (sin cambios).
+
+**Contrato HTTP**
+- `GET /api/health` sigue siendo público (sin token).
+- Todo el resto de `/api/*` exige `Authorization: Bearer <access_token de Supabase>`.
+  Sin token o token inválido → `401 {"detail": "Sesión no válida o expirada"}`.
+  Rol insuficiente → `403 {"detail": "Solo un administrador puede ..."}`.
+- `GET /api/me` → `{ "id", "email", "role" }` del usuario del token.
+
+**Backend** (`app/services/auth.py`, nuevo)
+```python
+class AuthUser(BaseModel): id: str; email: str; role: str
+async def current_user(authorization: str = Header(None)) -> AuthUser  # dependencia FastAPI
+async def require_admin(user: AuthUser = Depends(current_user)) -> AuthUser
+```
+- Valida el token con el SDK de Supabase (`auth.get_user(jwt)`) y lee el rol de `profiles`.
+  Caché en memoria por token (TTL 60 s) para no ir a la red en cada request.
+- `supabase_db`: `list_sessions(user_id, is_admin)`, `create_session(title, user_id)`,
+  `get_messages` y `save_message` verifican que la sesión pertenezca al usuario (o admin).
+  `register_document(..., uploaded_by)`.
+
+**Frontend**
+- Cliente `@supabase/supabase-js` con `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`
+  (publishable `sb_publishable_OiC7eo39rLRrnoaR6nHgIA_xRCENub0`).
+- `UnlockGate` se sustituye por pantalla de acceso con pestañas Entrar / Crear cuenta:
+  correo, contraseña, mensajes de error en español, aviso claro de que solo se permiten
+  correos `@airobotix.net`, y aviso de "revisa tu correo" si la confirmación está activa.
+- Todas las llamadas (fetch, XHR de subida y el stream del chat) envían
+  `Authorization: Bearer <token>`; el token se renueva con `onAuthStateChange` y un 401
+  devuelve a la pantalla de acceso.
+- Pie del sidebar: correo del usuario, su rol y botón de cerrar sesión.
+- Si el rol es `vendedor`: el panel de Documentos muestra la lista completa pero sin
+  dropzone ni botones de borrar, con una nota de que solo un administrador puede
+  gestionarlos.
+
 ### Gestión de documentos (indexación dinámica)
 
 #### `GET /api/documents`

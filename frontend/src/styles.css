@@ -21,6 +21,7 @@
     12b. Panel de documentos (gestión de la indexación)
     13. Responsive
     14. Movimiento reducido
+    15. Acceso (Supabase Auth) y sesión en el sidebar
    ========================================================================== */
 
 /* ----------------------------------------------------------------------
@@ -2674,9 +2675,9 @@ button.doc-badge-failed:hover {
     padding-right: calc(16px + env(safe-area-inset-right));
   }
 
-  /* iOS hace zoom automático al enfocar campos con fuente < 16px */
-  .composer textarea,
-  .unlock-input {
+  /* iOS hace zoom automático al enfocar campos con fuente < 16px
+     (.auth-input ya nace a 16px en cualquier tamaño de pantalla) */
+  .composer textarea {
     font-size: 16px;
   }
 }
@@ -2834,10 +2835,6 @@ button.doc-badge-failed:active {
   background: color-mix(in srgb, var(--red) 16%, transparent);
 }
 
-.unlock-submit:active:not(:disabled) {
-  background: var(--accent-strong);
-}
-
 /* targets táctiles ≥44px sin agrandar lo visual: el área de toque se
    extiende con un pseudo-elemento transparente centrado */
 @media (pointer: coarse) {
@@ -2992,8 +2989,14 @@ button.doc-badge-failed:active {
 }
 
 /* ----------------------------------------------------------------------
-   15. Pantalla de desbloqueo (gate de acceso por clave, solo despliegues
-       con APP_ACCESS_KEY; en dev local nunca aparece)
+   15. Pantalla de acceso (Supabase Auth) y sesión en el sidebar
+
+   Sustituye al antiguo gate de clave compartida. Misma paleta y mismos
+   tokens que el resto: tarjeta flotante centrada, placa FIREtech arriba,
+   pestañas Entrar / Crear cuenta y un aviso permanente del dominio.
+
+   Los inputs son de 16px a propósito: por debajo, iOS Safari hace zoom al
+   enfocarlos y descuadra la pantalla.
    ---------------------------------------------------------------------- */
 
 .visually-hidden {
@@ -3008,7 +3011,38 @@ button.doc-badge-failed:active {
   white-space: nowrap;
 }
 
-.unlock-screen {
+/* --- arranque: se lee la sesión persistida (evita el parpadeo del login) --- */
+.auth-boot {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+
+.auth-boot-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: boot-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes boot-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* --- pantalla --- */
+.auth-screen {
   min-height: 100vh; /* fallback para navegadores sin dvh */
   min-height: 100dvh;
   display: flex;
@@ -3020,25 +3054,26 @@ button.doc-badge-failed:active {
   background: var(--bg);
 }
 
-.unlock-card {
+.auth-card {
   width: 100%;
-  max-width: 360px;
+  max-width: 380px;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 28px 26px 26px;
+  padding: 28px 26px 24px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 16px;
   box-shadow: var(--shadow-float);
+  animation: fade-up 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-.unlock-brand {
+.auth-brand {
   padding: 0 0 2px;
   justify-content: center;
 }
 
-.unlock-hint {
+.auth-lead {
   margin: 0;
   font-size: 13.5px;
   line-height: 1.5;
@@ -3046,48 +3081,298 @@ button.doc-badge-failed:active {
   text-align: center;
 }
 
-.unlock-input {
+/* aviso de sesión caducada (llegada por 401) */
+.auth-notice {
+  display: flex;
+  margin: 0;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--inset);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+/* --- pestañas Entrar / Crear cuenta --- */
+.auth-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 11px;
+  background: var(--inset);
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-2);
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.auth-tab:hover {
+  color: var(--text);
+}
+
+.auth-tab-active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow-soft);
+}
+
+/* --- formulario --- */
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.auth-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.auth-input {
   width: 100%;
-  padding: 9px 12px;
+  padding: 10px 12px;
   font: inherit;
-  font-size: 14px;
+  /* 16px: por debajo, iOS hace zoom al enfocar el campo */
+  font-size: 16px;
   color: var(--text);
   background: var(--inset);
   border: 1px solid var(--border-strong);
   border-radius: 10px;
   outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.unlock-input:focus-visible {
+.auth-input::placeholder {
+  color: var(--text-3);
+}
+
+.auth-input:focus-visible {
   border-color: var(--accent-border);
   box-shadow: 0 0 0 3px var(--accent-soft-2);
+  outline: none;
 }
 
-.unlock-error {
-  margin: -4px 0 0;
+.auth-input:disabled {
+  opacity: 0.6;
+}
+
+.auth-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: -2px 0 0;
   font-size: 12.5px;
+  line-height: 1.45;
   color: var(--red);
-  text-align: center;
+  animation: fade-up 0.2s ease both;
 }
 
-.unlock-submit {
-  padding: 9px 12px;
+.auth-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.auth-info {
+  margin: -2px 0 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--green) 35%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+  animation: fade-up 0.2s ease both;
+}
+
+.auth-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 10px 12px;
   font: inherit;
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 600;
   color: var(--accent-contrast);
   background: var(--accent);
-  border: none;
   border-radius: 10px;
-  cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, opacity 0.15s ease;
 }
 
-.unlock-submit:hover:not(:disabled) {
+.auth-submit:hover:not(:disabled) {
   background: var(--accent-strong);
 }
 
-.unlock-submit:disabled {
-  opacity: 0.55;
-  cursor: default;
+.auth-submit:active:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.auth-submit:disabled {
+  opacity: 0.65;
+}
+
+/* aviso permanente del dominio permitido */
+.auth-domain-note {
+  margin: 2px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+  text-align: center;
+}
+
+.auth-domain-note strong {
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* --- sesión en el pie del sidebar --- */
+.sidebar-user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px 6px;
+}
+
+.sidebar-user-email {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.sidebar-role {
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-2);
+  background: var(--hover);
+}
+
+/* el admin lleva el acento de marca, muy contenido */
+.sidebar-role-admin {
+  color: var(--chip-text);
+  background: var(--accent-soft);
+}
+
+.sidebar-signout-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-signout-btn svg {
+  color: var(--text-3);
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.sidebar-signout-btn:hover,
+.sidebar-signout-btn:active {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.sidebar-signout-btn:hover svg,
+.sidebar-signout-btn:active svg {
+  color: var(--accent);
+}
+
+/* --- documentos en solo lectura (rol vendedor) --- */
+.docs-readonly-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: 4px 14px 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--inset);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.docs-readonly-note svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+/* --- responsive: en móvil la tarjeta ocupa el ancho útil --- */
+@media (max-width: 420px) {
+  .auth-screen {
+    padding: 16px;
+    padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+      calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+  }
+
+  .auth-card {
+    max-width: none;
+    padding: 22px 18px 20px;
+    border-radius: 14px;
+  }
+}
+
+/* pantallas muy bajas (teclado abierto en móvil): la tarjeta se alinea arriba */
+@media (max-height: 560px) {
+  .auth-screen {
+    align-items: flex-start;
+  }
+}
+
+@media (pointer: coarse) {
+  .auth-tab {
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+
+  .sidebar-signout-btn {
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-card,
+  .auth-error,
+  .auth-info {
+    animation: none;
+  }
+
+  .auth-boot-dot {
+    animation: none;
+    opacity: 0.75;
+  }
 }

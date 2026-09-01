@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import {
   fetchHealth,
+  fetchMe,
   fetchSessionMessages,
   fetchSessions,
   normalizeSources,
@@ -9,21 +11,29 @@ import {
   streamChat,
 } from './api';
 import { Chat } from './components/Chat';
-import { UnlockGate } from './components/UnlockGate';
+import { AuthScreen } from './components/AuthScreen';
 import { DocumentsPanel } from './components/DocumentsPanel';
 import { Header } from './components/Header';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SourcesPanel } from './components/SourcesPanel';
 import type { CitationRef } from './lib/markdown';
+import { loadSession, onSessionChange, renewAccessToken, signOut } from './lib/session';
 import type {
   ChatMessage,
   Health,
+  Me,
   ServerMessage,
   SessionInfo,
   SourceFocus,
 } from './types';
 
 const HEALTH_INTERVAL_MS = 15_000;
+
+/**
+ * Ventana en la que un 401 NO se reintenta: si el backend rechaza un token
+ * recién renovado, la sesión ya no sirve y toca volver a la pantalla de acceso.
+ */
+const RENEW_GRACE_MS = 30_000;
 
 function newLocalId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -47,10 +57,43 @@ function toChatMessage(server: ServerMessage): ChatMessage {
 }
 
 export default function App() {
-  // --- gate de acceso (401 del backend con APP_ACCESS_KEY) ---
-  const [locked, setLocked] = useState(false);
+  // --- sesión de usuario (Supabase Auth) ---
+  // authLoading: se está leyendo la sesión persistida (evita el parpadeo de la
+  // pantalla de acceso al recargar con sesión válida).
+  const [authLoading, setAuthLoading] = useState(true);
+  const [session, setSession] = useState<Session | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
+  const [expired, setExpired] = useState(false);
 
-  useEffect(() => onUnauthorized(() => setLocked(true)), []);
+  const hasSessionRef = useRef(false);
+  const lastRenewRef = useRef(0);
+
+  useEffect(() => {
+    let alive = true;
+    void loadSession().then((s) => {
+      if (!alive) return;
+      setSession(s);
+      setAuthLoading(false);
+    });
+    // login, logout y TOKEN_REFRESHED (en esta y en otras pestañas)
+    const off = onSessionChange((s) => {
+      if (!alive) return;
+      setSession(s);
+      setAuthLoading(false);
+      if (s !== null) setExpired(false);
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, []);
+
+  useEffect(() => {
+    hasSessionRef.current = session !== null;
+  }, [session]);
+
+  const userId = session?.user.id ?? null;
+  const userEmail = session?.user.email ?? '';
 
   // --- estado global ---
   const [health, setHealth] = useState<Health | null>(null);
@@ -97,10 +140,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (userId === null) return; // sin sesión no hay app que vigilar
     void refreshHealth();
     const timer = setInterval(() => void refreshHealth(), HEALTH_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [refreshHealth]);
+  }, [refreshHealth, userId]);
 
   // --- sesiones ---
   const refreshSessions = useCallback(async () => {
@@ -115,9 +159,79 @@ export default function App() {
     }
   }, []);
 
+  // Las conversaciones son privadas: solo se piden con sesión, y se vuelven a
+  // pedir al cambiar de usuario.
   useEffect(() => {
+    if (userId === null) return;
     void refreshSessions();
-  }, [refreshSessions]);
+  }, [refreshSessions, userId]);
+
+  // --- identidad y rol (GET /api/me) ---
+  useEffect(() => {
+    if (userId === null) return;
+    let alive = true;
+    void fetchMe()
+      .then((info) => {
+        if (alive) setMe(info);
+      })
+      .catch(() => {
+        // Sin /api/me no se conoce el rol: se asume el de menos permisos
+        // (el sidebar no pinta insignia y Documentos queda en solo lectura).
+        if (alive) setMe(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [userId]);
+
+  // Cambio de usuario o cierre de sesión: nada del usuario anterior sobrevive
+  // en memoria (mensajes, conversaciones, panel de fuentes).
+  useEffect(() => {
+    abortRef.current?.abort();
+    sessionRequestRef.current++;
+    setMessages([]);
+    setSessions([]);
+    setSessionsLoaded(false);
+    setSessionsError(false);
+    setCurrentSessionId(null);
+    setSelectedMsgId(null);
+    setSourceFocus(null);
+    setLoadingMessages(false);
+    if (userId === null) setMe(null);
+  }, [userId]);
+
+  /**
+   * 401 del backend. El token que viajó ya venía renovado si le quedaba poco
+   * de vida (getAccessToken), así que un 401 casi siempre significa sesión
+   * inválida. Aun así se intenta UNA renovación (por si el refresco se cruzó
+   * con la petición); si el backend vuelve a rechazar dentro de la ventana de
+   * gracia, se cierra sesión y se vuelve a la pantalla de acceso.
+   */
+  const handleUnauthorized = useCallback(async () => {
+    if (!hasSessionRef.current) return; // ya estamos fuera
+    const now = Date.now();
+    if (now - lastRenewRef.current > RENEW_GRACE_MS) {
+      lastRenewRef.current = now;
+      const token = await renewAccessToken();
+      if (token !== null) return; // token nuevo: la siguiente petición irá bien
+    }
+    hasSessionRef.current = false;
+    setExpired(true);
+    await signOut();
+    setSession(null);
+  }, []);
+
+  useEffect(
+    () => onUnauthorized(() => void handleUnauthorized()),
+    [handleUnauthorized],
+  );
+
+  const handleSignOut = useCallback(async () => {
+    hasSessionRef.current = false;
+    setExpired(false);
+    await signOut();
+    setSession(null);
+  }, []);
 
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
@@ -374,11 +488,20 @@ export default function App() {
         ? 'Nueva conversación'
         : null;
 
-  // Bloqueado: solo la pantalla de desbloqueo. Tras validar y guardar la
-  // clave se recarga la página, de modo que todas las cargas iniciales
-  // (salud, sesiones, documentos) se reintentan ya con el header X-App-Key.
-  if (locked) {
-    return <UnlockGate onUnlocked={() => window.location.reload()} />;
+  // Leyendo la sesión persistida: ni app ni pantalla de acceso todavía (con
+  // sesión válida el salto directo evita un parpadeo del formulario).
+  if (authLoading) {
+    return (
+      <div className="auth-boot" role="status" aria-label="Cargando">
+        <span className="auth-boot-dot" aria-hidden="true" />
+      </div>
+    );
+  }
+
+  // Sin sesión: solo la pantalla de acceso. Ninguna llamada a /api/* sale
+  // hasta que haya token (los efectos están condicionados a userId).
+  if (session === null) {
+    return <AuthScreen expired={expired} />;
   }
 
   return (
@@ -392,9 +515,12 @@ export default function App() {
         health={health}
         healthError={healthError}
         documentsOpen={docsOpen}
+        userEmail={userEmail}
+        role={me?.role ?? null}
         onSelect={(id) => void selectSession(id)}
         onNew={newConversation}
         onOpenDocuments={openDocuments}
+        onSignOut={() => void handleSignOut()}
       />
       {sidebarOpen && (
         <div
@@ -447,6 +573,7 @@ export default function App() {
         onClose={closeDocuments}
         onHealthRefresh={() => void refreshHealth()}
         uploadLimitMb={health?.upload_limit_mb}
+        canManage={me?.role === 'admin'}
       />
     </div>
   );

@@ -3,6 +3,10 @@
 // docs-closed, así el estado de subida/polling sobrevive a cerrar el panel.
 //
 // Decisiones:
+// - Roles (SPEC.md, "Autenticación multiusuario"): todos ven la lista completa,
+//   pero subir y borrar es exclusivo de admin. Con canManage en false no se
+//   monta ni la dropzone ni los botones de borrar: la UI no ofrece nada que el
+//   backend vaya a rechazar con 403.
 // - Progreso de subida REAL con XMLHttpRequest (ver uploadDocument en api.ts);
 //   si el navegador no puede computarlo, barra indeterminada con shimmer.
 // - Polling de GET /api/documents cada 4 s SOLO mientras haya documentos en
@@ -69,6 +73,12 @@ interface DocumentsPanelProps {
    * si el backend no lo expone: se asume DEFAULT_UPLOAD_LIMIT_MB.
    */
   uploadLimitMb?: number;
+  /**
+   * Solo el rol `admin` sube y borra (el backend responde 403 al resto). Un
+   * vendedor ve la lista completa, sin dropzone ni botones de borrar. También
+   * es false mientras no se conoce el rol: se asume el menor permiso.
+   */
+  canManage: boolean;
 }
 
 interface UploadState {
@@ -103,6 +113,7 @@ export function DocumentsPanel({
   onClose,
   onHealthRefresh,
   uploadLimitMb,
+  canManage,
 }: DocumentsPanelProps) {
   const limitMb = uploadLimitMb ?? DEFAULT_UPLOAD_LIMIT_MB;
   const [docs, setDocs] = useState<DocumentInfo[] | null>(null);
@@ -443,76 +454,90 @@ export function DocumentsPanel({
         </div>
 
         <div className="docs-body">
-          {/* zona de subida */}
-          <div className="docs-upload">
-            {upload === null ? (
-              <button
-                type="button"
-                className={`dropzone ${dragOver ? 'dropzone-active' : ''}`}
-                onClick={() => fileInputRef.current?.click()}
-                onDragEnter={handleDragEnter}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                aria-label="Subir un documento: arrastra un archivo aquí o pulsa para elegirlo"
-              >
-                <IconUpload size={20} />
-                <span className="dropzone-text">Arrastra un archivo o haz clic para subirlo</span>
-                <span className="dropzone-hint">PDF, XLSX, CSV, TXT o MD · máx. {limitMb} MB</span>
-              </button>
-            ) : (
-              <div className="upload-progress" role="status" aria-live="polite">
-                <div className="upload-progress-head">
-                  <span className="upload-file" title={upload.fileName}>
-                    {upload.fileName}
+          {/* rol vendedor: lista completa, gestión fuera (nota discreta) */}
+          {!canManage && (
+            <p className="docs-readonly-note">
+              <IconLock size={13} />
+              <span>Solo un administrador puede subir o borrar documentos.</span>
+            </p>
+          )}
+
+          {/* zona de subida (solo admin) */}
+          {canManage && (
+            <div className="docs-upload">
+              {upload === null ? (
+                <button
+                  type="button"
+                  className={`dropzone ${dragOver ? 'dropzone-active' : ''}`}
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragEnter={handleDragEnter}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  aria-label="Subir un documento: arrastra un archivo aquí o pulsa para elegirlo"
+                >
+                  <IconUpload size={20} />
+                  <span className="dropzone-text">
+                    Arrastra un archivo o haz clic para subirlo
                   </span>
-                  <button
-                    type="button"
-                    className="upload-cancel"
-                    onClick={() => uploadAbortRef.current?.abort()}
-                  >
-                    Cancelar
-                  </button>
+                  <span className="dropzone-hint">
+                    PDF, XLSX, CSV, TXT o MD · máx. {limitMb} MB
+                  </span>
+                </button>
+              ) : (
+                <div className="upload-progress" role="status" aria-live="polite">
+                  <div className="upload-progress-head">
+                    <span className="upload-file" title={upload.fileName}>
+                      {upload.fileName}
+                    </span>
+                    <button
+                      type="button"
+                      className="upload-cancel"
+                      onClick={() => uploadAbortRef.current?.abort()}
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                  <div className="upload-bar" aria-hidden="true">
+                    {upload.progress === null ? (
+                      <div className="upload-fill upload-fill-indeterminate" />
+                    ) : (
+                      <div
+                        className="upload-fill"
+                        style={{ transform: `scaleX(${Math.min(1, upload.progress)})` }}
+                      />
+                    )}
+                  </div>
+                  <span className="upload-status">
+                    {upload.progress === null ? (
+                      <span className="shimmer-text">Subiendo…</span>
+                    ) : upload.progress >= 1 ? (
+                      <span className="shimmer-text">Procesando la subida…</span>
+                    ) : (
+                      `Subiendo… ${Math.round(upload.progress * 100)} %`
+                    )}
+                  </span>
                 </div>
-                <div className="upload-bar" aria-hidden="true">
-                  {upload.progress === null ? (
-                    <div className="upload-fill upload-fill-indeterminate" />
-                  ) : (
-                    <div
-                      className="upload-fill"
-                      style={{ transform: `scaleX(${Math.min(1, upload.progress)})` }}
-                    />
-                  )}
+              )}
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.xlsx,.csv,.txt,.md"
+                style={{ display: 'none' }}
+                tabIndex={-1}
+                aria-hidden="true"
+                onChange={handleFilePicked}
+              />
+
+              {uploadError !== null && (
+                <div className="upload-error" role="alert">
+                  <IconAlert size={14} />
+                  <span>{uploadError}</span>
                 </div>
-                <span className="upload-status">
-                  {upload.progress === null ? (
-                    <span className="shimmer-text">Subiendo…</span>
-                  ) : upload.progress >= 1 ? (
-                    <span className="shimmer-text">Procesando la subida…</span>
-                  ) : (
-                    `Subiendo… ${Math.round(upload.progress * 100)} %`
-                  )}
-                </span>
-              </div>
-            )}
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,.xlsx,.csv,.txt,.md"
-              style={{ display: 'none' }}
-              tabIndex={-1}
-              aria-hidden="true"
-              onChange={handleFilePicked}
-            />
-
-            {uploadError !== null && (
-              <div className="upload-error" role="alert">
-                <IconAlert size={14} />
-                <span>{uploadError}</span>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           {/* aviso de sondeo interrumpido */}
           {pollBroken && anyProcessing && (
@@ -555,7 +580,11 @@ export function DocumentsPanel({
               <span className="docs-empty-icon" aria-hidden="true">
                 <IconDocument size={20} />
               </span>
-              <p>No hay documentos indexados todavía. Sube el primero desde la zona de arriba.</p>
+              <p>
+                {canManage
+                  ? 'No hay documentos indexados todavía. Sube el primero desde la zona de arriba.'
+                  : 'No hay documentos indexados todavía. Un administrador debe subir el primero.'}
+              </p>
             </div>
           )}
 
@@ -608,7 +637,7 @@ export function DocumentsPanel({
                       </span>
 
                       <span className="doc-side">
-                        {isConfirm ? (
+                        {isConfirm && canManage ? (
                           <span className="doc-confirm">
                             <span>¿Borrar?</span>
                             <button
@@ -655,33 +684,36 @@ export function DocumentsPanel({
                               </button>
                             )}
 
-                            {isBase ? (
-                              <span
-                                className="doc-lock"
-                                title="Catálogo base, no se puede borrar"
-                                aria-label="Catálogo base, no se puede borrar"
-                              >
-                                <IconLock size={14} />
-                              </span>
-                            ) : isDeleting ? (
-                              <span
-                                className="doc-lock"
-                                role="status"
-                                aria-label={`Borrando ${d.file_name}`}
-                              >
-                                <IconSpinner size={14} />
-                              </span>
-                            ) : (
-                              <button
-                                type="button"
-                                className="doc-action-btn"
-                                onClick={() => setConfirmFor(d.file_name)}
-                                title="Borrar del índice"
-                                aria-label={`Borrar ${d.file_name} del índice`}
-                              >
-                                <IconTrash size={15} />
-                              </button>
-                            )}
+                            {/* gestión solo para admin: el vendedor ve la
+                                ficha completa, sin acciones */}
+                            {canManage &&
+                              (isBase ? (
+                                <span
+                                  className="doc-lock"
+                                  title="Catálogo base, no se puede borrar"
+                                  aria-label="Catálogo base, no se puede borrar"
+                                >
+                                  <IconLock size={14} />
+                                </span>
+                              ) : isDeleting ? (
+                                <span
+                                  className="doc-lock"
+                                  role="status"
+                                  aria-label={`Borrando ${d.file_name}`}
+                                >
+                                  <IconSpinner size={14} />
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="doc-action-btn"
+                                  onClick={() => setConfirmFor(d.file_name)}
+                                  title="Borrar del índice"
+                                  aria-label={`Borrar ${d.file_name} del índice`}
+                                >
+                                  <IconTrash size={15} />
+                                </button>
+                              ))}
                           </>
                         )}
                       </span>

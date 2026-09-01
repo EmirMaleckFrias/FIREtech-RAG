@@ -32,11 +32,6 @@ class Settings(BaseSettings):
     # entorno (columna `environment`, migración 003).
     environment: str = "local"
 
-    # Clave de acceso de la app desplegada. Vacía (default) = sin gate: el
-    # backend no exige nada (flujo dev local intacto). Definida y no vacía =
-    # todo /api/* excepto /api/health exige el header X-App-Key con este valor.
-    app_access_key: str = ""
-
     max_hops: int = 4
     rerank_top_k: int = 8
     search_top_k: int = 30

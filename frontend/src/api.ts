@@ -2,11 +2,13 @@
 // En dev, Vite proxya /api -> http://localhost:8000 (ver vite.config.ts).
 
 import { SSEParser } from './lib/sse';
+import { getAccessToken } from './lib/session';
 import type {
   DocumentInfo,
   DocumentStatus,
   Health,
   Hop,
+  Me,
   ServerMessage,
   SessionInfo,
   Source,
@@ -16,36 +18,21 @@ import type {
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 /* ----------------------------------------------------------------------
-   Gate de acceso por clave (despliegue con APP_ACCESS_KEY en el backend).
+   Autenticación (SPEC.md, "Autenticación multiusuario").
 
-   TODAS las llamadas a /api/* añaden el header X-App-Key con la clave
-   guardada en localStorage. Si el backend responde 401 (clave ausente o
-   incorrecta), se notifica a los suscriptores (App muestra la pantalla de
-   desbloqueo). En dev local el backend no define APP_ACCESS_KEY y nunca
-   devuelve 401: este código es inerte.
+   TODAS las llamadas a /api/* (fetch, el XHR de subida y el stream del chat)
+   viajan con `Authorization: Bearer <access_token de Supabase>`. El token se
+   pide justo antes de cada petición: getAccessToken() lo renueva solo si le
+   queda poco de vida, así que un stream largo nunca sale con un token a punto
+   de caducar. GET /api/health es público y funciona igual sin token.
+
+   Si el backend responde 401 se notifica a los suscriptores (App vuelve a la
+   pantalla de acceso).
    ---------------------------------------------------------------------- */
 
-export const APP_KEY_STORAGE = 'firetech_app_key';
-
-export function getStoredAppKey(): string | null {
-  try {
-    return window.localStorage.getItem(APP_KEY_STORAGE);
-  } catch {
-    return null; // modo privado / storage bloqueado
-  }
-}
-
-export function setStoredAppKey(key: string): void {
-  try {
-    window.localStorage.setItem(APP_KEY_STORAGE, key);
-  } catch {
-    // sin storage: la clave vivirá solo lo que dure la página
-  }
-}
-
-function appKeyHeaders(): Record<string, string> {
-  const key = getStoredAppKey();
-  return key ? { 'X-App-Key': key } : {};
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getAccessToken();
+  return token !== null ? { Authorization: `Bearer ${token}` } : {};
 }
 
 type UnauthorizedListener = () => void;
@@ -59,7 +46,7 @@ export function onUnauthorized(listener: UnauthorizedListener): () => void {
   };
 }
 
-const UNAUTHORIZED_MSG = 'Clave de acceso requerida.';
+const UNAUTHORIZED_MSG = 'Sesión no válida o expirada.';
 
 /** Notifica el 401 a los suscriptores y devuelve el Error a lanzar. */
 function unauthorized(): Error {
@@ -67,26 +54,33 @@ function unauthorized(): Error {
   return new Error(UNAUTHORIZED_MSG);
 }
 
-/**
- * Comprueba una clave candidata contra un endpoint protegido por el gate
- * (/api/health está exento, así que no sirve). 401 → false; cualquier otra
- * respuesta → la clave vale (o el backend no tiene gate). Errores de red
- * se propagan.
- */
-export async function verifyAppKey(key: string): Promise<boolean> {
-  const res = await fetch('/api/sessions', { headers: { 'X-App-Key': key } });
-  return res.status !== 401;
-}
-
 async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: appKeyHeaders() });
+  const res = await fetch(url, { headers: await authHeaders() });
   if (res.status === 401) throw unauthorized();
   if (!res.ok) throw new Error(`HTTP ${res.status} en ${url}`);
   return (await res.json()) as T;
 }
 
-export function fetchHealth(): Promise<Health> {
-  return getJson<Health>('/api/health');
+/**
+ * GET /api/health. Endpoint público: se sondea cada 15 s y NO participa del
+ * ciclo de 401, para que un backend a medio desplegar marque "sin conexión"
+ * en vez de expulsar al usuario a la pantalla de acceso.
+ */
+export async function fetchHealth(): Promise<Health> {
+  const res = await fetch('/api/health', { headers: await authHeaders() });
+  if (!res.ok) throw new Error(`HTTP ${res.status} en /api/health`);
+  return (await res.json()) as Health;
+}
+
+/** GET /api/me: identidad y rol del usuario del token. */
+export async function fetchMe(): Promise<Me> {
+  const data = await getJson<Record<string, unknown>>('/api/me');
+  return {
+    id: typeof data.id === 'string' ? data.id : '',
+    email: typeof data.email === 'string' ? data.email : '',
+    // Cualquier valor inesperado degrada al rol con menos permisos.
+    role: data.role === 'admin' ? 'admin' : 'vendedor',
+  };
 }
 
 export async function fetchSessions(): Promise<SessionInfo[]> {
@@ -104,7 +98,7 @@ export async function fetchSessionMessages(sessionId: string): Promise<ServerMes
 export async function sendFeedback(messageId: string, rating: 1 | -1): Promise<void> {
   const res = await fetch('/api/feedback', {
     method: 'POST',
-    headers: { ...JSON_HEADERS, ...appKeyHeaders() },
+    headers: { ...JSON_HEADERS, ...(await authHeaders()) },
     body: JSON.stringify({ message_id: messageId, rating, comment: null }),
   });
   if (res.status === 401) throw unauthorized();
@@ -161,7 +155,7 @@ function extractDetail(body: string): string | null {
 export async function fetchDocuments(): Promise<DocumentInfo[]> {
   let res: Response;
   try {
-    res = await fetch('/api/documents', { headers: appKeyHeaders() });
+    res = await fetch('/api/documents', { headers: await authHeaders() });
   } catch {
     throw new Error(OFFLINE_MSG);
   }
@@ -208,12 +202,18 @@ function uploadErrorMessage(status: number, body: string): string {
  *
  * 400/409 se rechazan con Error cuyo mensaje es el `detail` del backend (o
  * un texto legible en español si no vino). Cancelable vía AbortSignal.
+ *
+ * El token se resuelve ANTES de abrir el XHR: setRequestHeader solo es válido
+ * entre open() y send(), y una subida puede durar minutos, así que se manda el
+ * más reciente posible.
  */
-export function uploadDocument(
+export async function uploadDocument(
   file: File,
   onProgress?: (fraction: number | null) => void,
   signal?: AbortSignal,
 ): Promise<UploadAccepted> {
+  const headers = await authHeaders();
+
   return new Promise<UploadAccepted>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
 
@@ -227,8 +227,9 @@ export function uploadDocument(
 
     xhr.open('POST', '/api/documents/upload');
     xhr.responseType = 'text';
-    const appKey = getStoredAppKey();
-    if (appKey) xhr.setRequestHeader('X-App-Key', appKey);
+    for (const [name, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(name, value);
+    }
 
     xhr.upload.onprogress = (ev) => {
       onProgress?.(ev.lengthComputable && ev.total > 0 ? ev.loaded / ev.total : null);
@@ -267,7 +268,7 @@ export async function deleteDocument(fileName: string): Promise<void> {
   try {
     res = await fetch(`/api/documents/${encodeURIComponent(fileName)}`, {
       method: 'DELETE',
-      headers: appKeyHeaders(),
+      headers: await authHeaders(),
     });
   } catch {
     throw new Error(OFFLINE_MSG);
@@ -343,7 +344,11 @@ export async function streamChat(
 ): Promise<void> {
   const res = await fetch('/api/chat', {
     method: 'POST',
-    headers: { ...JSON_HEADERS, Accept: 'text/event-stream', ...appKeyHeaders() },
+    headers: {
+      ...JSON_HEADERS,
+      Accept: 'text/event-stream',
+      ...(await authHeaders()),
+    },
     body: JSON.stringify({ session_id: sessionId, message }),
     signal,
   });

@@ -195,6 +195,17 @@ export function IconLock({ size = 14, ...props }: IconProps) {
   );
 }
 
+/** Puerta con flecha saliendo (cerrar sesión). */
+export function IconLogout({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <path d="M10 20.5H6.5A2.5 2.5 0 0 1 4 18V6a2.5 2.5 0 0 1 2.5-2.5H10" />
+      <path d="m16 16.5 4.5-4.5L16 7.5" />
+      <path d="M20.5 12H9.5" />
+    </svg>
+  );
+}
+
 /* ---- íconos de las tarjetas de bienvenida (trazo lineal) ---- */
 
 export function IconDroplet({ size = 18, ...props }: IconProps) {

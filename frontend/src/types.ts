@@ -11,6 +11,16 @@ export interface Health {
   upload_limit_mb?: number;
 }
 
+/** Roles de negocio (profiles.role). `vendedor` solo consulta. */
+export type UserRole = 'admin' | 'vendedor';
+
+/** Identidad del usuario del token, tal como la devuelve GET /api/me. */
+export interface Me {
+  id: string;
+  email: string;
+  role: UserRole;
+}
+
 export interface SessionInfo {
   id: string;
   title: string | null;

@@ -2,7 +2,15 @@
 
 Todas las funciones son síncronas (desde endpoints async se llaman con
 fastapi.concurrency.run_in_threadpool). Si SUPABASE_URL o SUPABASE_SERVICE_KEY
-están vacías, se usa un fallback en memoria con contratos idénticos.
+están vacías, se usa un fallback en memoria con contratos idénticos (incluido
+el aislamiento por usuario; en ese modo `auth.current_user` devuelve siempre el
+mismo admin ficticio, así que en la práctica todo pertenece a ese usuario).
+
+Aislamiento por usuario (migración 004): `chat_sessions.user_id` es el dueño de
+la conversación. Cada usuario ve y escribe solo en las suyas; las sesiones
+históricas (`user_id` nulo) solo las ven los admin. Si una sesión existe pero es
+de otro usuario, las funciones lanzan `SessionNotFound` → los endpoints
+responden 404 (no 403) para no filtrar su existencia.
 """
 from __future__ import annotations
 
@@ -61,35 +69,125 @@ def db_available() -> bool:
     return _get_client() is not None
 
 
+class SessionNotFound(Exception):
+    """La sesión no existe o pertenece a otro usuario.
+
+    Los endpoints la traducen a 404 (nunca 403): un 403 confirmaría que la
+    conversación existe, lo que ya sería una fuga de información.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Sesiones y mensajes
 # ---------------------------------------------------------------------------
-def create_session(title: str) -> dict:
-    """Crea una sesión de chat. Devuelve {"id", "title", "created_at"}."""
+def _session_owner_row(session_id: str) -> dict | None:
+    """Fila {id, user_id} de la sesión, o None si no existe."""
     client = _get_client()
     if client is not None:
-        resp = client.table("chat_sessions").insert({"title": title}).execute()
+        try:
+            resp = (
+                client.table("chat_sessions")
+                .select("id, user_id")
+                .eq("id", session_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            # session_id con formato inválido (no-uuid) u otro error de la
+            # consulta: se trata como "no existe".
+            logger.warning("Consulta de pertenencia fallida para %s", session_id)
+            return None
+        rows = resp.data or []
+        return rows[0] if rows else None
+    return _mem_sessions.get(session_id)
+
+
+def assert_session_access(
+    session_id: str, user_id: str | None, is_admin: bool = False
+) -> None:
+    """Verifica que la sesión exista y sea accesible por el usuario.
+
+    Accesible = es suya, o es una sesión histórica (`user_id` nulo) y el
+    usuario es admin. En cualquier otro caso → SessionNotFound.
+    """
+    row = _session_owner_row(session_id)
+    if row is None:
+        raise SessionNotFound(session_id)
+    owner = row.get("user_id")
+    if owner is None:
+        if not is_admin:
+            raise SessionNotFound(session_id)
+        return
+    if user_id is None or str(owner) != str(user_id):
+        raise SessionNotFound(session_id)
+
+
+def create_session(title: str, user_id: str | None = None) -> dict:
+    """Crea una sesión de chat propiedad de `user_id`.
+
+    Devuelve {"id", "title", "created_at"}.
+    """
+    client = _get_client()
+    if client is not None:
+        payload: dict[str, Any] = {"title": title, "user_id": user_id}
+        resp = client.table("chat_sessions").insert(payload).execute()
         row = resp.data[0]
         return {"id": row["id"], "title": row["title"], "created_at": row["created_at"]}
-    row = {"id": str(uuid.uuid4()), "title": title, "created_at": _now_iso()}
+    row = {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "created_at": _now_iso(),
+        "user_id": user_id,
+    }
     _mem_sessions[row["id"]] = row
     return row
 
 
-def list_sessions() -> list[dict]:
+def list_sessions(user_id: str | None = None, is_admin: bool = False) -> list[dict]:
+    """Sesiones visibles para el usuario (las suyas; el admin ve además las
+    históricas con `user_id` nulo)."""
     client = _get_client()
     if client is not None:
-        resp = (
+        query = (
             client.table("chat_sessions")
             .select("id, title, created_at")
             .order("created_at", desc=True)
-            .execute()
         )
-        return list(resp.data or [])
-    return sorted(_mem_sessions.values(), key=lambda r: r["created_at"], reverse=True)
+        if is_admin:
+            # Propias + históricas sin dueño (migración 004).
+            if user_id:
+                query = query.or_(f"user_id.eq.{user_id},user_id.is.null")
+            else:
+                query = query.is_("user_id", "null")
+        elif user_id:
+            query = query.eq("user_id", user_id)
+        else:
+            # Sin usuario y sin ser admin: no hay nada que se pueda mostrar.
+            return []
+        return list(query.execute().data or [])
+
+    def _visible(row: dict) -> bool:
+        owner = row.get("user_id")
+        if owner is None:
+            return is_admin
+        return user_id is not None and str(owner) == str(user_id)
+
+    return sorted(
+        (
+            {"id": r["id"], "title": r["title"], "created_at": r["created_at"]}
+            for r in _mem_sessions.values()
+            if _visible(r)
+        ),
+        key=lambda r: r["created_at"],
+        reverse=True,
+    )
 
 
-def get_messages(session_id: str) -> list[dict]:
+def get_messages(
+    session_id: str, user_id: str | None = None, is_admin: bool = False
+) -> list[dict]:
+    """Mensajes de una sesión, verificando antes su pertenencia."""
+    assert_session_access(session_id, user_id, is_admin)
     client = _get_client()
     if client is not None:
         resp = (
@@ -104,9 +202,16 @@ def get_messages(session_id: str) -> list[dict]:
 
 
 def save_message(
-    session_id: str, role: str, content: str, sources: list, hops: list
+    session_id: str,
+    role: str,
+    content: str,
+    sources: list,
+    hops: list,
+    user_id: str | None = None,
+    is_admin: bool = False,
 ) -> dict:
-    """Guarda un mensaje. Devuelve la fila insertada (con id)."""
+    """Guarda un mensaje (verificando pertenencia). Devuelve la fila insertada."""
+    assert_session_access(session_id, user_id, is_admin)
     client = _get_client()
     if client is not None:
         resp = (
@@ -136,7 +241,46 @@ def save_message(
     return row
 
 
-def save_feedback(message_id: str, rating: int, comment: str | None) -> None:
+def _message_session_id(message_id: str) -> str | None:
+    """session_id del mensaje, o None si el mensaje no existe."""
+    client = _get_client()
+    if client is not None:
+        try:
+            resp = (
+                client.table("chat_messages")
+                .select("session_id")
+                .eq("id", message_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            logger.warning("Consulta de mensaje fallida para %s", message_id)
+            return None
+        rows = resp.data or []
+        return rows[0].get("session_id") if rows else None
+    for session_id, rows in _mem_messages.items():
+        if any(r.get("id") == message_id for r in rows):
+            return session_id
+    return None
+
+
+def save_feedback(
+    message_id: str,
+    rating: int,
+    comment: str | None,
+    user_id: str | None = None,
+    is_admin: bool = False,
+) -> None:
+    """Guarda feedback de un mensaje de una conversación del propio usuario.
+
+    Si el mensaje no existe o su sesión es de otro usuario → SessionNotFound
+    (el endpoint responde 404).
+    """
+    session_id = _message_session_id(message_id)
+    if session_id is None:
+        raise SessionNotFound(message_id)
+    assert_session_access(str(session_id), user_id, is_admin)
+
     client = _get_client()
     if client is not None:
         client.table("message_feedback").insert(
@@ -165,8 +309,13 @@ def register_document(
     brand: str,
     status: str = "ready",
     error: str | None = None,
+    uploaded_by: str | None = None,
 ) -> str | None:
-    """Crea/actualiza el registro de un documento. Devuelve su id (o None)."""
+    """Crea/actualiza el registro de un documento. Devuelve su id (o None).
+
+    `uploaded_by` = id del admin que lo subió (migración 004); None para la
+    ingesta por lotes (script `ingest.py`, sin usuario).
+    """
     payload = {
         "file_name": file_name,
         "sha256": sha256,
@@ -176,6 +325,7 @@ def register_document(
         "status": status,
         "error": error,
         "environment": get_settings().environment,
+        "uploaded_by": uploaded_by,
         "ingested_at": _now_iso(),
     }
     client = _get_client()
@@ -187,16 +337,19 @@ def register_document(
                 .execute()
             )
         except Exception:
-            # Migraciones 002/003 (status/error/environment) aún no aplicadas:
-            # registra sin esas columnas para no romper la ingesta existente.
+            # Migraciones 002/003/004 (status/error/environment/uploaded_by)
+            # aún no aplicadas: registra sin esas columnas para no romper la
+            # ingesta existente.
             logger.warning(
-                "Upsert de documents con status/error/environment falló; "
-                "reintento sin esas columnas (¿faltan aplicar "
-                "002_document_status.sql / 003_document_environment.sql?)."
+                "Upsert de documents con status/error/environment/uploaded_by "
+                "falló; reintento sin esas columnas (¿faltan aplicar "
+                "002_document_status.sql / 003_document_environment.sql / "
+                "004_auth_multiusuario.sql?)."
             )
             payload.pop("status", None)
             payload.pop("error", None)
             payload.pop("environment", None)
+            payload.pop("uploaded_by", None)
             resp = (
                 client.table("documents")
                 .upsert(payload, on_conflict="file_name")

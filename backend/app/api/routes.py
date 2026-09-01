@@ -8,7 +8,7 @@ import logging
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -16,6 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.models import SearchFilters
 from app.services import supabase_db
 from app.services.agent import run_agent
+from app.services.auth import AuthUser, current_user
 from app.services.qdrant import collection_count, hybrid_search
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _TITLE_LEN = 60
+_SESSION_404 = "Conversación no encontrada"
 
 
 def _json(data: dict) -> str:
@@ -30,11 +32,18 @@ def _json(data: dict) -> str:
 
 
 def _save_partial_message(
-    session_id: str, content: str, sources: list, hops: list
+    session_id: str,
+    content: str,
+    sources: list,
+    hops: list,
+    user_id: str,
+    is_admin: bool,
 ) -> None:
     """save_message best-effort para el guardado fire-and-forget tras un abort."""
     try:
-        supabase_db.save_message(session_id, "assistant", content, sources, hops)
+        supabase_db.save_message(
+            session_id, "assistant", content, sources, hops, user_id, is_admin
+        )
     except Exception:
         logger.exception(
             "No se pudo guardar la respuesta parcial (session %s)", session_id
@@ -67,6 +76,7 @@ class FeedbackRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @router.get("/health")
 async def health() -> dict:
+    """Público (sin token): lo usa el frontend antes de autenticarse."""
     from app.api.documents import UPLOAD_LIMIT_MB
 
     count = await run_in_threadpool(collection_count)
@@ -78,8 +88,15 @@ async def health() -> dict:
     }
 
 
+@router.get("/me")
+async def me(user: AuthUser = Depends(current_user)) -> dict:
+    return {"id": user.id, "email": user.email, "role": user.role}
+
+
 @router.post("/search")
-async def search(body: SearchRequest) -> dict:
+async def search(
+    body: SearchRequest, user: AuthUser = Depends(current_user)
+) -> dict:
     filters = SearchFilters(brand=body.brand, category=body.category)
     chunks = await hybrid_search(body.query, filters, body.top_k)
     return {
@@ -99,11 +116,26 @@ async def search(body: SearchRequest) -> dict:
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest) -> EventSourceResponse:
+async def chat(
+    body: ChatRequest, user: AuthUser = Depends(current_user)
+) -> EventSourceResponse:
     """Chat con el agente multi-hop. Respuesta SSE (text/event-stream).
 
     Eventos: session → (hop | sources | token)* → done, o error ante excepción.
     """
+    # La pertenencia de la sesión se verifica ANTES de abrir el stream: así un
+    # session_id ajeno devuelve un 404 JSON normal en vez de un 200 con un
+    # evento de error dentro del SSE.
+    if body.session_id is not None:
+        try:
+            await run_in_threadpool(
+                supabase_db.assert_session_access,
+                body.session_id,
+                user.id,
+                user.is_admin,
+            )
+        except supabase_db.SessionNotFound:
+            raise HTTPException(status_code=404, detail=_SESSION_404)
 
     async def event_generator():
         # Acumulador de la respuesta parcial: si el cliente aborta a mitad de
@@ -120,12 +152,16 @@ async def chat(body: ChatRequest) -> EventSourceResponse:
             # 1. Sesión (crear si session_id es null; título = primeros 60 chars).
             if session_id is None:
                 title = body.message.strip()[:_TITLE_LEN]
-                session = await run_in_threadpool(supabase_db.create_session, title)
+                session = await run_in_threadpool(
+                    supabase_db.create_session, title, user.id
+                )
                 session_id = session["id"]
             yield {"event": "session", "data": _json({"session_id": session_id})}
 
             # 2. Historial previo (antes de guardar el mensaje actual).
-            rows = await run_in_threadpool(supabase_db.get_messages, session_id)
+            rows = await run_in_threadpool(
+                supabase_db.get_messages, session_id, user.id, user.is_admin
+            )
             history = [
                 {"role": r["role"], "content": r["content"]}
                 for r in rows
@@ -134,7 +170,14 @@ async def chat(body: ChatRequest) -> EventSourceResponse:
 
             # 3. Guardar el mensaje del usuario.
             await run_in_threadpool(
-                supabase_db.save_message, session_id, "user", body.message, [], []
+                supabase_db.save_message,
+                session_id,
+                "user",
+                body.message,
+                [],
+                [],
+                user.id,
+                user.is_admin,
             )
             user_saved = True
 
@@ -168,6 +211,8 @@ async def chat(body: ChatRequest) -> EventSourceResponse:
                     final["content"],
                     final["sources"],
                     final["hops"],
+                    user.id,
+                    user.is_admin,
                 )
                 assistant_saved = True
                 message_id = saved["id"]
@@ -201,6 +246,8 @@ async def chat(body: ChatRequest) -> EventSourceResponse:
                         content,
                         partial_sources,
                         partial_hops,
+                        user.id,
+                        user.is_admin,
                     ),
                 )
             raise
@@ -222,8 +269,10 @@ async def chat(body: ChatRequest) -> EventSourceResponse:
 
 
 @router.get("/sessions")
-async def sessions() -> dict:
-    rows = await run_in_threadpool(supabase_db.list_sessions)
+async def sessions(user: AuthUser = Depends(current_user)) -> dict:
+    rows = await run_in_threadpool(
+        supabase_db.list_sessions, user.id, user.is_admin
+    )
     return {
         "sessions": [
             {"id": r["id"], "title": r["title"], "created_at": r["created_at"]}
@@ -233,8 +282,16 @@ async def sessions() -> dict:
 
 
 @router.get("/sessions/{session_id}/messages")
-async def session_messages(session_id: uuid.UUID) -> dict:
-    rows = await run_in_threadpool(supabase_db.get_messages, str(session_id))
+async def session_messages(
+    session_id: uuid.UUID, user: AuthUser = Depends(current_user)
+) -> dict:
+    try:
+        rows = await run_in_threadpool(
+            supabase_db.get_messages, str(session_id), user.id, user.is_admin
+        )
+    except supabase_db.SessionNotFound:
+        # 404 también cuando la sesión existe pero es de otro usuario.
+        raise HTTPException(status_code=404, detail=_SESSION_404)
     return {
         "messages": [
             {
@@ -250,11 +307,22 @@ async def session_messages(session_id: uuid.UUID) -> dict:
 
 
 @router.post("/feedback")
-async def feedback(body: FeedbackRequest) -> dict:
+async def feedback(
+    body: FeedbackRequest, user: AuthUser = Depends(current_user)
+) -> dict:
     try:
         await run_in_threadpool(
-            supabase_db.save_feedback, str(body.message_id), body.rating, body.comment
+            supabase_db.save_feedback,
+            str(body.message_id),
+            body.rating,
+            body.comment,
+            user.id,
+            user.is_admin,
         )
+    except supabase_db.SessionNotFound:
+        # El mensaje no existe o su conversación es de otro usuario: 404 en
+        # ambos casos (no se revela cuál).
+        raise HTTPException(status_code=404, detail="message_id no encontrado")
     except Exception:
         # Violación de FK: el message_id (UUID válido) no existe en chat_messages.
         logger.exception("save_feedback falló para message_id=%s", body.message_id)
