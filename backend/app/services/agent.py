@@ -23,6 +23,7 @@ from app.services.qdrant import (
     hybrid_search,
     index_inventory,
     resolve_brand,
+    resolve_supplier,
 )
 from app.services.reranker import filter_relevant, rerank
 
@@ -310,20 +311,33 @@ async def _execute_price_search(
     dentro de lo que el pool semántico alcanzó a cubrir.
     """
     limite = max(1, min(int(limite or 10), 20))
-    # La marca NO es filtro duro de payload en este camino: el origen trae
-    # marcas mal etiquetadas (p. ej. VLF-500 con brand "Fire-Lite" pese a ser
-    # VESDA) y un filtro exacto excluiría productos válidos. Se aplica como
-    # post-filtro por presencia del término en marca/categoría/texto.
-    marca_term = resolve_brand(marca) or detect_brand_in_text(query)
-    pool = await hybrid_search(query, SearchFilters(), _PRICE_POOL)
-    if marca_term:
-        needle = marca_term.lower().split()[0]
-        pool = [
-            c for c in pool
-            if needle in c.brand.lower()
-            or needle in c.category.lower()
-            or needle in c.text[:220].lower()
-        ] or pool
+    # Orden de resolución del filtro:
+    # 1) SUPLIDOR (payload `supplier`): filtro exacto EN QDRANT. Es el único
+    #    confiable para "por suplidor": viene del archivo de origen y no
+    #    depende de que el pool semántico traiga productos de esa línea
+    #    (en producción dense-only, un pool genérico casi no los traía y las
+    #    4 consultas por suplidor devolvían el mismo producto).
+    # 2) MARCA: post-filtro por término en marca/categoría/texto, tolerante a
+    #    los errores de etiquetado del origen (VLF-500 con brand Fire-Lite).
+    # Sin fallback silencioso: si el filtro deja el pool vacío, se devuelve
+    # vacío y el modelo se entera, en vez de recibir resultados de OTRO
+    # suplidor como si fueran los pedidos.
+    supplier = resolve_supplier(marca)
+    if supplier is not None:
+        pool = await hybrid_search(
+            query, SearchFilters(supplier=supplier), _PRICE_POOL
+        )
+    else:
+        pool = await hybrid_search(query, SearchFilters(), _PRICE_POOL)
+        marca_term = resolve_brand(marca) or detect_brand_in_text(query)
+        if marca_term:
+            needle = marca_term.lower().split()[0]
+            pool = [
+                c for c in pool
+                if needle in c.brand.lower()
+                or needle in c.category.lower()
+                or needle in c.text[:220].lower()
+            ]
 
     priced = [
         c for c in pool

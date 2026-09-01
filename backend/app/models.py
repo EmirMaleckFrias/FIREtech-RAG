@@ -36,6 +36,9 @@ class Chunk(BaseModel):
 class SearchFilters(BaseModel):
     brand: str | None = None
     category: str | None = None
+    # Línea comercial (payload `supplier`): filtro exacto y confiable, viene
+    # del archivo de origen y no sufre los errores de etiquetado de `brand`.
+    supplier: str | None = None
 
 
 class SourceRef(BaseModel):

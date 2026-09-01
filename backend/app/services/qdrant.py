@@ -270,6 +270,12 @@ def _build_filter(filters: SearchFilters) -> models.Filter | None:
                 key="category", match=models.MatchValue(value=filters.category)
             )
         )
+    if filters.supplier:
+        must.append(
+            models.FieldCondition(
+                key="supplier", match=models.MatchValue(value=filters.supplier)
+            )
+        )
     return models.Filter(must=must) if must else None
 
 
@@ -313,6 +319,48 @@ def index_inventory() -> dict:
         "suplidores": _facet("supplier"),
         "marcas": _facet("brand"),
     }
+
+
+_KNOWN_SUPPLIERS: list[str] | None = None
+
+
+def resolve_supplier(nombre: str | None) -> str | None:
+    """Mapea un nombre libre al valor EXACTO del payload `supplier`.
+
+    'reliable' → 'RELIABLE', 'notifier' → 'Notifier by Honeywell', 'aleum' →
+    'ALEUM CO.'. None si no matchea (entonces se intenta como marca). La
+    lista sale del facet en vivo, con caché de proceso.
+    """
+    global _KNOWN_SUPPLIERS
+    if not nombre:
+        return None
+    if _KNOWN_SUPPLIERS is None:
+        try:
+            settings = get_settings()
+            res = get_client().facet(
+                collection_name=settings.qdrant_collection,
+                key="supplier",
+                limit=50,
+            )
+            _KNOWN_SUPPLIERS = [str(h.value) for h in res.hits if str(h.value).strip()]
+        except Exception as exc:
+            logger.warning("No se pudo facetar suppliers (%s).", exc)
+            return None
+    needle = nombre.strip().lower()
+    if not needle:
+        return None
+    if "rasco" in needle:
+        needle = "reliable"
+    for known in _KNOWN_SUPPLIERS:
+        kl = known.lower()
+        if not kl:
+            continue
+        if needle == kl or needle in kl or kl in needle:
+            return known
+        # 'notifier' debe matchear 'Notifier by Honeywell' por primera palabra.
+        if kl.split()[0] == needle.split()[0] and len(needle.split()[0]) >= 4:
+            return known
+    return None
 
 
 _KNOWN_BRANDS: list[str] | None = None
