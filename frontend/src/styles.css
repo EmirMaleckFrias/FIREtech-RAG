@@ -1591,6 +1591,10 @@ textarea {
 /* placa de marca discreta: el tamaño base, solo con aire debajo */
 .welcome-plate {
   margin-bottom: 20px;
+  /* protagonista sobre el saludo: bastante mayor que la placa del sidebar */
+  font-size: 26px;
+  padding: 10px 24px;
+  border-radius: 14px;
   animation: fade-in 0.4s ease both;
 }
 
