@@ -26,6 +26,8 @@ router = APIRouter()
 
 _TITLE_LEN = 60
 _SESSION_404 = "Conversación no encontrada"
+# Mensajes de contexto que viajan con cada pregunta (8 = 4 turnos).
+_HISTORY_MAX_MESSAGES = 8
 
 
 def _json(data: dict) -> str:
@@ -258,6 +260,11 @@ async def chat(
                 for r in rows
                 if r.get("role") in ("user", "assistant") and r.get("content")
             ]
+            # Solo los últimos turnos: suficiente para las repreguntas
+            # ("y el precio de ese?") sin que una conversación larga
+            # arrastre temas viejos a preguntas nuevas ni infle el costo
+            # de entrada de cada llamada a OpenAI.
+            history = history[-_HISTORY_MAX_MESSAGES:]
 
             # 3. Guardar el mensaje del usuario.
             await run_in_threadpool(

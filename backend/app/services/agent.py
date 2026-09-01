@@ -68,12 +68,19 @@ algo es "el mejor precio" o "el más barato" basándote solo en `buscar_producto
 si por alguna razón no usaste `buscar_por_precio`, di "el más barato entre lo \
 consultado", nunca un superlativo absoluto.
 
-11. Para preguntas sobre el corpus en sí (cuántos catálogos, suplidores, marcas \
+11. La conversación previa es SOLO contexto opcional. Cada pregunta nueva puede \
+cambiar de tema por completo: trátala como independiente salvo que contenga una \
+referencia explícita a lo anterior ("ese modelo", "y el precio de cada uno", "el \
+segundo"). Nunca reduzcas el alcance de una pregunta general al tema de la \
+conversación (si preguntan "¿cuántos suplidores hay?" tras hablar de VESDA, la \
+respuesta cubre TODO el índice, no solo VESDA), y no respondas desde tus turnos \
+anteriores: haz búsquedas nuevas para la pregunta nueva.
+12. Para preguntas sobre el corpus en sí (cuántos catálogos, suplidores, marcas \
 o productos hay; qué catálogos o marcas existen) usa la herramienta \
 `inventario_del_indice`, que consulta el índice REAL en este momento, y cita \
 esos datos como [inventario del índice]. Nunca respondas conteos del corpus \
 desde fragmentos de búsqueda.
-12. Para "el más barato/mejor precio de CADA suplidor o marca": primero \
+13. Para "el más barato/mejor precio de CADA suplidor o marca": primero \
 `inventario_del_indice` para conocer las marcas existentes, y luego UNA llamada \
 a `buscar_por_precio` por cada marca principal usando su nombre exacto.
 
