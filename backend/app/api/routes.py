@@ -18,7 +18,12 @@ from app.models import SearchFilters
 from app.services import supabase_db
 from app.services.agent import run_agent
 from app.services.auth import AuthUser, current_user, require_admin
-from app.services.qdrant import collection_count, hybrid_search, index_inventory
+from app.services.qdrant import (
+    collection_count,
+    hybrid_search,
+    index_inventory,
+    retrieval_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +93,7 @@ async def health() -> dict:
         "qdrant": count is not None,
         "collection_points": count if count is not None else 0,
         "upload_limit_mb": UPLOAD_LIMIT_MB,
+        "retrieval": retrieval_mode(),
     }
 
 
@@ -141,6 +147,7 @@ async def stats(admin: AuthUser = Depends(require_admin)) -> dict:
             "embedding_model": settings.embedding_model,
             "max_hops": settings.max_hops,
             "upload_limit_mb": UPLOAD_LIMIT_MB,
+            "retrieval": retrieval_mode(),
         },
     }
 

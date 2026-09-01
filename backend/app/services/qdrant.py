@@ -128,6 +128,16 @@ def ensure_collection() -> None:
             logger.debug("Índice de payload '%s' ya existente.", field)
 
 
+def retrieval_mode() -> str:
+    """'hybrid' si el codificador BM25 está disponible; 'dense-only' si no.
+
+    En producción serverless fastembed no cabe en la función, así que las
+    consultas son dense-only aunque los vectores sparse existan en el índice.
+    Exponerlo en /api/health y /api/stats hace visible la degradación.
+    """
+    return "hybrid" if _make_bm25 is not None else "dense-only"
+
+
 def collection_count() -> int | None:
     """Cantidad de puntos en la colección, o None si Qdrant no responde."""
     settings = get_settings()

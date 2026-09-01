@@ -1,5 +1,14 @@
 # Evaluación de respuestas (juez LLM) — RAG de catálogos
 
+> **Nota posterior (2026-09-01)**: los dos fallos que este informe reporta como abiertos
+> fueron corregidos el mismo día, DESPUÉS de esta corrida. El caso rw01 (superlativo de
+> precio VESDA) se cerró en el commit `4db0807`: el camino de precios pasó a clasificación
+> binaria de relevancia sobre el pool ordenado por precio real, con marca como post-filtro
+> tolerante a los errores de etiquetado del catálogo de origen, y quedó validado 4/4 de
+> forma determinista (VLF-500-00-UL, 3088.89 USD). El matiz de citas de rw04 se mitigó con
+> las herramientas de inventario en vivo (`5c84bf0` y anteriores). Este informe se conserva
+> tal cual como línea base; la próxima corrida de `evals/judge_answers.py` lo regenerará.
+
 Fecha: 2026-08-31 · Agente: `gpt-5.4` (pipeline completo `run_agent`, 8 hops máx.) · Juez: `gpt-5.4-mini` (JSON mode) · Casos: 7 de regresión real-world + 18 muestreados del gold set de retrieval (semilla 20260831) · Duración total: 263s.
 
 ## Metodología

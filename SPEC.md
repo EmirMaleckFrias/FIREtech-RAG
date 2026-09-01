@@ -33,7 +33,8 @@ Rag - Productos/
 │           ├── chunk.py       # chunking según SPEC de síntesis
 │           └── pipeline.py    # orquesta: parse → chunk → embed → upsert
 ├── frontend/                  # Vite + React + TS
-├── supabase/migrations/001_schema.sql
+├── supabase/migrations/       # 001..007, aplicar EN ORDEN (esquema, estados de
+│                              # documentos, entornos, auth, bloqueo, revocaciones)
 ├── infra/docker-compose.yml   # Qdrant local
 └── README.md
 ```
@@ -42,7 +43,11 @@ Rag - Productos/
 - Nombre: `productos` (env `QDRANT_COLLECTION`)
 - Vectores nombrados:
   - `dense`: 3072 dims, coseno (OpenAI text-embedding-3-large)
-  - `bm25`: sparse vector (BM25 vía fastembed) — si fastembed no está disponible, la búsqueda cae a dense-only sin romper
+  - `bm25`: sparse vector (BM25 vía fastembed). Si fastembed no está disponible la búsqueda
+    cae a dense-only sin romper. IMPORTANTE: ese es el estado PERMANENTE de producción
+    serverless (fastembed/onnxruntime no cabe en la función de Vercel), así que producción
+    consulta dense-only aunque los vectores sparse existan en el índice. El modo vigente se
+    expone como `retrieval` en `GET /api/health` y en el bloque config de `/api/stats`.
 - Payload por punto (chunk):
   ```json
   {
@@ -211,10 +216,16 @@ pueden borrar por esta vía (403). → `{ "ok": true }`
 ### `POST /api/feedback` Body: `{ "message_id": str, "rating": 1|-1, "comment": str|null }` → `{ "ok": true }`
 
 ## Agente multi-hop
-- Loop de tool calling con OpenAI. Tool única:
-  `buscar_productos(query: str, marca: str|None, categoria: str|None)` →
-  hybrid search Qdrant (top 30) → reranker LLM → top 8 chunks con `[archivo p.X]`.
-- Máximo `MAX_HOPS=4` llamadas de tool por pregunta; el agente decide cuándo tiene suficiente.
+- Loop de tool calling con OpenAI. TRES tools:
+  - `buscar_productos(query, marca?, categoria?)` → hybrid search Qdrant (top 30, con
+    fast-path de SKU exacto) → reranker LLM → top 8 chunks con `[archivo p.X]`.
+  - `buscar_por_precio(query, marca?, orden?, limite?)` → pool amplio ordenado por el
+    PRECIO real del payload + clasificación binaria de relevancia; obligatoria para
+    superlativos de precio ("el más barato").
+  - `inventario_del_indice()` → facets/counts en vivo de Qdrant; obligatoria para
+    preguntas sobre el corpus (cuántos catálogos/suplidores/marcas hay).
+- Máximo `MAX_HOPS` llamadas de tool por pregunta (default 4 en código; el entorno
+  actual usa 8 para permitir inventario + una búsqueda por precio por marca).
 - **Fidelidad**: system prompt exige responder SOLO con lo recuperado, citar `[archivo, pág. X]`
   en cada afirmación factual, y decir explícitamente cuando algo no está en los catálogos.
   Precios siempre con moneda y con la advertencia de que provienen del catálogo (pueden estar desactualizados).
