@@ -7,6 +7,7 @@ factual, citas, advertencias de precio, honestidad y completitud, juzgadas por
 
 Uso (desde backend/ como cwd):
     .venv\\Scripts\\python.exe -X utf8 evals\\judge_answers.py [--n 18] [--all] [--solo-real-world]
+    .venv\\Scripts\\python.exe -X utf8 evals\\judge_answers.py --agregacion
 
 Selección de casos:
   - Los 7 casos de regresión de evals/gold_real_world.json SIEMPRE se corren
@@ -16,6 +17,9 @@ Selección de casos:
     factual es el TEXTO del chunk gold recuperado de Qdrant vía
     accept_ids/accept_skus.
   - `--all` usa las 60 del gold set; `--solo-real-world` omite la muestra.
+  - `--agregacion` corre EN EXCLUSIVA los 10 casos de evals/gold_agregacion.json
+    (orden/conteos/agrupaciones exactos); no toca los 7+18 del flujo normal y
+    escribe su propio informe en docs/EVAL_AGREGACION.md.
 
 Los casos se ejecutan SECUENCIALMENTE (cada uno es una corrida real del agente
 con el modelo de producción); errores 429/transitorios se reintentan con
@@ -39,8 +43,17 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 GOLD_RETRIEVAL = BACKEND_DIR / "evals" / "gold_set.json"
 GOLD_REAL_WORLD = BACKEND_DIR / "evals" / "gold_real_world.json"
+GOLD_AGREGACION = BACKEND_DIR / "evals" / "gold_agregacion.json"
 DEFAULT_REPORT = PROJECT_DIR / "docs" / "EVAL_RESPUESTAS.md"
+AGREGACION_REPORT = PROJECT_DIR / "docs" / "EVAL_AGREGACION.md"
 RESULTS_DIR = Path(tempfile.gettempdir()) / "rag_eval_answers"
+
+# Etiquetas de grupo: (sigla para la tabla por caso, nombre para los agregados).
+GROUP_LABELS = {
+    "real_world": ("RW", "Regresión real-world"),
+    "muestra_retrieval": ("GS", "Muestra retrieval"),
+    "agregacion": ("AG", "Agregación"),
+}
 
 JUDGE_MODEL = "gpt-5.4-mini"
 DEFAULT_SEED = 20260831
@@ -211,11 +224,19 @@ def _format_ref_chunks(chunks: list, label: str) -> str:
     return "\n\n".join(parts)
 
 
-def build_reference_real_world(case: dict) -> str:
+REF_HEADER_AUDIT = "HECHOS ESPERADOS (verificados por auditoría contra el catálogo):"
+REF_HEADER_ENGINE = (
+    "HECHOS ESPERADOS (calculados con el MOTOR EXACTO del catálogo -- "
+    "scan_by_price/group_values/index_inventory sobre Qdrant -- y congelados; "
+    "los SKUs, precios, páginas y conteos de abajo son los valores reales del "
+    "índice, no una interpretación):"
+)
+
+
+def build_reference_real_world(case: dict, header: str = REF_HEADER_AUDIT) -> str:
     from app.services.qdrant import find_by_skus, index_inventory
 
-    parts = ["HECHOS ESPERADOS (verificados por auditoría contra el catálogo):",
-             case["expected"]]
+    parts = [header, case["expected"]]
     if case.get("augment_with_live_inventory"):
         inv = index_inventory()
         arch = ", ".join(a["valor"] for a in inv["archivos"])
@@ -442,32 +463,65 @@ def write_report(payload: dict, report_path: Path) -> None:
     cases = payload["cases"]
     rw = [c for c in cases if c["group"] == "real_world"]
     sm = [c for c in cases if c["group"] == "muestra_retrieval"]
+    ag = [c for c in cases if c["group"] == "agregacion"]
+    solo_ag = bool(ag) and not rw and not sm
     lines: list[str] = []
     add = lines.append
 
-    add("# Evaluación de respuestas (juez LLM) — RAG de catálogos")
+    if solo_ag:
+        add("# Evaluación de AGREGACIÓN (juez LLM) — RAG de catálogos")
+    else:
+        add("# Evaluación de respuestas (juez LLM) — RAG de catálogos")
     add("")
-    add(
-        f"Fecha: {payload['started_at'][:10]} · Agente: `{payload['agent_model']}` "
-        f"(pipeline completo `run_agent`, {payload['max_hops']} hops máx.) · "
-        f"Juez: `{JUDGE_MODEL}` (JSON mode) · Casos: {len(rw)} de regresión real-world "
-        f"+ {len(sm)} muestreados del gold set de retrieval (semilla {payload['seed']}) · "
-        f"Duración total: {payload['elapsed_s']:.0f}s."
-    )
+    if solo_ag:
+        idx = payload.get("index_state") or {}
+        add(
+            f"Fecha: {payload['started_at'][:10]} · Agente: `{payload['agent_model']}` "
+            f"(pipeline completo `run_agent`, {payload['max_hops']} hops máx.) · "
+            f"Juez: `{JUDGE_MODEL}` (JSON mode) · Casos: {len(ag)} de la categoría "
+            f"AGREGACIÓN (`evals/gold_agregacion.json`) · Índice: "
+            f"{idx.get('total_chunks', '?')} chunks / {idx.get('archivos', '?')} archivos / "
+            f"{idx.get('suplidores', '?')} suplidores / {idx.get('marcas', '?')} marcas · "
+            f"Duración total: {payload['elapsed_s']:.0f}s."
+        )
+    else:
+        add(
+            f"Fecha: {payload['started_at'][:10]} · Agente: `{payload['agent_model']}` "
+            f"(pipeline completo `run_agent`, {payload['max_hops']} hops máx.) · "
+            f"Juez: `{JUDGE_MODEL}` (JSON mode) · Casos: {len(rw)} de regresión real-world "
+            f"+ {len(sm)} muestreados del gold set de retrieval (semilla {payload['seed']}) · "
+            f"Duración total: {payload['elapsed_s']:.0f}s."
+        )
     add("")
+    if payload.get("aborted"):
+        add(f"> **{payload['aborted']}** El informe cubre solo los casos ejecutados.")
+        add("")
     add("## Metodología")
     add("")
     add("- **Qué mide**: la calidad de la RESPUESTA FINAL del agente (no del retrieval, "
         "eso lo cubre `docs/EVAL_RETRIEVAL.md`). Cada caso ejecuta `run_agent(pregunta, [])` "
         "en proceso y acumula el evento `final` (content + sources + hops); los casos corren "
         "secuencialmente y los errores transitorios (429...) se reintentan con backoff.")
-    add("- **Casos real-world** (`evals/gold_real_world.json`): 7 regresiones de los fallos "
-        "reales de producción auditados en `docs/audit_conversaciones_jefes.md`; el `expected` "
-        "son hechos verificados por auditoría, complementados en runtime con el texto real de "
-        "los chunks del catálogo (`ref_skus`) y, donde aplica, el inventario vivo del índice.")
-    add("- **Casos muestreados** (`evals/gold_set.json`, CONGELADO): muestra estratificada "
-        "por tipo; la referencia factual es el texto del chunk gold recuperado de Qdrant vía "
-        "`accept_ids`/`accept_skus`.")
+    if rw:
+        add("- **Casos real-world** (`evals/gold_real_world.json`): 7 regresiones de los fallos "
+            "reales de producción auditados en `docs/audit_conversaciones_jefes.md`; el `expected` "
+            "son hechos verificados por auditoría, complementados en runtime con el texto real de "
+            "los chunks del catálogo (`ref_skus`) y, donde aplica, el inventario vivo del índice.")
+    if sm:
+        add("- **Casos muestreados** (`evals/gold_set.json`, CONGELADO): muestra estratificada "
+            "por tipo; la referencia factual es el texto del chunk gold recuperado de Qdrant vía "
+            "`accept_ids`/`accept_skus`.")
+    if ag:
+        add("- **Casos de agregación** (`evals/gold_agregacion.json`): preguntas de orden, "
+            "conteo y agrupación, la familia que la tool general `consultar_catalogo` resuelve "
+            "de forma exacta (`_execute_catalog_query` → `scan_by_price`/`group_values`). Seis "
+            "son preguntas TEXTUALES del uso real (con sus faltas de ortografía) y cuatro son "
+            "composicionales nuevas. **La verdad de referencia NO sale de los PDFs ni de un LLM**: "
+            "se calculó en proceso con ese mismo motor exacto sobre el índice vivo y se congeló "
+            "en el JSON (SKUs, precios, páginas y conteos reales), así que el juez compara la "
+            "respuesta contra el resultado aritmético del catálogo, no contra una paráfrasis. "
+            "Los hechos congelados **dependen del estado del índice**: si se reingesta, hay que "
+            "recalcularlos con el motor.")
     add("- **Juez**: una llamada a `" + JUDGE_MODEL + "` por caso con pregunta, respuesta, "
         "referencia y rubric de 5 criterios pass/fail: **(a) exactitud_factual** (precios/SKUs/"
         "specs coinciden con la referencia, sin datos inventados), **(b) citas** (toda afirmación "
@@ -482,7 +536,10 @@ def write_report(payload: dict, report_path: Path) -> None:
     add("")
     add("| Grupo | n | PASS global | (a) exactitud | (b) citas | (c) advertencias | (d) honestidad | (e) completitud |")
     add("|---|---|---|---|---|---|---|---|")
-    for label, group in (("Regresión real-world", rw), ("Muestra retrieval", sm), ("**Total**", cases)):
+    groups_row = [("Regresión real-world", rw), ("Muestra retrieval", sm), ("Agregación", ag)]
+    if not solo_ag:  # con un solo grupo la fila Total sería un duplicado
+        groups_row.append(("**Total**", cases))
+    for label, group in groups_row:
         if not group:
             continue
         g = _agg(group)
@@ -512,28 +569,63 @@ def write_report(payload: dict, report_path: Path) -> None:
     add("Criterios: minúscula = pass, MAYÚSCULA! = fail (a=exactitud, b=citas, "
         "c=advertencias, d=honestidad, e=completitud).")
     add("")
-    add("| Caso | Grupo | Tipo | Criterios | Veredicto | Hops | s agente | s juez |")
-    add("|---|---|---|---|---|---|---|---|")
-    for c in cases:
-        verdict = c["verdict"] if c["verdict"] == "PASS" else "**FAIL**"
-        add(
-            f"| {c['qid']} | {'RW' if c['group'] == 'real_world' else 'GS'} | {c['type']} | "
-            f"`{_crit_flags(c)}` | {verdict} | {c['n_hops']} | {c['agent_s']} | {c['judge_s']} |"
-        )
+    if solo_ag:
+        add("| Caso | Origen | Tipo | Pregunta | Criterios | Veredicto | Hops | s agente | s juez |")
+        add("|---|---|---|---|---|---|---|---|---|")
+        for c in cases:
+            verdict = c["verdict"] if c["verdict"] == "PASS" else "**FAIL**"
+            add(
+                f"| {c['qid']} | {c.get('origen', '-')} | {c['type']} | "
+                f"{c['question']} | `{_crit_flags(c)}` | {verdict} | {c['n_hops']} | "
+                f"{c['agent_s']} | {c['judge_s']} |"
+            )
+    else:
+        add("| Caso | Grupo | Tipo | Criterios | Veredicto | Hops | s agente | s juez |")
+        add("|---|---|---|---|---|---|---|---|")
+        for c in cases:
+            verdict = c["verdict"] if c["verdict"] == "PASS" else "**FAIL**"
+            add(
+                f"| {c['qid']} | {GROUP_LABELS.get(c['group'], ('GS', ''))[0]} | {c['type']} | "
+                f"`{_crit_flags(c)}` | {verdict} | {c['n_hops']} | {c['agent_s']} | {c['judge_s']} |"
+            )
     add("")
 
-    rw_fails = [c for c in rw if c["verdict"] != "PASS"]
-    add("## Estado de las 7 regresiones real-world")
-    add("")
-    if rw_fails:
-        add(f"**ATENCIÓN: {len(rw_fails)} de {len(rw)} casos de regresión FALLAN** "
-            "(los fallos de producción auditados siguen, total o parcialmente, sin resolver):")
-        for c in rw_fails:
-            add(f"- **{c['qid']} ({c['type']}) FALLA**: “{c['question']}”")
-    else:
-        add(f"Los {len(rw)} casos de regresión pasan: los fallos de producción auditados "
-            "quedan cubiertos por el comportamiento actual del agente.")
-    add("")
+    if rw:
+        rw_fails = [c for c in rw if c["verdict"] != "PASS"]
+        add("## Estado de las 7 regresiones real-world")
+        add("")
+        if rw_fails:
+            add(f"**ATENCIÓN: {len(rw_fails)} de {len(rw)} casos de regresión FALLAN** "
+                "(los fallos de producción auditados siguen, total o parcialmente, sin resolver):")
+            for c in rw_fails:
+                add(f"- **{c['qid']} ({c['type']}) FALLA**: “{c['question']}”")
+        else:
+            add(f"Los {len(rw)} casos de regresión pasan: los fallos de producción auditados "
+                "quedan cubiertos por el comportamiento actual del agente.")
+        add("")
+
+    if ag:
+        reales = [c for c in ag if str(c.get("origen", "")).startswith("uso real")]
+        nuevas = [c for c in ag if not str(c.get("origen", "")).startswith("uso real")]
+        add("## Estado de las preguntas del uso real")
+        add("")
+        add(f"De los {len(ag)} casos, **{len(reales)} son preguntas textuales que los usuarios "
+            f"escribieron en producción** (varias fallaban) y {len(nuevas)} son composicionales "
+            "nuevas que ninguna regla del pipeline programó explícitamente.")
+        add("")
+        add("| Caso | Pregunta del uso real | Veredicto |")
+        add("|---|---|---|")
+        for c in reales:
+            add(f"| {c['qid']} | {c['question']} | "
+                f"{c['verdict'] if c['verdict'] == 'PASS' else '**FAIL**'} |")
+        add("")
+        r_fail = [c for c in reales if c["verdict"] != "PASS"]
+        n_fail = [c for c in nuevas if c["verdict"] != "PASS"]
+        add(f"- Preguntas reales: **{len(reales) - len(r_fail)}/{len(reales)} PASS**"
+            + (f" (fallan: {', '.join(c['qid'] for c in r_fail)})." if r_fail else "."))
+        add(f"- Composicionales nuevas: **{len(nuevas) - len(n_fail)}/{len(nuevas)} PASS**"
+            + (f" (fallan: {', '.join(c['qid'] for c in n_fail)})." if n_fail else "."))
+        add("")
 
     fails = [c for c in cases if c["verdict"] != "PASS"
              or any(not c["criteria"][k]["pass"] for k in CRITERIA)]
@@ -542,7 +634,12 @@ def write_report(payload: dict, report_path: Path) -> None:
     if not fails:
         add("Sin fallos: los 5 criterios pasaron en todos los casos.")
     for c in fails:
-        tag = "REGRESIÓN REAL-WORLD" if c["group"] == "real_world" else "muestra gold set"
+        if c["group"] == "real_world":
+            tag = "REGRESIÓN REAL-WORLD"
+        elif c["group"] == "agregacion":
+            tag = f"agregación · {c.get('origen', 'agregación')}"
+        else:
+            tag = "muestra gold set"
         add(f"### {c['qid']} · {c['type']} · {tag} · veredicto: {c['verdict']}")
         add(f"- **Pregunta:** {c['question']}")
         for crit in CRITERIA:
@@ -598,31 +695,50 @@ async def run_all(args) -> None:
     install_usage_capture()
     judge_client = AsyncOpenAI(api_key=settings.openai_api_key)
 
-    real = json.loads(GOLD_REAL_WORLD.read_text(encoding="utf-8"))["questions"]
-    cases_def: list[tuple[str, dict]] = [("real_world", c) for c in real]
+    real: list[dict] = []
+    if args.agregacion:
+        # Modo EXCLUSIVO: solo la categoría de agregación. Los 7+18 del flujo
+        # normal ni se cargan; el informe va a docs/EVAL_AGREGACION.md.
+        agg = json.loads(GOLD_AGREGACION.read_text(encoding="utf-8"))["questions"]
+        cases_def: list[tuple[str, dict]] = [("agregacion", c) for c in agg]
+        print(
+            f"== Eval de AGREGACIÓN: {len(cases_def)} casos "
+            f"(evals/gold_agregacion.json) | agente={settings.openai_model} "
+            f"juez={JUDGE_MODEL} | secuencial"
+            + (f" | tope de costo {args.max_cost:.2f} USD" if args.max_cost else ""),
+            flush=True,
+        )
+    else:
+        real = json.loads(GOLD_REAL_WORLD.read_text(encoding="utf-8"))["questions"]
+        cases_def = [("real_world", c) for c in real]
 
-    if not args.solo_real_world:
-        gold = json.loads(GOLD_RETRIEVAL.read_text(encoding="utf-8"))["questions"]
-        sample = gold if args.all else stratified_sample(gold, args.n, args.seed)
-        cases_def += [("muestra_retrieval", c) for c in sample]
+        if not args.solo_real_world:
+            gold = json.loads(GOLD_RETRIEVAL.read_text(encoding="utf-8"))["questions"]
+            sample = gold if args.all else stratified_sample(gold, args.n, args.seed)
+            cases_def += [("muestra_retrieval", c) for c in sample]
 
-    print(
-        f"== Eval de respuestas: {len(cases_def)} casos "
-        f"({len(real)} real-world + {len(cases_def) - len(real)} gold set) | "
-        f"agente={settings.openai_model} juez={JUDGE_MODEL} | secuencial",
-        flush=True,
-    )
+        print(
+            f"== Eval de respuestas: {len(cases_def)} casos "
+            f"({len(real)} real-world + {len(cases_def) - len(real)} gold set) | "
+            f"agente={settings.openai_model} juez={JUDGE_MODEL} | secuencial",
+            flush=True,
+        )
+
+    aborted = ""
 
     t0 = time.time()
     results: list[dict] = []
     for i, (group, case) in enumerate(cases_def, start=1):
         qid = case["qid"]
         question = case["question"]
-        reference = (
-            build_reference_real_world(case)
-            if group == "real_world"
-            else build_reference_gold(case)
-        )
+        if group == "real_world":
+            reference = build_reference_real_world(case)
+        elif group == "agregacion":
+            # Mismo mecanismo (hechos congelados + chunks reales + inventario
+            # vivo), pero el encabezado dice que los hechos vienen del motor.
+            reference = build_reference_real_world(case, header=REF_HEADER_ENGINE)
+        else:
+            reference = build_reference_gold(case)
         USAGE.set_component("agente")
         try:
             run = await run_agent_case(question)
@@ -636,6 +752,7 @@ async def run_all(args) -> None:
                              for c in CRITERIA},
                 "judge_verdict_raw": "", "n_hops": 0, "agent_s": 0.0,
                 "judge_s": 0.0, "answer_head": "",
+                "origen": case.get("origen", ""),
             })
             continue
         USAGE.set_component("juez")
@@ -646,6 +763,7 @@ async def run_all(args) -> None:
             "qid": qid,
             "group": group,
             "type": case["type"],
+            "origen": case.get("origen", ""),
             "question": question,
             "answer": run["content"],
             "answer_head": run["content"][:220].replace("\n", " "),
@@ -659,14 +777,43 @@ async def run_all(args) -> None:
         status = "PASS" if res["verdict"] == "PASS" else "FAIL"
         print(
             f"  [{i:>2}/{len(cases_def)}] {status} {qid} "
-            f"{('RW' if group == 'real_world' else 'GS')} {case['type'][:16]:<16} "
+            f"{GROUP_LABELS.get(group, ('GS', ''))[0]} {case['type'][:16]:<16} "
             f"[{_crit_flags(res)}] hops={res['n_hops']} "
             f"agente={res['agent_s']}s juez={res['judge_s']}s",
             flush=True,
         )
 
+        # Guardia de presupuesto: corta ENTRE casos (nunca a mitad de uno), así
+        # el informe parcial sigue siendo válido y se ve qué quedó sin correr.
+        if args.max_cost:
+            spent = USAGE.cost_estimate()[0]
+            if spent > args.max_cost:
+                aborted = (
+                    f"ABORTADO por tope de costo: {spent:.2f} USD estimados > "
+                    f"{args.max_cost:.2f} USD tras {len(results)} de "
+                    f"{len(cases_def)} casos."
+                )
+                print(f"\n!! {aborted}", flush=True)
+                break
+
     cost, detail = USAGE.cost_estimate()
+    index_state: dict = {}
+    if args.agregacion:
+        try:
+            from app.services.qdrant import index_inventory
+            inv = index_inventory()
+            index_state = {
+                "total_chunks": inv["total_chunks"],
+                "productos": inv["productos"],
+                "archivos": len(inv["archivos"]),
+                "suplidores": len(inv["suplidores"]),
+                "marcas": len(inv["marcas"]),
+            }
+        except Exception as exc:  # el informe no debe caerse por esto
+            print(f"(aviso: no se pudo leer el inventario del índice: {exc})")
     payload = {
+        "aborted": aborted,
+        "index_state": index_state,
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "elapsed_s": round(time.time() - t0, 1),
         "agent_model": settings.openai_model,
@@ -681,24 +828,42 @@ async def run_all(args) -> None:
         "cases": results,
     }
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    raw_path = RESULTS_DIR / "results_answers.json"
+    raw_path = RESULTS_DIR / (
+        "results_agregacion.json" if args.agregacion else "results_answers.json"
+    )
     raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\nResultados crudos en {raw_path}")
 
-    write_report(payload, args.report)
+    report_path = args.report or (
+        AGREGACION_REPORT if args.agregacion else DEFAULT_REPORT
+    )
+    write_report(payload, report_path)
 
     g = _agg(results)
-    rw_res = [c for c in results if c["group"] == "real_world"]
-    rw_fails = [c for c in rw_res if c["verdict"] != "PASS"]
     print(
         f"\n== Global: PASS {_pct(g['pass'])} de {g['n']} casos | "
         + " ".join(f"{CRIT_SHORT[c]}={_pct(g[c])}" for c in CRITERIA)
     )
-    print(
-        f"== Regresiones real-world: {len(rw_res) - len(rw_fails)}/{len(rw_res)} PASS"
-        + (f" | FALLAN: {', '.join(c['qid'] for c in rw_fails)}" if rw_fails else "")
-    )
+    if args.agregacion:
+        reales = [c for c in results if str(c.get("origen", "")).startswith("uso real")]
+        r_fails = [c for c in reales if c["verdict"] != "PASS"]
+        print(
+            f"== Preguntas del uso real: {len(reales) - len(r_fails)}/{len(reales)} PASS"
+            + (f" | FALLAN: {', '.join(c['qid'] for c in r_fails)}" if r_fails else "")
+        )
+        fails = [c for c in results if c["verdict"] != "PASS"]
+        if fails:
+            print(f"== FALLAN en total: {', '.join(c['qid'] for c in fails)}")
+    else:
+        rw_res = [c for c in results if c["group"] == "real_world"]
+        rw_fails = [c for c in rw_res if c["verdict"] != "PASS"]
+        print(
+            f"== Regresiones real-world: {len(rw_res) - len(rw_fails)}/{len(rw_res)} PASS"
+            + (f" | FALLAN: {', '.join(c['qid'] for c in rw_fails)}" if rw_fails else "")
+        )
     print(f"== Costo aproximado: ~{cost:.2f} USD (tarifas asumidas) | {payload['elapsed_s']:.0f}s")
+    if aborted:
+        print(f"== {aborted}")
 
 
 def main() -> None:
@@ -711,8 +876,17 @@ def main() -> None:
                         help="usa las 60 preguntas del gold set (ignora --n)")
     parser.add_argument("--solo-real-world", action="store_true",
                         help="solo los 7 casos de regresión real-world")
+    parser.add_argument("--agregacion", action="store_true",
+                        help="SOLO los casos de evals/gold_agregacion.json "
+                             "(orden/conteos/agrupaciones); informe en "
+                             "docs/EVAL_AGREGACION.md")
+    parser.add_argument("--max-cost", type=float, default=None,
+                        help="tope de costo estimado en USD: aborta entre casos "
+                             "si se supera (default: sin tope)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--report", type=Path, default=None,
+                        help="ruta del informe (default: docs/EVAL_RESPUESTAS.md, "
+                             "o docs/EVAL_AGREGACION.md con --agregacion)")
     args = parser.parse_args()
     asyncio.run(run_all(args))
 
