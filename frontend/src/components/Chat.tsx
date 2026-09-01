@@ -3,7 +3,7 @@ import type { CitationRef } from '../lib/markdown';
 import type { ChatMessage } from '../types';
 import { IconArrowUp, IconStop } from './icons';
 import { MessageItem } from './MessageItem';
-import { Welcome } from './Welcome';
+import { WelcomeIntro, WelcomeSuggestions } from './Welcome';
 
 interface ChatProps {
   messages: ChatMessage[];
@@ -19,6 +19,10 @@ interface ChatProps {
 
 /** ~8 líneas de texto (15px · 1.5) + padding vertical del textarea. */
 const MAX_TEXTAREA_HEIGHT = 204;
+
+/** Aviso de precios: mismo texto bajo las píldoras y bajo el composer. */
+const PRICE_NOTE =
+  'Las respuestas provienen de los catálogos indexados y pueden contener errores. Verifica precios antes de cotizar.';
 
 export function Chat({
   messages,
@@ -118,6 +122,23 @@ export function Chat({
     });
   };
 
+  /**
+   * Sugerencia del estado vacío: escribe la pregunta en el composer y le da
+   * foco, sin enviarla. El foco va síncrono dentro del gesto (en iOS es la
+   * única forma de que se abra el teclado); el resto espera al rAF, cuando
+   * React ya pintó el texto y se puede medir la altura real.
+   */
+  const fillDraft = (question: string) => {
+    textareaRef.current?.focus();
+    setDraft(question);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.setSelectionRange(el.value.length, el.value.length);
+      resizeTextarea();
+    });
+  };
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     submit();
@@ -139,8 +160,12 @@ export function Chat({
   // igual que durante el streaming: enviar en ese estado perdería la carga.
   const canSend = draft.trim() !== '' && !loadingMessages;
 
+  // Estado vacío: el hilo y el bloque de sugerencias hacen de espaciadores
+  // (flex:1 cada uno) y dejan el composer centrado en vertical, sin moverlo
+  // del DOM ni duplicar su estado. Al llegar el primer mensaje cae la clase y
+  // el composer vuelve a su sitio de siempre, abajo.
   return (
-    <main className="chat">
+    <main className={`chat${showWelcome ? ' chat-empty' : ''}`}>
       <div
         className="chat-scroll"
         ref={scrollRef}
@@ -178,15 +203,7 @@ export function Chat({
           </div>
         )}
 
-        {showWelcome && (
-          <Welcome
-            disabled={isStreaming}
-            onAsk={(q) => {
-              stickToBottomRef.current = true;
-              onSend(q);
-            }}
-          />
-        )}
+        {showWelcome && <WelcomeIntro />}
 
         {!loadingMessages && messages.length > 0 && (
           <div className="message-list">
@@ -241,16 +258,22 @@ export function Chat({
             </button>
           )}
         </form>
-        <div className="composer-meta">
-          <span className="composer-hint" aria-hidden="true">
-            Enter para enviar · Shift+Enter salto de línea
-          </span>
-          <p className="composer-note">
-            Las respuestas provienen de los catálogos indexados y pueden contener errores.
-            Verifica precios antes de cotizar.
-          </p>
-        </div>
+        {!showWelcome && (
+          <div className="composer-meta">
+            <span className="composer-hint" aria-hidden="true">
+              Enter para enviar · Shift+Enter salto de línea
+            </span>
+            <p className="composer-note">{PRICE_NOTE}</p>
+          </div>
+        )}
       </div>
+
+      {showWelcome && (
+        <div className="empty-tail">
+          <WelcomeSuggestions onPick={fillDraft} disabled={isStreaming} />
+          <p className="composer-note empty-note">{PRICE_NOTE}</p>
+        </div>
+      )}
     </main>
   );
 }

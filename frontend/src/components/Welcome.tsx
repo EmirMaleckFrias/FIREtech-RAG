@@ -1,64 +1,77 @@
-import type { ReactNode } from 'react';
-import { IconArchive, IconBell, IconDroplet, IconWrench } from './icons';
+/**
+ * Estado vacío del chat, al estilo de la home de Claude o ChatGPT: placa de
+ * marca discreta, un saludo de una línea y, debajo del composer, una fila de
+ * píldoras con etiquetas cortas.
+ *
+ * El composer no vive aquí: es el mismo de la conversación, al que el layout
+ * de Chat coloca en el centro mientras no hay mensajes. Por eso esta pantalla
+ * llega partida en dos piezas, una encima (WelcomeIntro) y otra debajo
+ * (WelcomeSuggestions).
+ *
+ * Las píldoras RELLENAN el composer y le dan foco; nunca envían solas.
+ */
 
-interface WelcomeProps {
-  onAsk: (question: string) => void;
+interface SuggestionsProps {
+  onPick: (question: string) => void;
   disabled: boolean;
 }
 
-const EXAMPLES: { icon: ReactNode; question: string }[] = [
+/** Etiqueta corta visible en la píldora; `question` es lo que se escribe. */
+const SUGGESTIONS: { label: string; question: string }[] = [
   {
-    icon: <IconDroplet />,
+    label: 'Rociadores Reliable',
     question:
       '¿Qué modelos de rociadores Reliable de respuesta rápida hay y qué factor K tienen?',
   },
   {
-    icon: <IconBell />,
+    label: 'Paneles Notifier',
     question:
       '¿Qué paneles de detección de incendios Notifier aparecen en los catálogos y cuántas zonas soportan?',
   },
   {
-    icon: <IconWrench />,
-    question: '¿Qué equipos Croker hay disponibles para gabinetes contra incendio?',
+    label: 'Más barato por suplidor',
+    question: 'Dame los productos más baratos de cada suplidor',
   },
   {
-    icon: <IconArchive />,
+    label: 'Gabinetes Croker',
     question: '¿Qué gabinetes Croker existen y en qué medidas se ofrecen?',
   },
 ];
 
-export function Welcome({ onAsk, disabled }: WelcomeProps) {
+/** Placa y saludo: el bloque que queda justo encima del composer. */
+export function WelcomeIntro() {
   return (
-    <div className="welcome-wrap">
-      <div className="welcome">
-        <div className="brand-plate brand-plate-lg welcome-logo" role="img" aria-label="FIREtech">
-          <span className="brand-fire" aria-hidden="true">FIRE</span>
-          <span className="brand-tech" aria-hidden="true">tech</span>
-        </div>
-        <h1>¿Qué buscamos en los catálogos?</h1>
-        <p className="welcome-sub">
-          Pregunta por precios, medidas y equipos de Aleum, Reliable, Croker y Notifier.
-          Cada respuesta te dice de qué catálogo y página salió, para que cotices con
-          confianza.
-        </p>
-        <div className="example-grid">
-          {EXAMPLES.map((ex, i) => (
-            <button
-              key={ex.question}
-              type="button"
-              className="example-card"
-              style={{ animationDelay: `${140 + i * 60}ms` }}
-              onClick={() => onAsk(ex.question)}
-              disabled={disabled}
-            >
-              <span className="example-icon" aria-hidden="true">
-                {ex.icon}
-              </span>
-              <span className="example-text">{ex.question}</span>
-            </button>
-          ))}
-        </div>
+    <div className="welcome-intro">
+      <div className="brand-plate welcome-plate" role="img" aria-label="FIREtech">
+        <span className="brand-fire" aria-hidden="true">
+          FIRE
+        </span>
+        <span className="brand-tech" aria-hidden="true">
+          tech
+        </span>
       </div>
+      <h1 className="welcome-title">¿Qué buscamos hoy en los catálogos?</h1>
+    </div>
+  );
+}
+
+export function WelcomeSuggestions({ onPick, disabled }: SuggestionsProps) {
+  return (
+    <div className="suggestions">
+      {SUGGESTIONS.map((s, i) => (
+        <button
+          key={s.label}
+          type="button"
+          className="suggestion"
+          /* stagger corto: las píldoras entran tras el saludo */
+          style={{ animationDelay: `${120 + i * 45}ms` }}
+          title={s.question}
+          onClick={() => onPick(s.question)}
+          disabled={disabled}
+        >
+          {s.label}
+        </button>
+      ))}
     </div>
   );
 }

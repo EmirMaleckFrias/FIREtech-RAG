@@ -494,13 +494,6 @@ textarea {
   font-weight: 400;
 }
 
-/* variante grande (bienvenida) */
-.brand-plate-lg {
-  padding: 12px 26px 14px;
-  border-radius: 12px;
-  font-size: 24px;
-}
-
 .brand-badge {
   border-radius: 999px;
   padding: 1px 8px;
@@ -1564,96 +1557,109 @@ textarea {
 
 /* ----------------------------------------------------------------------
    11. Bienvenida (estado vacío)
+   --------------------------------------------------------------------
+   Sin parrilla de tarjetas: el composer es el mismo de la conversación y
+   solo cambia de sitio. Con .chat-empty, el hilo (arriba) y el bloque de
+   sugerencias (abajo) crecen por igual, así que el composer queda centrado
+   en vertical con el saludo pegado encima y las píldoras debajo.
    ---------------------------------------------------------------------- */
 
-.welcome-wrap {
-  min-height: 100%;
+/* base auto (no 0) para que el hueco libre se reparta a partes iguales con
+   .empty-tail y el composer caiga en el centro; es además el único que cede
+   altura si la pantalla se queda corta (tiene scroll propio) */
+.chat-empty .chat-scroll {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
+  flex-direction: column;
+  flex: 1 1 auto;
 }
 
-.welcome {
+/* el hueco lo pone margin-top: auto, no justify-content: flex-end: si la
+   pantalla es muy baja el margen se anula y el scroll sigue alcanzando el
+   tope del bloque en vez de recortarlo */
+.welcome-intro {
   width: 100%;
-  max-width: 620px;
-  text-align: center;
-  animation: fade-up 0.3s ease both;
-}
-
-/* la placa de marca en grande; hereda fondo/tipografía de .brand-plate */
-.welcome-logo {
-  margin-bottom: 20px;
-  animation: logo-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-@keyframes logo-in {
-  from {
-    opacity: 0;
-    transform: scale(0.82);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.welcome h1 {
-  margin: 0 0 10px;
-  font-size: 27px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
-}
-
-.welcome-sub {
-  margin: 0 0 34px;
-  color: var(--text-2);
-  font-size: 14px;
-}
-
-.example-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.example-card {
+  max-width: 728px; /* 680 del composer + su padding lateral */
+  margin: auto auto 0;
+  padding: 24px 24px 18px;
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--surface);
-  text-align: left;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  animation: fade-up 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* placa de marca discreta: el tamaño base, solo con aire debajo */
+.welcome-plate {
+  margin-bottom: 20px;
+  animation: fade-in 0.4s ease both;
+}
+
+.welcome-title {
+  margin: 0;
+  font-size: clamp(24px, 4.4vw, 30px);
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+/* mismo ancho y espaciado que el composer en vacío; crece para equilibrar
+   al hilo y dejar el composer en el centro */
+.chat-empty .composer-area {
+  max-width: 728px;
+  padding-bottom: 0;
+}
+
+/* espaciador inferior: crece igual que el hilo, pero nunca encoge (con el
+   teclado abierto se recorta el saludo, no las píldoras) */
+.empty-tail {
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: 728px;
+  margin: 0 auto;
+  padding: 0 24px calc(10px + env(safe-area-inset-bottom));
+  text-align: center;
+}
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding-top: 14px;
+}
+
+/* píldora: hairline, fondo transparente y el acento solo al pasar por encima */
+.suggestion {
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
   font-size: 13.5px;
-  line-height: 1.5;
-  color: var(--text);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-  /* entrada con stagger: el delay (60ms por tarjeta) llega inline */
-  animation: msg-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  line-height: 1.4;
+  white-space: nowrap;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+  /* entrada con stagger: el delay (45ms por píldora) llega inline */
+  animation: fade-up 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-.example-card:hover:not(:disabled) {
+.suggestion:hover:not(:disabled) {
   border-color: var(--accent-border);
-  box-shadow: var(--shadow-soft);
+  background: var(--accent-soft);
+  color: var(--chip-text);
 }
 
-.example-card:disabled {
+.suggestion:disabled {
   opacity: 0.55;
 }
 
-.example-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  margin-top: 1px;
-  color: var(--text-2);
-  transition: color 0.15s ease;
-}
-
-.example-card:hover:not(:disabled) .example-icon {
-  color: var(--accent);
+/* el aviso de precios, en una línea bajo las píldoras */
+.empty-note {
+  margin-top: 16px;
 }
 
 /* ----------------------------------------------------------------------
@@ -3316,15 +3322,6 @@ button.user-row:active {
     max-width: 90%;
   }
 
-  .welcome h1 {
-    white-space: normal;
-    font-size: 23px;
-  }
-
-  .example-grid {
-    grid-template-columns: 1fr;
-  }
-
   .composer-hint {
     display: none;
   }
@@ -3335,9 +3332,22 @@ button.user-row:active {
     padding-right: calc(16px + env(safe-area-inset-right));
   }
 
-  .composer-area {
+  .composer-area,
+  .welcome-intro,
+  .empty-tail {
     padding-left: calc(16px + env(safe-area-inset-left));
     padding-right: calc(16px + env(safe-area-inset-right));
+  }
+
+  /* el saludo respira menos: con el teclado abierto el bloque centrado tiene
+     poca altura que repartir */
+  .welcome-intro {
+    padding-top: 16px;
+    padding-bottom: 14px;
+  }
+
+  .welcome-plate {
+    margin-bottom: 16px;
   }
 
   /* iOS hace zoom automático al enfocar campos con fuente < 16px
@@ -3437,9 +3447,20 @@ button.user-row:active {
     border-radius: 18px;
   }
 
-  .composer-area {
+  .composer-area,
+  .welcome-intro,
+  .empty-tail {
     padding-left: calc(12px + env(safe-area-inset-left));
     padding-right: calc(12px + env(safe-area-inset-right));
+  }
+
+  /* píldoras un punto más cortas para que las cuatro quepan en dos filas */
+  .suggestion {
+    font-size: 13px;
+  }
+
+  .suggestions {
+    gap: 7px;
   }
 }
 
@@ -3502,9 +3523,10 @@ button.user-row:active {
   background: var(--accent-soft-2);
 }
 
-.example-card:active:not(:disabled) {
+.suggestion:active:not(:disabled) {
   border-color: var(--accent-border);
-  background: var(--hover);
+  background: var(--accent-soft);
+  color: var(--chip-text);
 }
 
 .source-head:active {
@@ -3587,6 +3609,13 @@ button.doc-badge-failed:active {
     padding-top: 11px;
     padding-bottom: 11px;
   }
+
+  /* píldoras de sugerencia: ≥44px de alto real (sin pseudo-elemento, que
+     solaparía el área de toque de la fila de abajo) */
+  .suggestion {
+    padding-top: 13px;
+    padding-bottom: 13px;
+  }
 }
 
 /* ----------------------------------------------------------------------
@@ -3649,9 +3678,9 @@ button.doc-badge-failed:active {
   .score-fill,
   .send-ready,
   .send-stop,
-  .example-card,
-  .welcome-logo,
-  .welcome,
+  .welcome-intro,
+  .welcome-plate,
+  .suggestion,
   .source-card,
   .source-snippet,
   .chat-skeleton,
