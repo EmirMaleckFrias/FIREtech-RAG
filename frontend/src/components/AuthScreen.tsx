@@ -15,7 +15,7 @@ import { useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ALLOWED_DOMAIN, DOMAIN_ERROR, isAllowedEmail, signIn, signUp } from '../lib/session';
 import { supabaseConfigError } from '../lib/supabase';
-import { IconAlert, IconSpinner } from './icons';
+import { IconAlert, IconLock, IconSpinner } from './icons';
 
 type Tab = 'signin' | 'signup';
 
@@ -25,9 +25,15 @@ const MIN_PASSWORD = 6;
 interface AuthScreenProps {
   /** true si se llega aquí por un 401 del backend (sesión caducada). */
   expired?: boolean;
+  /**
+   * true si un administrador revocó el acceso de la cuenta (403 con
+   * `code: "blocked"`). Manda sobre `expired`: el motivo es otro y volver a
+   * entrar no lo arregla.
+   */
+  revoked?: boolean;
 }
 
-export function AuthScreen({ expired = false }: AuthScreenProps) {
+export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps) {
   const [tab, setTab] = useState<Tab>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -117,7 +123,17 @@ export function AuthScreen({ expired = false }: AuthScreenProps) {
           </p>
         )}
 
-        {expired && error === null && (
+        {revoked && (
+          <p className="auth-notice auth-notice-revoked" role="status">
+            <IconLock size={14} />
+            <span>
+              Un administrador revocó tu acceso. Si crees que es un error, habla con el
+              equipo.
+            </span>
+          </p>
+        )}
+
+        {expired && !revoked && error === null && (
           <p className="auth-notice" role="status">
             Tu sesión caducó. Vuelve a entrar para continuar.
           </p>

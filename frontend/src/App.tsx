@@ -6,6 +6,7 @@ import {
   fetchSessionMessages,
   fetchSessions,
   normalizeSources,
+  onAccessRevoked,
   onUnauthorized,
   sendFeedback,
   streamChat,
@@ -18,7 +19,13 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SourcesPanel } from './components/SourcesPanel';
 import type { CitationRef } from './lib/markdown';
-import { loadSession, onSessionChange, renewAccessToken, signOut } from './lib/session';
+import {
+  hasValidSession,
+  loadSession,
+  onSessionChange,
+  renewAccessToken,
+  signOut,
+} from './lib/session';
 import type {
   ChatMessage,
   Health,
@@ -31,10 +38,10 @@ import type {
 const HEALTH_INTERVAL_MS = 15_000;
 
 /**
- * Ventana en la que un 401 NO se reintenta: si el backend rechaza un token
- * recién renovado, la sesión ya no sirve y toca volver a la pantalla de acceso.
+ * Cada cuánto, como mucho, se pide un token nuevo ante 401 seguidos. Es solo
+ * un freno para no martillear a Supabase: agotarlo NO cierra la sesión.
  */
-const RENEW_GRACE_MS = 30_000;
+const RENEW_THROTTLE_MS = 10_000;
 
 function newLocalId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -65,6 +72,8 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [me, setMe] = useState<Me | null>(null);
   const [expired, setExpired] = useState(false);
+  /** Expulsado por bloqueo de la cuenta: la pantalla de acceso lo explica. */
+  const [revoked, setRevoked] = useState(false);
 
   const hasSessionRef = useRef(false);
   const lastRenewRef = useRef(0);
@@ -81,7 +90,10 @@ export default function App() {
       if (!alive) return;
       setSession(s);
       setAuthLoading(false);
-      if (s !== null) setExpired(false);
+      if (s !== null) {
+        setExpired(false);
+        setRevoked(false); // quien entra de nuevo ya no arrastra el aviso
+      }
     });
     return () => {
       alive = false;
@@ -204,20 +216,21 @@ export default function App() {
   }, [userId]);
 
   /**
-   * 401 del backend. El token que viajó ya venía renovado si le quedaba poco
-   * de vida (getAccessToken), así que un 401 casi siempre significa sesión
-   * inválida. Aun así se intenta UNA renovación (por si el refresco se cruzó
-   * con la petición); si el backend vuelve a rechazar dentro de la ventana de
-   * gracia, se cierra sesión y se vuelve a la pantalla de acceso.
+   * 401 del backend. La sesión SOLO se cierra si de verdad murió: mientras el
+   * navegador conserve una sesión vigente se mantiene al usuario dentro, aunque
+   * el backend rechace peticiones (un 401 puede venir de un problema del
+   * servidor, no del usuario). Así, una vez dentro, solo se sale al pulsar
+   * cerrar sesión.
    */
   const handleUnauthorized = useCallback(async () => {
     if (!hasSessionRef.current) return; // ya estamos fuera
     const now = Date.now();
-    if (now - lastRenewRef.current > RENEW_GRACE_MS) {
+    if (now - lastRenewRef.current > RENEW_THROTTLE_MS) {
       lastRenewRef.current = now;
       const token = await renewAccessToken();
       if (token !== null) return; // token nuevo: la siguiente petición irá bien
     }
+    if (await hasValidSession()) return; // el problema no es la sesión
     hasSessionRef.current = false;
     setExpired(true);
     await signOut();
@@ -229,9 +242,36 @@ export default function App() {
     [handleUnauthorized],
   );
 
+  /**
+   * 403 con `code: "blocked"`: un administrador revocó el acceso de esta
+   * cuenta. Es la ÚNICA excepción a la regla de arriba y sale por la puerta
+   * contraria: aquí no se renueva el token ni se comprueba la sesión, porque
+   * el token sigue siendo válido y aun así no sirve de nada. Se cierra la
+   * sesión al instante y se explica el motivo en la pantalla de acceso.
+   *
+   * El backend manda su propio texto ("Tu acceso ha sido revocado"); la
+   * pantalla usa una copia más explícita sobre quién lo hizo y qué hacer.
+   */
+  const handleAccessRevoked = useCallback(async () => {
+    if (!hasSessionRef.current) return; // ya estamos fuera
+    hasSessionRef.current = false;
+    setExpired(false);
+    setRevoked(true);
+    setDocsOpen(false);
+    setSettingsOpen(false);
+    await signOut();
+    setSession(null);
+  }, []);
+
+  useEffect(
+    () => onAccessRevoked(() => void handleAccessRevoked()),
+    [handleAccessRevoked],
+  );
+
   const handleSignOut = useCallback(async () => {
     hasSessionRef.current = false;
     setExpired(false);
+    setRevoked(false);
     await signOut();
     setSession(null);
   }, []);
@@ -517,7 +557,7 @@ export default function App() {
   // Sin sesión: solo la pantalla de acceso. Ninguna llamada a /api/* sale
   // hasta que haya token (los efectos están condicionados a userId).
   if (session === null) {
-    return <AuthScreen expired={expired} />;
+    return <AuthScreen expired={expired} revoked={revoked} />;
   }
 
   return (

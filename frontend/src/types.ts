@@ -32,6 +32,12 @@ export interface UserAccount {
   id: string;
   email: string;
   role: UserRole;
+  /**
+   * Acceso revocado por un administrador. La cuenta y sus conversaciones se
+   * conservan: es reversible (PATCH con `blocked: false`), al revés que el
+   * borrado. Un backend antiguo no manda el campo y se asume false.
+   */
+  blocked: boolean;
   created_at: string;
   /** Último acceso; null si la cuenta nunca ha entrado. */
   last_sign_in_at: string | null;

@@ -88,6 +88,26 @@ export function renewAccessToken(): Promise<string | null> {
 }
 
 /** Token vigente para el header Authorization, o null si no hay sesión. */
+/**
+ * ¿Queda una sesión utilizable en el navegador? Lectura fresca, sin caché.
+ *
+ * Se usa para decidir si un 401 del backend significa "tu sesión murió" o
+ * "el backend tuvo un problema": solo lo primero justifica expulsar al
+ * usuario. Si ni siquiera se puede comprobar, se asume que sigue viva: nunca
+ * se cierra una sesión por una duda.
+ */
+export async function hasValidSession(): Promise<boolean> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const session = data.session;
+    if (session === null) return false;
+    cached = session;
+    return secondsLeft(session) > 0;
+  } catch {
+    return true;
+  }
+}
+
 export async function getAccessToken(): Promise<string | null> {
   const session = cached ?? (await loadSession());
   if (session === null) return null;

@@ -9,13 +9,15 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.documents import router as documents_router
 from app.api.routes import router
 from app.config import get_settings
+from app.services.auth import BlockedAccount
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,6 +48,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(BlockedAccount)
+async def blocked_account_handler(_request: Request, _exc: BlockedAccount) -> JSONResponse:
+    """Cuenta con el acceso revocado por un administrador.
+
+    El `code` permite al frontend distinguir esto de un 403 por rol y cerrar
+    la sesión al instante, sin esperar a que caduque el token.
+    """
+    return JSONResponse(
+        status_code=403,
+        content={"detail": "Tu acceso ha sido revocado", "code": "blocked"},
+    )
+
 
 app.include_router(router, prefix="/api")
 app.include_router(documents_router, prefix="/api")

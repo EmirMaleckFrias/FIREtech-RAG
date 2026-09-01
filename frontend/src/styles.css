@@ -2741,7 +2741,7 @@ button.doc-badge-failed:hover {
   cursor: pointer;
 }
 
-/* aviso breve de éxito tras un cambio de rol (se retira solo a los 3,2 s) */
+/* aviso breve tras una acción de fila (se retira solo a los 3,2 s) */
 .users-notice {
   flex-shrink: 0;
   margin: 0 14px 10px;
@@ -2753,6 +2753,13 @@ button.doc-badge-failed:hover {
   line-height: 1.45;
   color: var(--green);
   animation: fade-up 0.22s ease both;
+}
+
+/* variante neutra: bloquear o eliminar se confirman, no se celebran en verde */
+.users-notice-plain {
+  border-color: var(--border);
+  background: var(--inset);
+  color: var(--text-2);
 }
 
 /* --- pestaña Usuarios: listado de cuentas --- */
@@ -2892,16 +2899,54 @@ button.user-row:active {
   color: var(--text-2);
 }
 
-/* --- pestaña Usuarios: acciones desplegadas de la fila --- */
+/* --- pestaña Usuarios: cuenta con el acceso revocado ---
+
+   Bloquear no borra: la fila sigue ahí, atenuada, con la insignia en ámbar
+   (el mismo aviso que ya usa el panel de documentos). Se atenúan los hijos
+   uno a uno en vez de la tarjeta entera para que la insignia y el botón de
+   desbloquear NO pierdan contraste: son justo lo que hay que leer. */
+.user-card-blocked .user-email,
+.user-card-blocked .user-counts,
+.user-card-blocked .user-since,
+.user-card-blocked .user-icon,
+.user-card-blocked .sidebar-role {
+  opacity: 0.5;
+}
+
+.user-blocked-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 1px 8px 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--amber) 34%, transparent);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--amber);
+}
+
+/* --- pestaña Usuarios: acciones desplegadas de la fila ---
+
+   Tres acciones con tres pesos visuales distintos, de menos a más grave:
+   promover (acento de marca al pasar por encima), bloquear (ámbar, reversible)
+   y eliminar (rojo desde el reposo, separada a la derecha). Solo la última
+   nace coloreada, así que es imposible confundirlas de un vistazo. */
 .user-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   min-height: 28px;
   padding: 0 12px 11px 37px;
   animation: fade-up 0.18s ease both;
 }
 
-.user-role-btn {
+.user-act-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 5px 11px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -2913,26 +2958,93 @@ button.user-row:active {
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-.user-role-promote:hover {
+.user-act-btn svg {
+  flex-shrink: 0;
+}
+
+.user-act-promote:hover {
   border-color: var(--accent-border);
   background: var(--accent-soft);
   color: var(--chip-text);
 }
 
-.user-role-demote:hover {
+.user-act-demote:hover {
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
   background: color-mix(in srgb, var(--red) 9%, transparent);
   color: var(--red);
 }
 
+/* reversible: ámbar de aviso, nunca el rojo del borrado */
+.user-act-block:hover {
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  color: var(--amber);
+}
+
+/* permanente: apartada del resto y ya en rojo sin tocarla. Sin relleno, para
+   no competir con el acento de marca (que es otro rojo) ni gritar más que el
+   contenido de la fila. */
+.user-act-danger {
+  margin-left: auto;
+  color: var(--red);
+}
+
+.user-act-danger:hover {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+/* --- pestaña Usuarios: confirmación en dos pasos --- */
 .user-confirm {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 6px 10px;
+  width: 100%;
   font-size: 12px;
   color: var(--text-2);
   animation: fade-in 0.15s ease both;
+}
+
+/* la pregunta ocupa SIEMPRE su propia línea (flex-basis 100%): así los dos
+   botones caen una línea por debajo del que abrió la confirmación y un doble
+   clic por inercia nunca confirma nada, solo aterriza en el texto */
+.user-confirm-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex: 1 1 100%;
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.user-confirm-text svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.user-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* borrado: el texto entero se lee en rojo, no solo el botón */
+.user-confirm-danger {
+  color: var(--red);
+}
+
+/* el único relleno sólido de la fila, reservado a lo que no tiene vuelta
+   atrás. `--bg` como color de texto funciona en los dos temas: en claro el
+   rojo es oscuro y en oscuro es claro. */
+.user-confirm-delete {
+  background: var(--red);
+  color: var(--bg);
+}
+
+.user-confirm-delete:hover {
+  background: color-mix(in srgb, var(--red) 84%, var(--text));
 }
 
 .user-saving {
@@ -2947,13 +3059,23 @@ button.user-row:active {
   color: var(--text-3);
 }
 
-/* motivo del PATCH rechazado, en la fila cuyo rol se revirtió */
+/* motivo del rechazo, en la fila que se revirtió (o que volvió a la lista
+   porque no se pudo borrar) */
 .user-row-error {
   padding: 0 12px 10px 37px;
   font-size: 12px;
   line-height: 1.5;
   color: var(--red);
   animation: fade-up 0.2s ease both;
+}
+
+/* en pantallas estrechas (el panel es bottom sheet) las acciones recuperan
+   la sangría del icono para caber en dos líneas en vez de tres */
+@media (max-width: 420px) {
+  .user-actions,
+  .user-row-error {
+    padding-left: 12px;
+  }
 }
 
 /* --- pestaña Sistema: cifras de solo lectura --- */
@@ -3342,9 +3464,27 @@ button.user-row:active {
 
 .new-chat-btn:active,
 .docs-retry-btn:active,
-.user-role-btn:active {
+.user-act-btn:active {
   border-color: var(--accent-border);
   background: var(--hover);
+}
+
+/* en táctil no hay hover: cada acción de fila enseña su color al pulsar */
+.user-act-block:active {
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  color: var(--amber);
+}
+
+.user-act-danger:active,
+.user-act-demote:active {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: var(--red);
+}
+
+.user-confirm-delete:active {
+  background: color-mix(in srgb, var(--red) 78%, var(--text));
 }
 
 .sidebar-docs-btn:active {
@@ -3398,7 +3538,7 @@ button.doc-badge-failed:active {
   button.doc-badge-failed,
   .citation-chip,
   .docs-retry-btn,
-  .user-role-btn,
+  .user-act-btn,
   .docs-poll-warn button {
     position: relative;
   }
@@ -3414,7 +3554,7 @@ button.doc-badge-failed:active {
   button.doc-badge-failed::after,
   .citation-chip::after,
   .docs-retry-btn::after,
-  .user-role-btn::after,
+  .user-act-btn::after,
   .docs-poll-warn button::after {
     content: '';
     position: absolute;
@@ -3522,7 +3662,13 @@ button.doc-badge-failed:active {
   .doc-error-detail,
   .doc-row-error,
   .upload-progress,
-  .upload-error {
+  .upload-error,
+  .user-card,
+  .user-actions,
+  .user-confirm,
+  .user-row-error,
+  .users-notice,
+  .stat-tile {
     animation: none;
   }
 
@@ -3643,6 +3789,21 @@ button.doc-badge-failed:active {
   font-size: 12.5px;
   line-height: 1.45;
   color: var(--text-2);
+}
+
+/* acceso revocado por un administrador: no es una sesión caducada, no se
+   arregla volviendo a entrar, así que pesa más que el aviso neutro */
+.auth-notice-revoked {
+  align-items: flex-start;
+  gap: 8px;
+  border-color: color-mix(in srgb, var(--red) 30%, transparent);
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  color: var(--red);
+}
+
+.auth-notice-revoked svg {
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 /* --- pestañas Entrar / Crear cuenta --- */

@@ -94,8 +94,11 @@ async def me(user: AuthUser = Depends(current_user)) -> dict:
     return {"id": user.id, "email": user.email, "role": user.role}
 
 
-class RoleUpdate(BaseModel):
-    role: Literal["admin", "vendedor"]
+class UserUpdate(BaseModel):
+    """Cambio de rol y/o de estado de bloqueo. Ambos campos son opcionales."""
+
+    role: Literal["admin", "vendedor"] | None = None
+    blocked: bool | None = None
 
 
 @router.get("/users")
@@ -143,22 +146,42 @@ async def stats(admin: AuthUser = Depends(require_admin)) -> dict:
 @router.patch("/users/{user_id}")
 async def update_user(
     user_id: uuid.UUID,
-    body: RoleUpdate,
+    body: UserUpdate,
     admin: AuthUser = Depends(require_admin),
 ) -> dict:
-    """Promueve o degrada a otra cuenta. Solo administradores.
+    """Promueve, degrada, bloquea o desbloquea otra cuenta. Solo administradores.
 
-    Nadie puede cambiar su propio rol: evita que el último administrador se
-    degrade y deje el sistema sin quien gestione documentos ni usuarios.
+    Nadie puede cambiarse a sí mismo: evita que el último administrador se
+    degrade o se bloquee y deje el sistema sin quien lo gestione.
     """
     if str(user_id) == str(admin.id):
-        raise HTTPException(status_code=403, detail="No puedes cambiar tu propio rol")
+        raise HTTPException(
+            status_code=403, detail="No puedes cambiar tu propia cuenta"
+        )
+    if body.role is None and body.blocked is None:
+        raise HTTPException(status_code=400, detail="Nada que cambiar")
     try:
         return await run_in_threadpool(
-            supabase_db.update_user_role, str(user_id), body.role
+            supabase_db.update_user, str(user_id), body.role, body.blocked
         )
     except supabase_db.UserNotFound:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: uuid.UUID, admin: AuthUser = Depends(require_admin)
+) -> dict:
+    """Borra una cuenta y sus conversaciones. Solo administradores."""
+    if str(user_id) == str(admin.id):
+        raise HTTPException(
+            status_code=403, detail="No puedes borrar tu propia cuenta"
+        )
+    try:
+        await run_in_threadpool(supabase_db.delete_user, str(user_id))
+    except supabase_db.UserNotFound:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return {"ok": True}
 
 
 @router.post("/search")

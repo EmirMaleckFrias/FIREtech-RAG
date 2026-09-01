@@ -57,10 +57,74 @@ function unauthorized(): Error {
   return new Error(UNAUTHORIZED_MSG);
 }
 
+/* ----------------------------------------------------------------------
+   Cuenta bloqueada (SPEC.md, "Gestión de usuarios": efecto del bloqueo).
+
+   Un administrador puede revocar el acceso de una cuenta. A partir de ese
+   momento CUALQUIER petición suya responde
+   `403 {"detail": "Tu acceso ha sido revocado", "code": "blocked"}`, aunque su
+   token siga siendo válido. Ese `code` es la única señal fiable: un 403 a
+   secas significa "no tienes permiso para esto" y no debe expulsar a nadie.
+
+   Por eso el cuerpo de todo error se lee por un único sitio (parseErrorBody /
+   failure) y ahí se dispara el aviso. El bloqueo es la ÚNICA excepción que
+   cierra la sesión sin preguntar: el 401 ya no expulsa salvo que la sesión
+   esté muerta de verdad.
+   ---------------------------------------------------------------------- */
+
+type AccessRevokedListener = (detail: string) => void;
+const accessRevokedListeners = new Set<AccessRevokedListener>();
+
+/** Suscribe un callback al 403 de cuenta bloqueada. Devuelve el des-suscriptor. */
+export function onAccessRevoked(listener: AccessRevokedListener): () => void {
+  accessRevokedListeners.add(listener);
+  return () => {
+    accessRevokedListeners.delete(listener);
+  };
+}
+
+const REVOKED_MSG = 'Tu acceso ha sido revocado';
+
+function accessRevoked(detail: string | null): void {
+  const message = detail !== null && detail !== '' ? detail : REVOKED_MSG;
+  for (const listener of accessRevokedListeners) listener(message);
+}
+
+/** Cuerpo de error ya leído: `detail` legible y si es el 403 de bloqueo. */
+interface ErrorBody {
+  detail: string | null;
+  blocked: boolean;
+}
+
+/**
+ * Interpreta el cuerpo de un error del backend SIN efectos secundarios.
+ * `blocked` solo es true con el 403 del contrato (`code: "blocked"`): ni un
+ * 403 por rol ni un cuerpo ilegible pueden cerrar la sesión de nadie.
+ */
+function parseErrorBody(status: number, body: string): ErrorBody {
+  const parsed = safeJson(body);
+  const obj =
+    typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  const detail = typeof obj.detail === 'string' && obj.detail !== '' ? obj.detail : null;
+  return { detail, blocked: status === 403 && obj.code === 'blocked' };
+}
+
+/**
+ * Lee (una sola vez) el cuerpo de una respuesta fallida y, si es el 403 de
+ * cuenta bloqueada, avisa a los suscriptores. Todo camino de error de este
+ * módulo pasa por aquí: así el bloqueo se detecta llame quien llame.
+ */
+async function failure(res: Response): Promise<ErrorBody> {
+  return failureFrom(res.status, await res.text().catch(() => ''));
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: await authHeaders() });
   if (res.status === 401) throw unauthorized();
-  if (!res.ok) throw new Error(`HTTP ${res.status} en ${url}`);
+  if (!res.ok) {
+    const { detail } = await failure(res);
+    throw new Error(detail ?? `HTTP ${res.status} en ${url}`);
+  }
   return (await res.json()) as T;
 }
 
@@ -71,7 +135,13 @@ async function getJson<T>(url: string): Promise<T> {
  */
 export async function fetchHealth(): Promise<Health> {
   const res = await fetch('/api/health', { headers: await authHeaders() });
-  if (!res.ok) throw new Error(`HTTP ${res.status} en /api/health`);
+  if (!res.ok) {
+    // Sigue sin participar del ciclo de 401, pero sí mira si el fallo es el
+    // 403 de cuenta bloqueada: al sondearse cada 15 s, es lo que expulsa a un
+    // usuario recién bloqueado aunque esté sin tocar nada.
+    const { detail } = await failure(res);
+    throw new Error(detail ?? `HTTP ${res.status} en /api/health`);
+  }
   return (await res.json()) as Health;
 }
 
@@ -105,7 +175,10 @@ export async function sendFeedback(messageId: string, rating: 1 | -1): Promise<v
     body: JSON.stringify({ message_id: messageId, rating, comment: null }),
   });
   if (res.status === 401) throw unauthorized();
-  if (!res.ok) throw new Error(`HTTP ${res.status} al enviar feedback`);
+  if (!res.ok) {
+    const { detail } = await failure(res);
+    throw new Error(detail ?? `HTTP ${res.status} al enviar feedback`);
+  }
 }
 
 /* ----------------------------------------------------------------------
@@ -146,12 +219,14 @@ function normalizeDocuments(raw: unknown): DocumentInfo[] {
   return out;
 }
 
-/** Extrae `detail` de un cuerpo de error FastAPI (o null si no es legible). */
-function extractDetail(body: string): string | null {
-  const parsed = safeJson(body);
-  if (typeof parsed !== 'object' || parsed === null) return null;
-  const detail = (parsed as Record<string, unknown>).detail;
-  return typeof detail === 'string' && detail !== '' ? detail : null;
+/**
+ * Versión síncrona de failure() para cuerpos ya leídos (el XHR de subida, que
+ * no tiene Response). Mismo efecto: detecta el 403 de cuenta bloqueada.
+ */
+function failureFrom(status: number, body: string): ErrorBody {
+  const parsed = parseErrorBody(status, body);
+  if (parsed.blocked) accessRevoked(parsed.detail);
+  return parsed;
 }
 
 /** GET /api/documents: lista de documentos indexados (incluye los 6 catálogos base). */
@@ -165,17 +240,15 @@ export async function fetchDocuments(): Promise<DocumentInfo[]> {
   if (res.status === 401) throw unauthorized();
   if (res.status === 404 || res.status === 501) throw new Error(UNAVAILABLE_MSG);
   if (!res.ok) {
-    throw new Error(
-      extractDetail(await res.text().catch(() => '')) ??
-        `Error HTTP ${res.status} al listar los documentos.`,
-    );
+    const { detail } = await failure(res);
+    throw new Error(detail ?? `Error HTTP ${res.status} al listar los documentos.`);
   }
   const data = (await res.json()) as { documents?: unknown };
   return normalizeDocuments(data.documents);
 }
 
 function uploadErrorMessage(status: number, body: string): string {
-  const detail = extractDetail(body);
+  const { detail } = failureFrom(status, body);
   switch (status) {
     case 400:
       return detail ?? 'El backend rechazó el archivo (formato o contenido no válido).';
@@ -278,7 +351,7 @@ export async function deleteDocument(fileName: string): Promise<void> {
   }
   if (res.ok) return;
   if (res.status === 401) throw unauthorized();
-  const detail = extractDetail(await res.text().catch(() => ''));
+  const { detail } = await failure(res);
   if (res.status === 403) {
     throw new Error(detail ?? 'Este catálogo base no se puede borrar.');
   }
@@ -324,6 +397,9 @@ function normalizeUsers(raw: unknown): UserAccount[] {
       id,
       email: typeof u.email === 'string' ? u.email : 'desconocido',
       role: normalizeRole(u.role),
+      // Solo un true explícito bloquea: un backend sin el campo (o con algo
+      // raro) deja la cuenta activa, nunca atenuada por error.
+      blocked: u.blocked === true,
       created_at: typeof u.created_at === 'string' ? u.created_at : '',
       last_sign_in_at:
         typeof u.last_sign_in_at === 'string' && u.last_sign_in_at !== ''
@@ -347,7 +423,7 @@ export async function fetchUsers(): Promise<UserAccount[]> {
   if (res.status === 401) throw unauthorized();
   if (res.status === 404 || res.status === 501) throw new Error(USERS_UNAVAILABLE_MSG);
   if (!res.ok) {
-    const detail = extractDetail(await res.text().catch(() => ''));
+    const { detail } = await failure(res);
     if (res.status === 403) throw new Error(detail ?? USERS_FORBIDDEN_MSG);
     throw new Error(detail ?? `Error HTTP ${res.status} al listar los usuarios.`);
   }
@@ -355,24 +431,41 @@ export async function fetchUsers(): Promise<UserAccount[]> {
   return normalizeUsers(data.users);
 }
 
+/** Cambios admitidos por PATCH /api/users/{user_id}: rol, bloqueo o ambos. */
+interface UserPatch {
+  role?: UserRole;
+  blocked?: boolean;
+}
+
 /**
- * PATCH /api/users/{user_id} con `{ role }`. Devuelve la fila actualizada.
- *
- * El backend responde 403 "No puedes cambiar tu propio rol" si el admin
- * intenta degradarse (evita quedarse sin administradores). La respuesta trae
- * solo id, email y rol (nada de fechas ni contadores): quien llama fusiona
- * esos tres campos sobre su copia local.
+ * Fila devuelta por el PATCH: solo identidad, rol y bloqueo (ni fechas ni
+ * contadores). `blocked` es null cuando el backend no manda el campo, para
+ * que quien llama conserve el valor que ya tenía en vez de inventarse un
+ * false.
  */
-export async function updateUserRole(
-  userId: string,
-  role: UserRole,
-): Promise<Pick<UserAccount, 'id' | 'email' | 'role'>> {
+export interface UpdatedUser {
+  id: string;
+  email: string;
+  role: UserRole;
+  blocked: boolean | null;
+}
+
+/**
+ * PATCH /api/users/{user_id}. Un solo camino para los dos cambios posibles
+ * (rol y bloqueo): mismo endpoint, mismos códigos de error y el mismo trato
+ * del `detail`, que es el que explica al usuario por qué le dijeron que no.
+ *
+ * Guardas del backend (SPEC.md): 403 si el administrador intenta degradarse,
+ * bloquearse o borrarse a sí mismo; 404 si la cuenta ya no existe.
+ */
+async function patchUser(userId: string, patch: UserPatch): Promise<UpdatedUser> {
+  const changingRole = patch.role !== undefined;
   let res: Response;
   try {
     res = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
       method: 'PATCH',
       headers: { ...JSON_HEADERS, ...(await authHeaders()) },
-      body: JSON.stringify({ role }),
+      body: JSON.stringify(patch),
     });
   } catch {
     throw new Error(OFFLINE_MSG);
@@ -382,21 +475,70 @@ export async function updateUserRole(
     // 404 es ambiguo aquí: puede ser "endpoint inexistente" o "usuario
     // borrado". El `detail` del backend distingue; sin él se asume lo
     // segundo solo si el endpoint respondió algo.
-    const detail = extractDetail(await res.text().catch(() => ''));
+    const { detail } = await failure(res);
     throw new Error(detail ?? USERS_UNAVAILABLE_MSG);
   }
   if (!res.ok) {
-    const detail = extractDetail(await res.text().catch(() => ''));
-    if (res.status === 400) throw new Error(detail ?? 'El rol indicado no es válido.');
+    const { detail } = await failure(res);
+    if (res.status === 400) {
+      throw new Error(detail ?? (changingRole ? 'El rol indicado no es válido.' : 'Cambio no válido.'));
+    }
     if (res.status === 403) throw new Error(detail ?? USERS_FORBIDDEN_MSG);
-    throw new Error(detail ?? `Error HTTP ${res.status} al cambiar el rol.`);
+    throw new Error(
+      detail ??
+        `Error HTTP ${res.status} al ${changingRole ? 'cambiar el rol' : 'cambiar el acceso'}.`,
+    );
   }
   const data = (await res.json()) as Record<string, unknown>;
   return {
     id: typeof data.id === 'string' ? data.id : userId,
     email: typeof data.email === 'string' ? data.email : '',
     role: normalizeRole(data.role),
+    blocked: typeof data.blocked === 'boolean' ? data.blocked : null,
   };
+}
+
+/**
+ * Promueve o degrada. El backend responde 403 "No puedes cambiar tu propio
+ * rol" si el admin intenta degradarse (evita quedarse sin administradores).
+ */
+export function updateUserRole(userId: string, role: UserRole): Promise<UpdatedUser> {
+  return patchUser(userId, { role });
+}
+
+/**
+ * Revoca o devuelve el acceso de una cuenta. NO borra nada: la cuenta y sus
+ * conversaciones se conservan y la operación es reversible con `false`.
+ * Mientras esté bloqueada, toda petición suya recibe el 403 con
+ * `code: "blocked"` y su sesión se cierra sola.
+ */
+export function setUserBlocked(userId: string, blocked: boolean): Promise<UpdatedUser> {
+  return patchUser(userId, { blocked });
+}
+
+/**
+ * DELETE /api/users/{user_id}: borra la cuenta y sus conversaciones de forma
+ * PERMANENTE (los documentos que hubiera subido se conservan sin autor). No
+ * tiene vuelta atrás, al revés que el bloqueo. 403 si el administrador
+ * intenta borrarse a sí mismo.
+ */
+export async function deleteUser(userId: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    });
+  } catch {
+    throw new Error(OFFLINE_MSG);
+  }
+  if (res.ok) return;
+  if (res.status === 401) throw unauthorized();
+  if (res.status === 405 || res.status === 501) throw new Error(USERS_UNAVAILABLE_MSG);
+  const { detail } = await failure(res);
+  if (res.status === 403) throw new Error(detail ?? USERS_FORBIDDEN_MSG);
+  if (res.status === 404) throw new Error(detail ?? 'Esa cuenta ya no existe.');
+  throw new Error(detail ?? `Error HTTP ${res.status} al eliminar la cuenta.`);
 }
 
 /** Lista de proveedores del índice: strings no vacíos, sin duplicados. */
@@ -429,7 +571,7 @@ export async function fetchStats(): Promise<AdminStats> {
   if (res.status === 401) throw unauthorized();
   if (res.status === 404 || res.status === 501) throw new Error(STATS_UNAVAILABLE_MSG);
   if (!res.ok) {
-    const detail = extractDetail(await res.text().catch(() => ''));
+    const { detail } = await failure(res);
     if (res.status === 403) throw new Error(detail ?? USERS_FORBIDDEN_MSG);
     throw new Error(detail ?? `Error HTTP ${res.status} al leer el estado del sistema.`);
   }
@@ -537,14 +679,10 @@ export async function streamChat(
 
   if (res.status === 401) throw unauthorized();
   if (!res.ok) {
-    let detail = '';
-    try {
-      const body = (await res.json()) as { detail?: unknown };
-      if (typeof body.detail === 'string') detail = body.detail;
-    } catch {
-      // cuerpo no-JSON: se ignora
-    }
-    throw new Error(detail || `Error HTTP ${res.status} del backend`);
+    // failure() también atrapa aquí el 403 de cuenta bloqueada: si revocan el
+    // acceso a mitad de conversación, el siguiente envío cierra la sesión.
+    const { detail } = await failure(res);
+    throw new Error(detail ?? `Error HTTP ${res.status} del backend`);
   }
   if (!res.body) {
     throw new Error('Este navegador no soporta lectura en streaming de la respuesta');

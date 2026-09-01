@@ -280,7 +280,7 @@ def list_users() -> list[dict]:
 
     rows = (
         client.table("profiles")
-        .select("id, email, role, created_at")
+        .select("id, email, role, created_at, blocked")
         .order("created_at", desc=False)
         .execute()
         .data
@@ -329,6 +329,7 @@ def list_users() -> list[dict]:
                 "id": r["id"],
                 "email": r["email"],
                 "role": r["role"],
+                "blocked": bool(r.get("blocked", False)),
                 "created_at": r["created_at"],
                 "last_sign_in_at": last_sign_in.get(uid),
                 "sessions_count": sessions_count.get(uid, 0),
@@ -390,25 +391,84 @@ def activity_stats() -> dict:
     return stats
 
 
-def update_user_role(user_id: str, role: str) -> dict:
-    """Cambia el rol de una cuenta y devuelve la fila actualizada.
+_BAN_FOREVER = "876000h"  # 100 años: el bloqueo dura hasta que se levante
 
-    El llamador ya validó el rol y que no sea el propio usuario.
+
+def update_user(
+    user_id: str, role: str | None = None, blocked: bool | None = None
+) -> dict:
+    """Cambia rol y/o estado de bloqueo. Devuelve la fila actualizada.
+
+    El llamador ya validó los valores y que no sea el propio usuario. Al
+    bloquear se aplica además el baneo en Supabase Auth, para que la cuenta no
+    pueda volver a entrar ni renovar su token; el rechazo inmediato de los
+    tokens todavía vigentes lo hace `auth.current_user` leyendo `blocked`.
     """
     client = _get_client()
     if client is None:
         raise UserNotFound(user_id)
-    resp = (
-        client.table("profiles")
-        .update({"role": role})
-        .eq("id", user_id)
-        .execute()
+
+    changes: dict[str, Any] = {}
+    if role is not None:
+        changes["role"] = role
+    if blocked is not None:
+        changes["blocked"] = blocked
+    if not changes:
+        rows = (
+            client.table("profiles")
+            .select("id, email, role, blocked")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            raise UserNotFound(user_id)
+        return rows[0]
+
+    rows = (
+        client.table("profiles").update(changes).eq("id", user_id).execute().data or []
     )
-    rows = resp.data or []
     if not rows:
         raise UserNotFound(user_id)
+
+    if blocked is not None:
+        try:
+            client.auth.admin.update_user_by_id(
+                user_id, {"ban_duration": _BAN_FOREVER if blocked else "none"}
+            )
+        except Exception as exc:
+            # El bloqueo de `profiles` ya está aplicado y el backend lo respeta;
+            # el baneo en Auth es refuerzo (impide nuevos inicios de sesión).
+            logger.warning("No se pudo aplicar el baneo en Supabase Auth: %s", exc)
+
     row = rows[0]
-    return {"id": row["id"], "email": row["email"], "role": row["role"]}
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "role": row["role"],
+        "blocked": bool(row.get("blocked", False)),
+    }
+
+
+def delete_user(user_id: str) -> None:
+    """Borra la cuenta de forma permanente.
+
+    Las claves foráneas hacen el resto: `profiles` y las conversaciones del
+    usuario caen en cascada; los documentos que hubiera subido se conservan
+    (su `uploaded_by` pasa a nulo).
+    """
+    client = _get_client()
+    if client is None:
+        raise UserNotFound(user_id)
+    exists = (
+        client.table("profiles").select("id").eq("id", user_id).limit(1).execute().data
+        or []
+    )
+    if not exists:
+        raise UserNotFound(user_id)
+    client.auth.admin.delete_user(user_id)
 
 
 def save_feedback(

@@ -14,6 +14,9 @@ cambio de rol tarda como mucho el TTL en verse.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import logging
 import time
 from typing import Any
@@ -31,12 +34,18 @@ try:
 except ImportError:  # SDK no instalado → mismo camino que "no configurado"
     create_client = None  # type: ignore[assignment]
 
-# TTL corto: un token revocado o un cambio de rol se propaga en <= 60 s.
-CACHE_TTL_SECONDS = 60.0
+# TTL corto: es lo que tarda en surtir efecto un bloqueo o un cambio de rol,
+# porque mientras la entrada siga viva no se vuelve a preguntar a Supabase.
+# 15 s equilibra las dos cosas: un usuario que conversa reaprovecha la caché en
+# ráfagas, y un administrador que revoca un acceso lo ve aplicado en segundos.
+CACHE_TTL_SECONDS = 15.0
 # Tope duro para que la caché no crezca sin límite (un token por usuario/sesión
 # activa; al llegar al tope se purgan los caducados y, si aún hace falta, los
 # de expiración más próxima).
 CACHE_MAX_ENTRIES = 512
+# Ventana en la que una entrada vencida sigue sirviendo SI Supabase no
+# responde. Nunca se usa cuando la verificación funciona.
+STALE_GRACE_SECONDS = 1800.0
 
 _DEFAULT_ROLE = "vendedor"  # menos privilegio si el perfil aún no existe
 
@@ -46,6 +55,15 @@ _DEFAULT_ROLE = "vendedor"  # menos privilegio si el perfil aún no existe
 # tenía el flujo dev antes de la autenticación). En producción SUPABASE_URL
 # siempre está definida, así que esta rama nunca se activa allí.
 DEV_USER_ID = "00000000-0000-0000-0000-000000000000"
+
+
+class BlockedAccount(Exception):
+    """La cuenta existe pero un administrador le revocó el acceso.
+
+    Se maneja en `main.py` para devolver el cuerpo exacto que el frontend
+    reconoce y usar como señal de cierre de sesión inmediato, aunque el token
+    del usuario siga siendo criptográficamente válido.
+    """
 
 
 class AuthUser(BaseModel):
@@ -68,6 +86,30 @@ def _unauthorized() -> HTTPException:
     return HTTPException(status_code=401, detail="Sesión no válida o expirada")
 
 
+def _unavailable() -> HTTPException:
+    """503, no 401: el token puede ser perfectamente válido y el problema es
+    nuestro (Supabase lento o caído, red). Un 401 aquí expulsaría al usuario."""
+    return HTTPException(
+        status_code=503,
+        detail="No se pudo verificar la sesión en este momento. Inténtalo de nuevo.",
+    )
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """¿El fallo dice que el TOKEN es malo, o que la verificación no se pudo hacer?
+
+    Solo un rechazo explícito de la API de autenticación (4xx) significa token
+    inválido. Timeouts, DNS, conexión rehusada o un 5xx de Supabase NO son
+    culpa del usuario y no deben cerrarle la sesión.
+    """
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return 400 <= status < 500
+    # gotrue lanza AuthApiError/AuthInvalidJwtError para credenciales malas.
+    name = type(exc).__name__
+    return name.startswith("Auth") and "Retry" not in name
+
+
 def auth_enabled() -> bool:
     """¿Hay Supabase configurado? Si no, se usa el usuario ficticio de dev."""
     settings = get_settings()
@@ -86,15 +128,24 @@ def _get_client() -> Any:
 # ---------------------------------------------------------------------------
 # Caché token → AuthUser
 # ---------------------------------------------------------------------------
-def _cache_get(token: str) -> AuthUser | None:
+def _cache_get(token: str, allow_stale: bool = False) -> AuthUser | None:
+    """Usuario cacheado para el token.
+
+    `allow_stale=True` acepta entradas ya vencidas dentro de la ventana de
+    gracia: solo se usa cuando Supabase no responde, para no cerrar sesiones
+    válidas por un fallo de red.
+    """
     entry = _cache.get(token)
     if entry is None:
         return None
     user, expiry = entry
-    if expiry <= time.monotonic():
-        _cache.pop(token, None)
-        return None
-    return user
+    now = time.monotonic()
+    if expiry > now:
+        return user
+    if allow_stale and now - expiry <= STALE_GRACE_SECONDS:
+        return user
+    _cache.pop(token, None)
+    return None
 
 
 def _cache_put(token: str, user: AuthUser) -> None:
@@ -126,6 +177,49 @@ def _bearer_token(authorization: str | None) -> str | None:
     return token or None
 
 
+def _unverified_subject(token: str) -> str | None:
+    """`sub` del JWT SIN verificar la firma.
+
+    Solo se usa para NEGAR el acceso con un mensaje preciso cuando Supabase ya
+    rechazó el token: falsear un `sub` aquí únicamente sirve para que a uno
+    mismo lo bloqueen, nunca para entrar.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+    except (IndexError, ValueError, binascii.Error, UnicodeDecodeError):
+        return None
+    sub = data.get("sub") if isinstance(data, dict) else None
+    return str(sub) if sub else None
+
+
+def _subject_is_blocked(token: str) -> bool:
+    """¿El token pertenece a una cuenta con el acceso revocado?
+
+    Supabase invalida el token en cuanto se banea la cuenta, así que sin esto
+    el usuario vería un 401 genérico y la app lo dejaría dentro con todo
+    fallando, en vez de cerrarle la sesión con un motivo claro.
+    """
+    user_id = _unverified_subject(token)
+    if user_id is None:
+        return False
+    try:
+        rows = (
+            _get_client()
+            .table("profiles")
+            .select("blocked")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return False
+    return bool(rows and rows[0].get("blocked"))
+
+
 def _resolve_token(token: str) -> AuthUser:
     """Valida el JWT contra Supabase y resuelve el rol desde `profiles`.
 
@@ -143,13 +237,16 @@ def _resolve_token(token: str) -> AuthUser:
     try:
         prof = (
             client.table("profiles")
-            .select("email, role")
+            .select("email, role, blocked")
             .eq("id", user_id)
             .limit(1)
             .execute()
         )
         rows = prof.data or []
         if rows:
+            if rows[0].get("blocked"):
+                # Acceso revocado: se corta aquí, sin cachear nada.
+                raise BlockedAccount(user_id)
             role = rows[0].get("role") or _DEFAULT_ROLE
             email = rows[0].get("email") or email
         else:
@@ -157,6 +254,8 @@ def _resolve_token(token: str) -> AuthUser:
             # (usuario creado antes de la migración 004) se asume el rol de
             # menos privilegio en vez de negar el acceso.
             logger.warning("Usuario %s sin fila en profiles; rol por defecto", user_id)
+    except BlockedAccount:
+        raise
     except Exception:
         logger.exception("No se pudo leer el rol de profiles para %s", user_id)
 
@@ -182,13 +281,31 @@ async def current_user(authorization: str | None = Header(default=None)) -> Auth
 
     try:
         user = await run_in_threadpool(_resolve_token, token)
-    except HTTPException:
+    except (HTTPException, BlockedAccount):
+        # Una cuenta bloqueada nunca se sirve desde la caché ni se degrada a
+        # 503: el corte de acceso debe ser inmediato.
+        _cache.pop(token, None)
         raise
     except Exception as exc:
-        # Token caducado, firma inválida, proyecto caído... nunca se filtra el
-        # detalle técnico al cliente.
-        logger.info("Token rechazado: %s", exc)
-        raise _unauthorized() from exc
+        if _is_auth_error(exc):
+            # El token de verdad no vale (caducado, revocado, firma inválida).
+            # Si el rechazo viene de un baneo, se dice con precisión para que
+            # el frontend cierre la sesión con su motivo.
+            if await run_in_threadpool(_subject_is_blocked, token):
+                raise BlockedAccount(token) from exc
+            logger.info("Token rechazado: %s", exc)
+            raise _unauthorized() from exc
+        # Fallo de infraestructura. Si vimos este token hace poco, lo servimos
+        # aunque su TTL haya vencido: más vale una sesión que sigue viva que
+        # echar al usuario por un tropiezo de red.
+        stale = _cache_get(token, allow_stale=True)
+        if stale is not None:
+            logger.warning(
+                "Verificación no disponible (%s); se usa la sesión en caché.", exc
+            )
+            return stale
+        logger.warning("Verificación de sesión no disponible: %s", exc)
+        raise _unavailable() from exc
 
     _cache_put(token, user)
     return user

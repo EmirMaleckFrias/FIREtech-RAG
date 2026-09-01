@@ -11,12 +11,19 @@
 //   Cada pestaña pide sus datos cuando el panel se abre, no al montarse.
 // - Privacidad: de las conversaciones ajenas solo se muestran CONTADORES
 //   (cuántas y cuántas preguntas). Ni títulos ni texto, en ningún rol.
-// - Cambio de rol OPTIMISTA con reversión si el PATCH falla; degradar pide
-//   confirmación inline en dos pasos, nunca window.confirm.
+// - Toda acción de fila es OPTIMISTA con reversión si el backend la rechaza,
+//   y pide confirmación inline en dos pasos, nunca window.confirm.
 // - La fila entera abre y cierra sus acciones al hacer clic. La fila propia
-//   lleva "Tú", no despliega nada y no ofrece acción: el backend responde
-//   403 "No puedes cambiar tu propio rol" y la UI no ofrece lo que se va a
-//   rechazar.
+//   lleva "Tú", no despliega nada y no ofrece acción: el backend responde 403
+//   a quien intenta cambiarse el rol, bloquearse o borrarse a sí mismo, y la
+//   UI no ofrece lo que se va a rechazar.
+// - Bloquear y eliminar son cosas MUY distintas y se pintan distinto:
+//   bloquear es reversible y conserva la cuenta, así que va en ámbar (el
+//   color de aviso que ya usa el panel de documentos) y sin relleno; eliminar
+//   es permanente, así que es lo único de la fila que nace en rojo, lleva
+//   papelera, se separa a la derecha y su confirmación es la única con
+//   relleno rojo. El acento de marca (que también es rojo) queda para
+//   promover, la acción constructiva.
 
 import {
   useCallback,
@@ -28,16 +35,18 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
-import { fetchStats, fetchUsers, updateUserRole } from '../api';
+import { deleteUser, fetchStats, fetchUsers, setUserBlocked, updateUserRole } from '../api';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import { updatePassword } from '../lib/session';
 import type { AdminStats, UserAccount, UserRole } from '../types';
 import {
   IconAlert,
   IconChevronDown,
+  IconLock,
   IconLogout,
   IconSearch,
   IconSpinner,
+  IconTrash,
   IconUser,
   IconUsers,
   IconX,
@@ -124,6 +133,48 @@ function bySignup(a: UserAccount, b: UserAccount): number {
    Pestaña 1: Usuarios (solo admin)
    ====================================================================== */
 
+/** Acciones de fila; todas pasan por confirmación en dos pasos. */
+type RowAction = 'demote' | 'block' | 'unblock' | 'delete';
+
+/** Verde para lo que restablece o amplía; neutro para lo que restringe. */
+type NoticeTone = 'ok' | 'plain';
+
+interface PendingConfirm {
+  id: string;
+  action: RowAction;
+}
+
+/**
+ * Texto de la confirmación. Cada acción dice exactamente qué pasa con la
+ * cuenta y sus conversaciones, y si tiene vuelta atrás: es lo único que
+ * separa "bloquear" de "eliminar" para quien lee en vez de mirar colores.
+ */
+function confirmPrompt(action: RowAction, user: UserAccount): { question: string; verb: string } {
+  const chats = plural(user.sessions_count, 'conversación', 'conversaciones');
+  switch (action) {
+    case 'demote':
+      return {
+        question: '¿Quitarle el rol de administrador? Seguirá entrando como vendedor.',
+        verb: 'Quitar',
+      };
+    case 'block':
+      return {
+        question: `¿Bloquear su acceso? Se conservan la cuenta y sus ${chats}: puedes devolvérselo cuando quieras.`,
+        verb: 'Bloquear',
+      };
+    case 'unblock':
+      return {
+        question: '¿Devolverle el acceso? Volverá a entrar con normalidad.',
+        verb: 'Desbloquear',
+      };
+    case 'delete':
+      return {
+        question: `Se borran la cuenta y sus ${chats}. Es permanente: no se puede deshacer.`,
+        verb: 'Eliminar cuenta',
+      };
+  }
+}
+
 interface UsersTabProps {
   /** El panel está abierto: momento de pedir (o refrescar) la lista. */
   open: boolean;
@@ -137,10 +188,16 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
 
   const [query, setQuery] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [confirmFor, setConfirmFor] = useState<string | null>(null);
-  const [saving, setSaving] = useState<Set<string>>(new Set());
+  const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
+  /** id de fila -> etiqueta del trabajo en curso ("Bloqueando…", ...). */
+  const [saving, setSaving] = useState<Record<string, string>>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
-  const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * Aviso breve tras una acción. El tono "plain" (neutro) es para las
+   * restrictivas: revocar un acceso o borrar una cuenta se confirma, no se
+   * celebra en verde.
+   */
+  const [notice, setNotice] = useState<{ text: string; tone: NoticeTone } | null>(null);
 
   const usersRef = useRef<UserAccount[] | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
@@ -163,9 +220,9 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
     [],
   );
 
-  const showNotice = useCallback((text: string) => {
+  const showNotice = useCallback((text: string, tone: NoticeTone = 'ok') => {
     if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
-    setNotice(text);
+    setNotice({ text, tone });
     noticeTimerRef.current = window.setTimeout(() => {
       setNotice(null);
       noticeTimerRef.current = null;
@@ -203,45 +260,71 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
   }, [open, refreshUsers]);
 
   // Al cerrar se recogen las acciones desplegadas y los errores de fila:
-  // reabrir nunca muestra un "¿Quitar?" a medias ni el motivo de un intento
-  // viejo junto a una fila que ya luce el rol correcto.
+  // reabrir nunca muestra un "¿Eliminar?" a medias ni el motivo de un intento
+  // viejo junto a una fila que ya luce el estado correcto.
   useEffect(() => {
     if (open) return;
-    setConfirmFor(null);
+    setConfirm(null);
     setExpandedId(null);
     setRowErrors({});
   }, [open]);
 
+  /* --- utilidades comunes a las tres acciones de fila --- */
+
+  const startSaving = useCallback((id: string, label: string) => {
+    setSaving((s) => ({ ...s, [id]: label }));
+  }, []);
+
+  const stopSaving = useCallback((id: string) => {
+    setSaving((s) => {
+      const next = { ...s };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const clearRowError = useCallback((id: string) => {
+    setRowErrors((errs) => {
+      if (!(id in errs)) return errs;
+      const next = { ...errs };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  /** Motivo del rechazo en la propia fila: manda el `detail` del backend. */
+  const failRow = useCallback((id: string, err: unknown, fallback: string) => {
+    setRowErrors((errs) => ({
+      ...errs,
+      [id]: err instanceof Error && err.message !== '' ? err.message : fallback,
+    }));
+  }, []);
+
+  /** Aplica un parche local a una fila (sin tocar el resto de la lista). */
+  const patchRow = useCallback((id: string, patch: Partial<UserAccount>) => {
+    setUsers((prev) =>
+      prev === null ? prev : prev.map((u) => (u.id === id ? { ...u, ...patch } : u)),
+    );
+  }, []);
+
   const changeRole = useCallback(
     async (user: UserAccount, nextRole: UserRole) => {
-      setConfirmFor(null);
-      setRowErrors((errs) => {
-        const next = { ...errs };
-        delete next[user.id];
-        return next;
-      });
-      setSaving((s) => new Set(s).add(user.id));
+      setConfirm(null);
+      clearRowError(user.id);
+      startSaving(user.id, 'Guardando…');
 
       // Optimista: la fila ya luce el rol nuevo mientras viaja el PATCH.
       const previousRole = user.role;
-      setUsers((prev) =>
-        prev === null ? prev : prev.map((u) => (u.id === user.id ? { ...u, role: nextRole } : u)),
-      );
+      patchRow(user.id, { role: nextRole });
 
       try {
         const updated = await updateUserRole(user.id, nextRole);
         // Invalida cualquier GET /api/users en vuelo: su lista trae el rol
         // anterior y desharía el cambio recién confirmado.
         usersRequestRef.current++;
-        setUsers((prev) =>
-          prev === null
-            ? prev
-            : prev.map((u) =>
-                u.id === user.id
-                  ? { ...u, role: updated.role, email: updated.email || u.email }
-                  : u,
-              ),
-        );
+        // Solo se fusiona lo que esta acción cambia: el bloqueo lo lleva su
+        // propia acción y nunca se pisa desde aquí.
+        patchRow(user.id, { role: updated.role, email: updated.email || user.email });
         setExpandedId(null);
         showNotice(
           updated.role === 'admin'
@@ -250,28 +333,112 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
         );
       } catch (err) {
         // Reversión: la fila vuelve al rol que tenía antes del intento.
-        setUsers((prev) =>
-          prev === null
-            ? prev
-            : prev.map((u) => (u.id === user.id ? { ...u, role: previousRole } : u)),
-        );
-        setRowErrors((errs) => ({
-          ...errs,
-          [user.id]: err instanceof Error ? err.message : 'No se pudo cambiar el rol.',
-        }));
+        patchRow(user.id, { role: previousRole });
+        failRow(user.id, err, 'No se pudo cambiar el rol.');
       } finally {
-        setSaving((s) => {
-          const next = new Set(s);
-          next.delete(user.id);
-          return next;
-        });
+        stopSaving(user.id);
       }
     },
-    [showNotice],
+    [clearRowError, failRow, patchRow, showNotice, startSaving, stopSaving],
+  );
+
+  /**
+   * Bloquea o desbloquea. NO borra nada: la cuenta y sus conversaciones se
+   * quedan donde están y la fila sigue en la lista, atenuada y con la
+   * insignia "Bloqueado". La fila se deja desplegada a propósito, para que
+   * deshacerlo esté a un clic.
+   */
+  const changeBlocked = useCallback(
+    async (user: UserAccount, nextBlocked: boolean) => {
+      setConfirm(null);
+      clearRowError(user.id);
+      startSaving(user.id, nextBlocked ? 'Bloqueando…' : 'Desbloqueando…');
+
+      const previousBlocked = user.blocked;
+      patchRow(user.id, { blocked: nextBlocked });
+
+      try {
+        const updated = await setUserBlocked(user.id, nextBlocked);
+        usersRequestRef.current++;
+        // `blocked` null = el backend no devolvió el campo: vale lo pedido.
+        patchRow(user.id, {
+          blocked: updated.blocked ?? nextBlocked,
+          email: updated.email || user.email,
+        });
+        showNotice(
+          nextBlocked
+            ? `${user.email} ya no puede entrar. Puedes devolverle el acceso cuando quieras.`
+            : `${user.email} vuelve a tener acceso.`,
+          nextBlocked ? 'plain' : 'ok',
+        );
+      } catch (err) {
+        patchRow(user.id, { blocked: previousBlocked });
+        failRow(user.id, err, 'No se pudo cambiar el acceso de la cuenta.');
+      } finally {
+        stopSaving(user.id);
+      }
+    },
+    [clearRowError, failRow, patchRow, showNotice, startSaving, stopSaving],
+  );
+
+  /**
+   * Borrado permanente. Optimista igual que el resto: la fila desaparece al
+   * instante y, si el backend dice que no, vuelve a su sitio exacto con el
+   * motivo debajo (nunca al final de la lista, que parecería otra cuenta).
+   */
+  const removeUser = useCallback(
+    async (user: UserAccount) => {
+      setConfirm(null);
+      setExpandedId((prev) => (prev === user.id ? null : prev));
+      clearRowError(user.id);
+
+      const previousIndex = usersRef.current?.findIndex((u) => u.id === user.id) ?? -1;
+      setUsers((prev) => (prev === null ? prev : prev.filter((u) => u.id !== user.id)));
+      // Un GET en vuelo traería la cuenta de vuelta: se descarta su respuesta.
+      usersRequestRef.current++;
+
+      try {
+        await deleteUser(user.id);
+        usersRequestRef.current++;
+        showNotice(`Cuenta de ${user.email} eliminada, con sus conversaciones.`, 'plain');
+      } catch (err) {
+        setUsers((prev) => {
+          if (prev === null) return prev;
+          if (prev.some((u) => u.id === user.id)) return prev; // ya repuesta
+          const restored = [...prev];
+          const at = previousIndex >= 0 ? Math.min(previousIndex, restored.length) : restored.length;
+          restored.splice(at, 0, user);
+          return restored;
+        });
+        failRow(user.id, err, 'No se pudo eliminar la cuenta.');
+      }
+    },
+    [clearRowError, failRow, showNotice],
+  );
+
+  /** Ejecuta la acción ya confirmada en el segundo paso. */
+  const runAction = useCallback(
+    (user: UserAccount, action: RowAction) => {
+      switch (action) {
+        case 'demote':
+          void changeRole(user, 'vendedor');
+          break;
+        case 'block':
+          void changeBlocked(user, true);
+          break;
+        case 'unblock':
+          void changeBlocked(user, false);
+          break;
+        case 'delete':
+          void removeUser(user);
+          break;
+      }
+    },
+    [changeBlocked, changeRole, removeUser],
   );
 
   const toggleRow = (id: string) => {
-    setConfirmFor(null);
+    setConfirm(null);
     setExpandedId((prev) => (prev === id ? null : id));
   };
 
@@ -281,9 +448,9 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
    */
   const handleListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== 'Escape') return;
-    if (confirmFor !== null) {
+    if (confirm !== null) {
       e.stopPropagation();
-      setConfirmFor(null);
+      setConfirm(null);
     } else if (expandedId !== null) {
       e.stopPropagation();
       setExpandedId(null);
@@ -326,8 +493,12 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
 
       {/* aviso breve de éxito, se retira solo */}
       {notice !== null && (
-        <p className="users-notice" role="status" aria-live="polite">
-          {notice}
+        <p
+          className={`users-notice ${notice.tone === 'plain' ? 'users-notice-plain' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          {notice.text}
         </p>
       )}
 
@@ -375,9 +546,10 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
         <ul className="users-list">
           {visible.map((u) => {
             const isSelf = currentUserId !== null && u.id === currentUserId;
-            const isSaving = saving.has(u.id);
+            const savingLabel = saving[u.id];
+            const isSaving = savingLabel !== undefined;
             const isOpen = expandedId === u.id;
-            const isConfirm = confirmFor === u.id;
+            const pending = confirm !== null && confirm.id === u.id ? confirm.action : null;
             const rowError = rowErrors[u.id];
             const since = shortDate(u.created_at);
             const actionsId = `user-actions-${u.id}`;
@@ -395,6 +567,14 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
                     <span className={`sidebar-role sidebar-role-${u.role}`}>
                       {ROLE_LABEL[u.role]}
                     </span>
+                    {/* el bloqueo manda sobre todo lo demás de la fila: va
+                        justo detrás del rol y en ámbar de aviso */}
+                    {u.blocked && (
+                      <span className="user-blocked-badge">
+                        <IconLock size={11} />
+                        <span>Bloqueado</span>
+                      </span>
+                    )}
                     {since !== null && (
                       <span className="user-since" title={fullDate(u.created_at)}>
                         Alta {since}
@@ -417,7 +597,12 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
             );
 
             return (
-              <li key={u.id} className={`user-card ${isOpen ? 'user-card-open' : ''}`}>
+              <li
+                key={u.id}
+                className={`user-card ${isOpen ? 'user-card-open' : ''} ${
+                  u.blocked ? 'user-card-blocked' : ''
+                }`}
+              >
                 {isSelf ? (
                   <div className="user-row user-row-static">
                     {rowContent}
@@ -446,47 +631,101 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
                     {isSaving ? (
                       <span className="user-saving" role="status">
                         <IconSpinner size={13} />
-                        <span className="shimmer-text">Guardando…</span>
+                        <span className="shimmer-text">{savingLabel}</span>
                       </span>
-                    ) : isConfirm ? (
-                      <span className="user-confirm">
-                        <span>¿Quitar administrador?</span>
-                        <button
-                          type="button"
-                          className="doc-confirm-btn doc-confirm-yes"
-                          onClick={() => void changeRole(u, 'vendedor')}
-                        >
-                          Sí
-                        </button>
-                        {/* el foco entra en "No": Escape y Tab siguen dentro
-                            del panel y la salida segura es la primera */}
-                        <button
-                          type="button"
-                          className="doc-confirm-btn doc-confirm-no"
-                          onClick={() => setConfirmFor(null)}
-                          autoFocus
-                        >
-                          No
-                        </button>
-                      </span>
-                    ) : u.role === 'admin' ? (
-                      <button
-                        type="button"
-                        className="user-role-btn user-role-demote"
-                        onClick={() => setConfirmFor(u.id)}
-                        aria-label={`Quitar administrador a ${u.email}`}
-                      >
-                        Quitar administrador
-                      </button>
+                    ) : pending !== null ? (
+                      (() => {
+                        const { question, verb } = confirmPrompt(pending, u);
+                        const danger = pending === 'delete';
+                        return (
+                          <div
+                            className={`user-confirm ${danger ? 'user-confirm-danger' : ''}`}
+                            role="group"
+                            aria-label={`Confirmar acción sobre ${u.email}`}
+                          >
+                            <span className="user-confirm-text" aria-live="polite">
+                              {danger && <IconAlert size={13} />}
+                              <span>{question}</span>
+                            </span>
+                            <span className="user-confirm-actions">
+                              <button
+                                type="button"
+                                className={`doc-confirm-btn ${
+                                  danger ? 'user-confirm-delete' : 'doc-confirm-yes'
+                                }`}
+                                onClick={() => runAction(u, pending)}
+                                aria-label={`${verb}: ${u.email}`}
+                              >
+                                {verb}
+                              </button>
+                              {/* el foco entra en "Cancelar": Escape y Tab
+                                  siguen dentro del panel y la salida segura
+                                  es la primera. Además el botón que confirma
+                                  cae en otro sitio que el que abrió la
+                                  confirmación, así un doble clic no borra
+                                  nada por inercia. */}
+                              <button
+                                type="button"
+                                className="doc-confirm-btn doc-confirm-no"
+                                onClick={() => setConfirm(null)}
+                                autoFocus
+                              >
+                                Cancelar
+                              </button>
+                            </span>
+                          </div>
+                        );
+                      })()
                     ) : (
-                      <button
-                        type="button"
-                        className="user-role-btn user-role-promote"
-                        onClick={() => void changeRole(u, 'admin')}
-                        aria-label={`Hacer administrador a ${u.email}`}
-                      >
-                        Hacer administrador
-                      </button>
+                      <>
+                        {u.role === 'admin' ? (
+                          <button
+                            type="button"
+                            className="user-act-btn user-act-demote"
+                            onClick={() => setConfirm({ id: u.id, action: 'demote' })}
+                            aria-label={`Quitar administrador a ${u.email}`}
+                          >
+                            Quitar administrador
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="user-act-btn user-act-promote"
+                            onClick={() => void changeRole(u, 'admin')}
+                            aria-label={`Hacer administrador a ${u.email}`}
+                          >
+                            Hacer administrador
+                          </button>
+                        )}
+
+                        {/* reversible: conserva cuenta y conversaciones */}
+                        <button
+                          type="button"
+                          className="user-act-btn user-act-block"
+                          onClick={() =>
+                            setConfirm({ id: u.id, action: u.blocked ? 'unblock' : 'block' })
+                          }
+                          aria-label={
+                            u.blocked
+                              ? `Desbloquear el acceso de ${u.email}`
+                              : `Bloquear el acceso de ${u.email}`
+                          }
+                        >
+                          <IconLock size={12} />
+                          <span>{u.blocked ? 'Desbloquear' : 'Bloquear acceso'}</span>
+                        </button>
+
+                        {/* permanente: apartado a la derecha y en rojo */}
+                        <button
+                          type="button"
+                          className="user-act-btn user-act-danger"
+                          onClick={() => setConfirm({ id: u.id, action: 'delete' })}
+                          aria-label={`Eliminar la cuenta de ${u.email} y sus conversaciones`}
+                        >
+                          <IconTrash size={12} />
+                          <span>Eliminar cuenta</span>
+                        </button>
+                      </>
                     )}
                   </div>
                 )}

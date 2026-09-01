@@ -141,8 +141,19 @@ Slide-over (bottom sheet en móvil) que se abre desde el pie del sidebar, con pe
 **Gestión de usuarios (solo admin)**
 - `GET /api/users` → `{ "users": [{ "id", "email", "role", "created_at", "last_sign_in_at",
   "sessions_count", "messages_count" }] }` ordenados por fecha de alta. 403 para vendedor.
-- `PATCH /api/users/{user_id}` body `{ "role": "admin" | "vendedor" }` → devuelve la fila
-  actualizada `{ "id", "email", "role" }`.
+- `PATCH /api/users/{user_id}` body con `role` y/o `blocked`:
+  `{ "role": "admin" | "vendedor" }` y/o `{ "blocked": true | false }` → devuelve la fila
+  actualizada `{ "id", "email", "role", "blocked" }`. Bloquear revoca el acceso sin borrar
+  nada: la cuenta y sus conversaciones se conservan y se puede desbloquear.
+- `DELETE /api/users/{user_id}` → borra la cuenta de forma permanente junto con sus
+  conversaciones. Los documentos que hubiera subido se conservan (pasan a sin autor).
+  → `{ "ok": true }`.
+- Guardas comunes: 403 si el administrador intenta bloquearse, degradarse o borrarse a sí
+  mismo; 404 si la cuenta no existe.
+- Efecto del bloqueo: `profiles.blocked` y además baneo en Supabase Auth (no puede volver a
+  entrar ni renovar). Toda petición suya responde
+  `403 {"detail": "Tu acceso ha sido revocado", "code": "blocked"}`; el frontend, al ver ese
+  `code`, cierra su sesión de inmediato aunque su token siga vigente.
   - 400 si el rol no es válido.
   - 403 si el usuario intenta cambiar su propio rol (evita quedarse sin administradores):
     `{"detail": "No puedes cambiar tu propio rol"}`.
