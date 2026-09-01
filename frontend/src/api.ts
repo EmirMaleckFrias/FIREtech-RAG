@@ -4,6 +4,7 @@
 import { SSEParser } from './lib/sse';
 import { getAccessToken } from './lib/session';
 import type {
+  AdminStats,
   DocumentInfo,
   DocumentStatus,
   Health,
@@ -13,6 +14,8 @@ import type {
   SessionInfo,
   Source,
   UploadAccepted,
+  UserAccount,
+  UserRole,
 } from './types';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -283,6 +286,185 @@ export async function deleteDocument(fileName: string): Promise<void> {
     throw new Error(detail ?? 'El documento ya no existe en el índice.');
   }
   throw new Error(detail ?? `Error HTTP ${res.status} al borrar el documento.`);
+}
+
+/* ----------------------------------------------------------------------
+   Ajustes: gestión de usuarios y estado del sistema (SPEC.md, "Gestión de
+   usuarios (solo admin)").
+
+   Mismo trato que los documentos: red caída, endpoint aún no desplegado y
+   403 por rol se traducen a mensajes legibles en español. El `detail` del
+   backend manda siempre que venga (p. ej. "No puedes cambiar tu propio
+   rol"); los textos de aquí son solo el respaldo.
+   ---------------------------------------------------------------------- */
+
+const USERS_UNAVAILABLE_MSG = 'La gestión de usuarios aún no está disponible en el backend.';
+const USERS_FORBIDDEN_MSG = 'Solo un administrador puede gestionar los usuarios.';
+const STATS_UNAVAILABLE_MSG = 'El estado del sistema aún no está disponible en el backend.';
+
+/** Rol desconocido o ausente degrada al de menos permisos (igual que /api/me). */
+function normalizeRole(raw: unknown): UserRole {
+  return raw === 'admin' ? 'admin' : 'vendedor';
+}
+
+/** Entero no negativo, o 0 si el backend manda algo raro (contadores). */
+function asCount(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
+function normalizeUsers(raw: unknown): UserAccount[] {
+  if (!Array.isArray(raw)) return [];
+  const out: UserAccount[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const u = item as Record<string, unknown>;
+    const id = typeof u.id === 'string' ? u.id : String(u.id ?? '');
+    if (id === '') continue; // sin id no hay fila que actualizar
+    out.push({
+      id,
+      email: typeof u.email === 'string' ? u.email : 'desconocido',
+      role: normalizeRole(u.role),
+      created_at: typeof u.created_at === 'string' ? u.created_at : '',
+      last_sign_in_at:
+        typeof u.last_sign_in_at === 'string' && u.last_sign_in_at !== ''
+          ? u.last_sign_in_at
+          : null,
+      sessions_count: asCount(u.sessions_count),
+      messages_count: asCount(u.messages_count),
+    });
+  }
+  return out;
+}
+
+/** GET /api/users: cuentas ordenadas por fecha de alta. 403 para vendedor. */
+export async function fetchUsers(): Promise<UserAccount[]> {
+  let res: Response;
+  try {
+    res = await fetch('/api/users', { headers: await authHeaders() });
+  } catch {
+    throw new Error(OFFLINE_MSG);
+  }
+  if (res.status === 401) throw unauthorized();
+  if (res.status === 404 || res.status === 501) throw new Error(USERS_UNAVAILABLE_MSG);
+  if (!res.ok) {
+    const detail = extractDetail(await res.text().catch(() => ''));
+    if (res.status === 403) throw new Error(detail ?? USERS_FORBIDDEN_MSG);
+    throw new Error(detail ?? `Error HTTP ${res.status} al listar los usuarios.`);
+  }
+  const data = (await res.json()) as { users?: unknown };
+  return normalizeUsers(data.users);
+}
+
+/**
+ * PATCH /api/users/{user_id} con `{ role }`. Devuelve la fila actualizada.
+ *
+ * El backend responde 403 "No puedes cambiar tu propio rol" si el admin
+ * intenta degradarse (evita quedarse sin administradores). La respuesta trae
+ * solo id, email y rol (nada de fechas ni contadores): quien llama fusiona
+ * esos tres campos sobre su copia local.
+ */
+export async function updateUserRole(
+  userId: string,
+  role: UserRole,
+): Promise<Pick<UserAccount, 'id' | 'email' | 'role'>> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      headers: { ...JSON_HEADERS, ...(await authHeaders()) },
+      body: JSON.stringify({ role }),
+    });
+  } catch {
+    throw new Error(OFFLINE_MSG);
+  }
+  if (res.status === 401) throw unauthorized();
+  if (res.status === 404 || res.status === 405 || res.status === 501) {
+    // 404 es ambiguo aquí: puede ser "endpoint inexistente" o "usuario
+    // borrado". El `detail` del backend distingue; sin él se asume lo
+    // segundo solo si el endpoint respondió algo.
+    const detail = extractDetail(await res.text().catch(() => ''));
+    throw new Error(detail ?? USERS_UNAVAILABLE_MSG);
+  }
+  if (!res.ok) {
+    const detail = extractDetail(await res.text().catch(() => ''));
+    if (res.status === 400) throw new Error(detail ?? 'El rol indicado no es válido.');
+    if (res.status === 403) throw new Error(detail ?? USERS_FORBIDDEN_MSG);
+    throw new Error(detail ?? `Error HTTP ${res.status} al cambiar el rol.`);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  return {
+    id: typeof data.id === 'string' ? data.id : userId,
+    email: typeof data.email === 'string' ? data.email : '',
+    role: normalizeRole(data.role),
+  };
+}
+
+/** Lista de proveedores del índice: strings no vacíos, sin duplicados. */
+function normalizeSuppliers(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const name = v.trim();
+    if (name !== '') seen.add(name);
+  }
+  return [...seen];
+}
+
+/**
+ * GET /api/stats: cifras de índice, actividad y configuración para la pestaña
+ * "Sistema" de Ajustes. Solo admin (403 para el resto). Es de solo lectura y
+ * NUNCA trae contenido de conversaciones, solo agregados.
+ *
+ * Cada bloque se normaliza campo a campo: un backend a medio desplegar deja
+ * ceros y cadenas vacías en vez de romper el panel.
+ */
+export async function fetchStats(): Promise<AdminStats> {
+  let res: Response;
+  try {
+    res = await fetch('/api/stats', { headers: await authHeaders() });
+  } catch {
+    throw new Error(OFFLINE_MSG);
+  }
+  if (res.status === 401) throw unauthorized();
+  if (res.status === 404 || res.status === 501) throw new Error(STATS_UNAVAILABLE_MSG);
+  if (!res.ok) {
+    const detail = extractDetail(await res.text().catch(() => ''));
+    if (res.status === 403) throw new Error(detail ?? USERS_FORBIDDEN_MSG);
+    throw new Error(detail ?? `Error HTTP ${res.status} al leer el estado del sistema.`);
+  }
+
+  const data = (await res.json()) as Record<string, unknown>;
+  const section = (key: string): Record<string, unknown> => {
+    const value = data[key];
+    return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+  };
+  const index = section('index');
+  const activity = section('activity');
+  const config = section('config');
+  const text = (raw: unknown): string => (typeof raw === 'string' ? raw.trim() : '');
+
+  return {
+    index: {
+      products: asCount(index.products),
+      chunks: asCount(index.chunks),
+      files: asCount(index.files),
+      suppliers: normalizeSuppliers(index.suppliers),
+    },
+    activity: {
+      questions_total: asCount(activity.questions_total),
+      questions_7d: asCount(activity.questions_7d),
+      active_users_7d: asCount(activity.active_users_7d),
+      feedback_up: asCount(activity.feedback_up),
+      feedback_down: asCount(activity.feedback_down),
+    },
+    config: {
+      model: text(config.model),
+      embedding_model: text(config.embedding_model),
+      max_hops: asCount(config.max_hops),
+      upload_limit_mb: asCount(config.upload_limit_mb),
+    },
+  };
 }
 
 /** Array de strings no vacíos, recortado a `max` (campos enriquecidos). */

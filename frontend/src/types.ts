@@ -21,6 +21,47 @@ export interface Me {
   role: UserRole;
 }
 
+/**
+ * Cuenta de usuario tal como la devuelve GET /api/users (solo admin).
+ * `created_at` es la fecha de alta; el backend las entrega ya ordenadas.
+ *
+ * Los contadores son SOLO números: las conversaciones son privadas y el panel
+ * de ajustes nunca muestra su contenido, ni siquiera a un administrador.
+ */
+export interface UserAccount {
+  id: string;
+  email: string;
+  role: UserRole;
+  created_at: string;
+  /** Último acceso; null si la cuenta nunca ha entrado. */
+  last_sign_in_at: string | null;
+  sessions_count: number;
+  messages_count: number;
+}
+
+/** Estado del sistema para el panel de ajustes (GET /api/stats, solo admin). */
+export interface AdminStats {
+  index: {
+    products: number;
+    chunks: number;
+    files: number;
+    suppliers: string[];
+  };
+  activity: {
+    questions_total: number;
+    questions_7d: number;
+    active_users_7d: number;
+    feedback_up: number;
+    feedback_down: number;
+  };
+  config: {
+    model: string;
+    embedding_model: string;
+    max_hops: number;
+    upload_limit_mb: number;
+  };
+}
+
 export interface SessionInfo {
   id: string;
   title: string | null;

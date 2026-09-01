@@ -195,6 +195,38 @@ export function IconLock({ size = 14, ...props }: IconProps) {
   );
 }
 
+/** Engranaje de ajustes: corona de seis dientes y eje central. */
+export function IconSettings({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M12 2.6v2.6M12 18.8v2.6M4.9 4.9l1.9 1.9M17.2 17.2l1.9 1.9M2.6 12h2.6M18.8 12h2.6M4.9 19.1l1.9-1.9M17.2 6.8l1.9-1.9" />
+    </svg>
+  );
+}
+
+/** Una persona (fila de cuenta en el panel de usuarios). */
+export function IconUser({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <circle cx="12" cy="8" r="3.6" />
+      <path d="M5 20v-1.2A4.8 4.8 0 0 1 9.8 14h4.4a4.8 4.8 0 0 1 4.8 4.8V20" />
+    </svg>
+  );
+}
+
+/** Dos personas (gestión de usuarios): una en primer plano y otra detrás. */
+export function IconUsers({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <circle cx="9.5" cy="8" r="3.5" />
+      <path d="M3.5 20v-1a4.5 4.5 0 0 1 4.5-4.5h3a4.5 4.5 0 0 1 4.5 4.5v1" />
+      <path d="M16.5 5.2a3.5 3.5 0 0 1 0 6.6" />
+      <path d="M18 14.7a4.5 4.5 0 0 1 2.5 4V20" />
+    </svg>
+  );
+}
+
 /** Puerta con flecha saliendo (cerrar sesión). */
 export function IconLogout({ size = 15, ...props }: IconProps) {
   return (

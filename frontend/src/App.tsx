@@ -15,6 +15,7 @@ import { AuthScreen } from './components/AuthScreen';
 import { DocumentsPanel } from './components/DocumentsPanel';
 import { Header } from './components/Header';
 import { SessionSidebar } from './components/SessionSidebar';
+import { SettingsPanel } from './components/SettingsPanel';
 import { SourcesPanel } from './components/SourcesPanel';
 import type { CitationRef } from './lib/markdown';
 import { loadSession, onSessionChange, renewAccessToken, signOut } from './lib/session';
@@ -120,8 +121,10 @@ export default function App() {
     () => typeof window === 'undefined' || window.matchMedia('(min-width: 1101px)').matches,
   );
 
-  // Slide-over de gestión de documentos (siempre overlay, desde la derecha).
+  // Slide-overs de gestión (siempre overlay, desde la derecha). Comparten
+  // sitio y scrim, así que nunca están abiertos los dos a la vez.
   const [docsOpen, setDocsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const sessionRequestRef = useRef(0);
@@ -467,9 +470,10 @@ export default function App() {
     setSourcesOpen(true);
   }, []);
 
-  // --- panel de documentos ---
+  // --- paneles de gestión (documentos y ajustes) ---
   const openDocuments = useCallback(() => {
     setDocsOpen(true);
+    setSettingsOpen(false); // ocupan el mismo hueco a la derecha
     // En pantallas estrechas el sidebar es un overlay: se cierra para no
     // apilar dos slide-overs.
     if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 821px)').matches) {
@@ -479,6 +483,18 @@ export default function App() {
 
   const closeDocuments = useCallback(() => {
     setDocsOpen(false);
+  }, []);
+
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+    setDocsOpen(false);
+    if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 821px)').matches) {
+      setSidebarOpen(false);
+    }
+  }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
   }, []);
 
   const currentTitle =
@@ -515,12 +531,13 @@ export default function App() {
         health={health}
         healthError={healthError}
         documentsOpen={docsOpen}
+        settingsOpen={settingsOpen}
         userEmail={userEmail}
         role={me?.role ?? null}
         onSelect={(id) => void selectSession(id)}
         onNew={newConversation}
         onOpenDocuments={openDocuments}
-        onSignOut={() => void handleSignOut()}
+        onOpenSettings={openSettings}
       />
       {sidebarOpen && (
         <div
@@ -574,6 +591,18 @@ export default function App() {
         onHealthRefresh={() => void refreshHealth()}
         uploadLimitMb={health?.upload_limit_mb}
         canManage={me?.role === 'admin'}
+      />
+
+      {settingsOpen && (
+        <div className="scrim scrim-docs" onClick={closeSettings} aria-hidden="true" />
+      )}
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={closeSettings}
+        role={me?.role ?? null}
+        currentUserId={userId}
+        userEmail={userEmail}
+        onSignOut={() => void handleSignOut()}
       />
     </div>
   );

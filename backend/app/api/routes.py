@@ -13,11 +13,12 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from app.config import get_settings
 from app.models import SearchFilters
 from app.services import supabase_db
 from app.services.agent import run_agent
-from app.services.auth import AuthUser, current_user
-from app.services.qdrant import collection_count, hybrid_search
+from app.services.auth import AuthUser, current_user, require_admin
+from app.services.qdrant import collection_count, hybrid_search, index_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,73 @@ async def health() -> dict:
 @router.get("/me")
 async def me(user: AuthUser = Depends(current_user)) -> dict:
     return {"id": user.id, "email": user.email, "role": user.role}
+
+
+class RoleUpdate(BaseModel):
+    role: Literal["admin", "vendedor"]
+
+
+@router.get("/users")
+async def list_users(admin: AuthUser = Depends(require_admin)) -> dict:
+    """Cuentas registradas con último acceso y contadores. Solo administradores."""
+    rows = await run_in_threadpool(supabase_db.list_users)
+    return {"users": rows}
+
+
+@router.get("/stats")
+async def stats(admin: AuthUser = Depends(require_admin)) -> dict:
+    """Estado del índice, actividad agregada y configuración. Solo administradores.
+
+    Nunca devuelve contenido de conversaciones: las cifras de actividad son
+    agregados, no texto de nadie.
+    """
+    from app.api.documents import UPLOAD_LIMIT_MB  # import local: evita ciclo
+
+    settings = get_settings()
+    try:
+        inv = await asyncio.to_thread(index_inventory)
+        index = {
+            "products": inv["productos"],
+            "chunks": inv["total_chunks"],
+            "files": len(inv["archivos"]),
+            "suppliers": [s["valor"] for s in inv["suplidores"]],
+        }
+    except Exception as exc:
+        logger.warning("Inventario del índice no disponible: %s", exc)
+        index = {"products": 0, "chunks": 0, "files": 0, "suppliers": []}
+
+    activity = await run_in_threadpool(supabase_db.activity_stats)
+    return {
+        "index": index,
+        "activity": activity,
+        "config": {
+            "model": settings.openai_model,
+            "embedding_model": settings.embedding_model,
+            "max_hops": settings.max_hops,
+            "upload_limit_mb": UPLOAD_LIMIT_MB,
+        },
+    }
+
+
+@router.patch("/users/{user_id}")
+async def update_user(
+    user_id: uuid.UUID,
+    body: RoleUpdate,
+    admin: AuthUser = Depends(require_admin),
+) -> dict:
+    """Promueve o degrada a otra cuenta. Solo administradores.
+
+    Nadie puede cambiar su propio rol: evita que el último administrador se
+    degrade y deje el sistema sin quien gestione documentos ni usuarios.
+    """
+    if str(user_id) == str(admin.id):
+        raise HTTPException(status_code=403, detail="No puedes cambiar tu propio rol")
+    try:
+        return await run_in_threadpool(
+            supabase_db.update_user_role, str(user_id), body.role
+        )
+    except supabase_db.UserNotFound:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
 
 @router.post("/search")

@@ -1,5 +1,5 @@
 import type { Health, SessionInfo, UserRole } from '../types';
-import { IconDocument, IconLogout, IconPlus } from './icons';
+import { IconDocument, IconPlus, IconSettings } from './icons';
 
 interface SessionSidebarProps {
   open: boolean;
@@ -11,6 +11,8 @@ interface SessionSidebarProps {
   healthError: boolean;
   /** Estado del slide-over de documentos (para aria-expanded del botón). */
   documentsOpen: boolean;
+  /** Estado del slide-over de ajustes (para aria-expanded del botón). */
+  settingsOpen: boolean;
   /** Correo de la sesión de Supabase (se trunca con ellipsis si no cabe). */
   userEmail: string;
   /** Rol de GET /api/me; null mientras no se conoce (no se pinta insignia). */
@@ -18,7 +20,7 @@ interface SessionSidebarProps {
   onSelect: (id: string) => void;
   onNew: () => void;
   onOpenDocuments: () => void;
-  onSignOut: () => void;
+  onOpenSettings: () => void;
 }
 
 const ROLE_LABEL: Record<UserRole, string> = {
@@ -65,12 +67,13 @@ export function SessionSidebar({
   health,
   healthError,
   documentsOpen,
+  settingsOpen,
   userEmail,
   role,
   onSelect,
   onNew,
   onOpenDocuments,
-  onSignOut,
+  onOpenSettings,
 }: SessionSidebarProps) {
   const ok = !healthError && health !== null && health.status === 'ok' && health.qdrant;
 
@@ -172,6 +175,21 @@ export function SessionSidebar({
             <span>Documentos</span>
           </button>
 
+          {/* Ajustes es para todos: dentro, un vendedor solo ve "Mi cuenta"
+              (contraseña y cierre de sesión) y un admin además Usuarios y
+              Sistema */}
+          <button
+            type="button"
+            className="sidebar-docs-btn"
+            onClick={onOpenSettings}
+            aria-haspopup="dialog"
+            aria-expanded={settingsOpen}
+            title="Ajustes de la cuenta y del sistema"
+          >
+            <IconSettings size={15} />
+            <span>Ajustes</span>
+          </button>
+
           <div className="sidebar-user">
             <span className="sidebar-user-email" title={userEmail}>
               {userEmail}
@@ -180,16 +198,6 @@ export function SessionSidebar({
               <span className={`sidebar-role sidebar-role-${role}`}>{ROLE_LABEL[role]}</span>
             )}
           </div>
-
-          <button
-            type="button"
-            className="sidebar-signout-btn"
-            onClick={onSignOut}
-            title="Cerrar sesión"
-          >
-            <IconLogout size={15} />
-            <span>Cerrar sesión</span>
-          </button>
 
           <div className="sidebar-footer" title="Estado del backend (GET /api/health)">
             <span className={`health-dot ${dotClass}`} aria-hidden="true" />

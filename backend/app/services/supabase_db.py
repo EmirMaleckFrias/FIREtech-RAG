@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.config import get_settings
@@ -105,20 +105,18 @@ def _session_owner_row(session_id: str) -> dict | None:
 def assert_session_access(
     session_id: str, user_id: str | None, is_admin: bool = False
 ) -> None:
-    """Verifica que la sesión exista y sea accesible por el usuario.
+    """Verifica que la sesión exista y pertenezca al usuario.
 
-    Accesible = es suya, o es una sesión histórica (`user_id` nulo) y el
-    usuario es admin. En cualquier otro caso → SessionNotFound.
+    Aislamiento ESTRICTO: solo el dueño accede a una conversación. El rol no
+    concede acceso a conversaciones ajenas (`is_admin` se conserva en la firma
+    por compatibilidad con los llamadores, pero no otorga permiso). Las
+    sesiones históricas sin dueño quedan archivadas y no las abre nadie.
     """
     row = _session_owner_row(session_id)
     if row is None:
         raise SessionNotFound(session_id)
     owner = row.get("user_id")
-    if owner is None:
-        if not is_admin:
-            raise SessionNotFound(session_id)
-        return
-    if user_id is None or str(owner) != str(user_id):
+    if owner is None or user_id is None or str(owner) != str(user_id):
         raise SessionNotFound(session_id)
 
 
@@ -144,32 +142,27 @@ def create_session(title: str, user_id: str | None = None) -> dict:
 
 
 def list_sessions(user_id: str | None = None, is_admin: bool = False) -> list[dict]:
-    """Sesiones visibles para el usuario (las suyas; el admin ve además las
-    históricas con `user_id` nulo)."""
+    """Conversaciones del usuario y de nadie más.
+
+    Aislamiento estricto: el rol no amplía la visibilidad (`is_admin` se
+    mantiene en la firma por compatibilidad). Las sesiones históricas sin
+    dueño no aparecen para nadie."""
     client = _get_client()
     if client is not None:
+        if not user_id:
+            return []
         query = (
             client.table("chat_sessions")
             .select("id, title, created_at")
+            .eq("user_id", user_id)
             .order("created_at", desc=True)
         )
-        if is_admin:
-            # Propias + históricas sin dueño (migración 004).
-            if user_id:
-                query = query.or_(f"user_id.eq.{user_id},user_id.is.null")
-            else:
-                query = query.is_("user_id", "null")
-        elif user_id:
-            query = query.eq("user_id", user_id)
-        else:
-            # Sin usuario y sin ser admin: no hay nada que se pueda mostrar.
-            return []
         return list(query.execute().data or [])
 
     def _visible(row: dict) -> bool:
         owner = row.get("user_id")
         if owner is None:
-            return is_admin
+            return False
         return user_id is not None and str(owner) == str(user_id)
 
     return sorted(
@@ -262,6 +255,160 @@ def _message_session_id(message_id: str) -> str | None:
         if any(r.get("id") == message_id for r in rows):
             return session_id
     return None
+
+
+class UserNotFound(Exception):
+    """El perfil solicitado no existe."""
+
+
+def _iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def list_users() -> list[dict]:
+    """Cuentas registradas con último acceso y contadores de uso.
+
+    Los contadores son SOLO números: esta función nunca devuelve texto de
+    conversaciones, que son privadas de cada usuario.
+    """
+    client = _get_client()
+    if client is None:
+        # Fallback en memoria: sin Supabase no hay cuentas reales.
+        return []
+
+    rows = (
+        client.table("profiles")
+        .select("id, email, role, created_at")
+        .order("created_at", desc=False)
+        .execute()
+        .data
+        or []
+    )
+
+    # `last_sign_in_at` vive en auth.users, no en profiles.
+    last_sign_in: dict[str, str | None] = {}
+    try:
+        for u in client.auth.admin.list_users():
+            uid = getattr(u, "id", None)
+            if uid:
+                last_sign_in[str(uid)] = _iso(getattr(u, "last_sign_in_at", None))
+    except Exception as exc:
+        logger.warning("No se pudo leer el último acceso de las cuentas: %s", exc)
+
+    # Contadores agregados en Python: el volumen actual es de decenas de filas.
+    # Si esto crece a miles, conviene una vista o un RPC con GROUP BY.
+    owner_of: dict[str, str | None] = {}
+    sessions_count: dict[str, int] = {}
+    for s in client.table("chat_sessions").select("id, user_id").execute().data or []:
+        owner = str(s["user_id"]) if s.get("user_id") else None
+        owner_of[s["id"]] = owner
+        if owner:
+            sessions_count[owner] = sessions_count.get(owner, 0) + 1
+
+    messages_count: dict[str, int] = {}
+    msgs = (
+        client.table("chat_messages")
+        .select("session_id")
+        .eq("role", "user")
+        .execute()
+        .data
+        or []
+    )
+    for m in msgs:
+        owner = owner_of.get(m.get("session_id"))
+        if owner:
+            messages_count[owner] = messages_count.get(owner, 0) + 1
+
+    out: list[dict] = []
+    for r in rows:
+        uid = str(r["id"])
+        out.append(
+            {
+                "id": r["id"],
+                "email": r["email"],
+                "role": r["role"],
+                "created_at": r["created_at"],
+                "last_sign_in_at": last_sign_in.get(uid),
+                "sessions_count": sessions_count.get(uid, 0),
+                "messages_count": messages_count.get(uid, 0),
+            }
+        )
+    return out
+
+
+def activity_stats() -> dict:
+    """Agregados de uso para la sección de Ajustes.
+
+    Solo cifras: jamás incluye el contenido de las conversaciones.
+    """
+    empty = {
+        "questions_total": 0,
+        "questions_7d": 0,
+        "active_users_7d": 0,
+        "feedback_up": 0,
+        "feedback_down": 0,
+    }
+    client = _get_client()
+    if client is None:
+        return empty
+
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    def _count(table: str, apply) -> int:
+        try:
+            query = apply(client.table(table).select("id", count="exact"))
+            return int(query.execute().count or 0)
+        except Exception as exc:
+            logger.warning("Conteo de %s falló: %s", table, exc)
+            return 0
+
+    stats = dict(empty)
+    stats["questions_total"] = _count("chat_messages", lambda q: q.eq("role", "user"))
+    stats["questions_7d"] = _count(
+        "chat_messages", lambda q: q.eq("role", "user").gte("created_at", since)
+    )
+    stats["feedback_up"] = _count("message_feedback", lambda q: q.eq("rating", 1))
+    stats["feedback_down"] = _count("message_feedback", lambda q: q.eq("rating", -1))
+
+    try:
+        recent = (
+            client.table("chat_sessions")
+            .select("user_id")
+            .gte("created_at", since)
+            .execute()
+            .data
+            or []
+        )
+        stats["active_users_7d"] = len(
+            {str(r["user_id"]) for r in recent if r.get("user_id")}
+        )
+    except Exception as exc:
+        logger.warning("Conteo de usuarios activos falló: %s", exc)
+
+    return stats
+
+
+def update_user_role(user_id: str, role: str) -> dict:
+    """Cambia el rol de una cuenta y devuelve la fila actualizada.
+
+    El llamador ya validó el rol y que no sea el propio usuario.
+    """
+    client = _get_client()
+    if client is None:
+        raise UserNotFound(user_id)
+    resp = (
+        client.table("profiles")
+        .update({"role": role})
+        .eq("id", user_id)
+        .execute()
+    )
+    rows = resp.data or []
+    if not rows:
+        raise UserNotFound(user_id)
+    row = rows[0]
+    return {"id": row["id"], "email": row["email"], "role": row["role"]}
 
 
 def save_feedback(

@@ -116,6 +116,42 @@ async def require_admin(user: AuthUser = Depends(current_user)) -> AuthUser
   `get_messages` y `save_message` verifican que la sesión pertenezca al usuario (o admin).
   `register_document(..., uploaded_by)`.
 
+**Aislamiento estricto de conversaciones (sin excepciones por rol)**
+Ningún usuario, ni siquiera un administrador, ve las conversaciones de otro. `list_sessions`
+devuelve exclusivamente las del `user_id` del token. Las sesiones históricas con `user_id`
+nulo no las ve nadie por la API; quedan archivadas en la base hasta que se les asigne dueño.
+
+**Sección de Ajustes**
+Slide-over (bottom sheet en móvil) que se abre desde el pie del sidebar, con pestañas:
+- **Usuarios** (solo admin): lista de cuentas con buscador por correo, clic en la fila para
+  promover o degradar (confirmación en dos pasos al degradar), y por cuenta: rol, alta,
+  último acceso y contadores de uso. Solo cifras: nunca texto de conversaciones ajenas.
+- **Sistema** (solo admin): estado del índice, actividad agregada y configuración vigente,
+  todo de solo lectura desde `GET /api/stats`.
+- **Mi cuenta** (todos los roles): correo, rol, cambio de contraseña con
+  `supabase.auth.updateUser` desde el cliente, y cerrar sesión.
+
+`GET /api/stats` (solo admin) →
+```json
+{ "index": {"products", "chunks", "files", "suppliers": []},
+  "activity": {"questions_total", "questions_7d", "active_users_7d", "feedback_up", "feedback_down"},
+  "config": {"model", "embedding_model", "max_hops", "upload_limit_mb"} }
+```
+
+**Gestión de usuarios (solo admin)**
+- `GET /api/users` → `{ "users": [{ "id", "email", "role", "created_at", "last_sign_in_at",
+  "sessions_count", "messages_count" }] }` ordenados por fecha de alta. 403 para vendedor.
+- `PATCH /api/users/{user_id}` body `{ "role": "admin" | "vendedor" }` → devuelve la fila
+  actualizada `{ "id", "email", "role" }`.
+  - 400 si el rol no es válido.
+  - 403 si el usuario intenta cambiar su propio rol (evita quedarse sin administradores):
+    `{"detail": "No puedes cambiar tu propio rol"}`.
+  - 404 si el usuario no existe.
+- Frontend: entrada "Usuarios" en el pie del sidebar, visible solo para admin, que abre un
+  slide-over con el mismo patrón que Documentos (bottom sheet en móvil). Lista de cuentas con
+  correo, insignia de rol y acción para promover o degradar, con confirmación en dos pasos
+  para degradar. La fila del propio usuario aparece marcada como "Tú" y sin acción.
+
 **Frontend**
 - Cliente `@supabase/supabase-js` con `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`
   (publishable `sb_publishable_OiC7eo39rLRrnoaR6nHgIA_xRCENub0`).
@@ -125,7 +161,8 @@ async def require_admin(user: AuthUser = Depends(current_user)) -> AuthUser
 - Todas las llamadas (fetch, XHR de subida y el stream del chat) envían
   `Authorization: Bearer <token>`; el token se renueva con `onAuthStateChange` y un 401
   devuelve a la pantalla de acceso.
-- Pie del sidebar: correo del usuario, su rol y botón de cerrar sesión.
+- Pie del sidebar: correo del usuario, su rol y acceso a Ajustes (cerrar sesión vive dentro,
+  en la pestaña Mi cuenta).
 - Si el rol es `vendedor`: el panel de Documentos muestra la lista completa pero sin
   dropzone ni botones de borrar, con una nota de que solo un administrador puede
   gestionarlos.

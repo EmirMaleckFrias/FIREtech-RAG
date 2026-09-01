@@ -146,6 +146,9 @@ export function authErrorMessage(err: unknown): string {
   if (minLength !== null) {
     return `La contraseña debe tener al menos ${minLength[1]} caracteres.`;
   }
+  if (raw.includes('different from the old password') || raw.includes('same_password')) {
+    return 'La contraseña nueva debe ser distinta de la actual.';
+  }
   if (raw.includes('weak password') || raw.includes('weak_password')) {
     return 'La contraseña es demasiado débil. Usa una más larga y menos previsible.';
   }
@@ -209,6 +212,21 @@ export async function signUp(email: string, password: string): Promise<AuthResul
       return { ok: false, message: ALREADY_REGISTERED };
     }
     return { ok: true, needsConfirmation: data.session === null };
+  } catch (err) {
+    return { ok: false, message: authErrorMessage(err) };
+  }
+}
+
+/**
+ * Cambia la contraseña del usuario en sesión. No hay endpoint de backend para
+ * esto (SPEC.md no lo define): se llama a Supabase Auth desde el cliente con
+ * el token vigente, igual que el alta y la entrada.
+ */
+export async function updatePassword(password: string): Promise<AuthResult> {
+  try {
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error !== null) return { ok: false, message: authErrorMessage(error) };
+    return { ok: true, needsConfirmation: false };
   } catch (err) {
     return { ok: false, message: authErrorMessage(err) };
   }

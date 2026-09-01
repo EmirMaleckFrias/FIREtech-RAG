@@ -2584,6 +2584,549 @@ button.doc-badge-failed:hover {
 }
 
 /* ----------------------------------------------------------------------
+   12c. Panel de ajustes (usuarios, sistema y cuenta propia)
+   --------------------------------------------------------------------
+   Misma superficie que el panel de documentos (12b): slide-over desde la
+   derecha en todos los anchos, bottom sheet en móvil (13b) y el mismo scrim
+   (.scrim-docs). Nunca coexiste con Documentos: App cierra uno al abrir el
+   otro, así que comparten hueco sin apilarse. Algo más ancho que Documentos
+   porque las tarjetas de "Sistema" van a dos columnas.
+
+   Reutiliza lo que ya existe donde encaja: las pestañas y el formulario son
+   los de la pantalla de acceso (.auth-tabs, .auth-field, .auth-input,
+   .auth-submit), la insignia de rol es la del pie del sidebar
+   (.sidebar-role) y la confirmación en dos pasos usa los botones del borrado
+   de documentos (.doc-confirm-btn). */
+
+.settings-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: min(420px, 100vw);
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  transform: translateX(105%);
+  visibility: hidden;
+  transition: transform 0.2s ease, visibility 0s linear 0.2s;
+}
+
+.settings-panel:not(.settings-closed) {
+  transform: none;
+  visibility: visible;
+  box-shadow: var(--shadow-overlay);
+  transition: transform 0.2s ease;
+}
+
+.settings-inner {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 14px 9px 18px;
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.settings-close {
+  margin-left: auto;
+}
+
+.settings-tabs {
+  flex-shrink: 0;
+  margin: 0 14px 10px;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* cada pestaña ocupa el alto restante; quien scrollea es su lista interna
+   (Usuarios) o la propia pestaña (Sistema y Mi cuenta) */
+.settings-tabpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-scroll {
+  gap: 18px;
+  overflow-y: auto;
+  padding: 2px 14px 18px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* --- estados compartidos: vacío, no disponible y skeletons --- */
+.settings-empty {
+  padding: 34px 26px;
+  text-align: center;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.settings-empty p {
+  margin: 0 0 6px;
+}
+
+.settings-empty-icon {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-3);
+}
+
+.settings-empty-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.users-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 14px;
+}
+
+.skel-user {
+  height: 78px;
+  border-radius: 12px;
+}
+
+.skel-stats {
+  height: 104px;
+  border-radius: 12px;
+}
+
+/* --- pestaña Usuarios: búsqueda --- */
+.users-search {
+  position: relative;
+  flex-shrink: 0;
+  padding: 0 14px 10px;
+}
+
+.users-search-icon {
+  position: absolute;
+  top: 13px;
+  left: 26px;
+  display: inline-flex;
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+/* el campo hereda de .auth-input (16px: evita el zoom de iOS al enfocar) */
+.users-search-input {
+  padding-left: 34px;
+}
+
+.users-search-input::-webkit-search-cancel-button {
+  cursor: pointer;
+}
+
+/* aviso breve de éxito tras un cambio de rol (se retira solo a los 3,2 s) */
+.users-notice {
+  flex-shrink: 0;
+  margin: 0 14px 10px;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--green) 26%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--green);
+  animation: fade-up 0.22s ease both;
+}
+
+/* --- pestaña Usuarios: listado de cuentas --- */
+.users-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 2px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.user-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  transition: border-color 0.15s ease, box-shadow 0.2s ease;
+  animation: fade-up 0.3s ease both;
+}
+
+.user-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-soft);
+}
+
+.user-card-open {
+  border-color: var(--border-strong);
+}
+
+/* la fila entera abre y cierra sus acciones: es un botón a todo lo ancho */
+.user-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px 10px;
+  border-radius: 12px;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+button.user-row:hover {
+  background: var(--hover);
+}
+
+button.user-row:active {
+  background: var(--active);
+}
+
+/* la fila propia no despliega nada: ni puntero ni fondo al pasar */
+.user-row-static {
+  cursor: default;
+}
+
+.user-icon {
+  display: inline-flex;
+  color: var(--text-3);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.user-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* el correo manda en la fila: monospace y una sola línea con ellipsis */
+.user-email {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.user-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.user-since {
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* último acceso y contadores: SOLO cifras, nunca contenido de conversaciones */
+.user-counts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* la propia cuenta: marca discreta y sin acción (el backend da 403) */
+.user-self {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 1px;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-3);
+  background: var(--inset);
+}
+
+.user-chevron {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 3px;
+  display: inline-flex;
+  color: var(--text-3);
+  transition: transform 0.2s ease, color 0.15s ease;
+}
+
+.user-chevron-open {
+  transform: rotate(180deg);
+  color: var(--text-2);
+}
+
+/* --- pestaña Usuarios: acciones desplegadas de la fila --- */
+.user-actions {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 12px 11px 37px;
+  animation: fade-up 0.18s ease both;
+}
+
+.user-role-btn {
+  padding: 5px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.user-role-promote:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--chip-text);
+}
+
+.user-role-demote:hover {
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+  color: var(--red);
+}
+
+.user-confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  animation: fade-in 0.15s ease both;
+}
+
+.user-saving {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.user-saving svg {
+  color: var(--text-3);
+}
+
+/* motivo del PATCH rechazado, en la fila cuyo rol se revirtió */
+.user-row-error {
+  padding: 0 12px 10px 37px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--red);
+  animation: fade-up 0.2s ease both;
+}
+
+/* --- pestaña Sistema: cifras de solo lectura --- */
+.stats-block {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.stats-title {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px;
+}
+
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  animation: fade-up 0.3s ease both;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+.stats-suppliers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-sub {
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.stats-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.stats-chip {
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--hover);
+}
+
+.config-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.config-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+}
+
+.config-row + .config-row {
+  border-top: 1px solid var(--border);
+}
+
+.config-key {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.config-value {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  text-align: right;
+  word-break: break-word;
+}
+
+/* --- pestaña Mi cuenta --- */
+.account-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.account-email {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.account-form {
+  gap: 11px;
+}
+
+/* cerrar sesión vive aquí (ya no en el pie del sidebar): un solo sitio */
+.settings-signout {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.settings-signout svg {
+  color: var(--text-3);
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.settings-signout:hover,
+.settings-signout:active {
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  color: var(--red);
+}
+
+.settings-signout:hover svg,
+.settings-signout:active svg {
+  color: var(--red);
+}
+
+/* ----------------------------------------------------------------------
    13. Responsive
    ---------------------------------------------------------------------- */
 
@@ -2689,14 +3232,16 @@ button.doc-badge-failed:hover {
   }
 }
 
-.docs-inner {
+.docs-inner,
+.settings-inner {
   padding-top: env(safe-area-inset-top);
   padding-right: env(safe-area-inset-right);
 }
 
 /* ----------------------------------------------------------------------
-   13b. Bottom sheets en móvil (≤600px): fuentes y documentos suben desde
-        abajo con asa; el slide-over lateral se mantiene en tablet.
+   13b. Bottom sheets en móvil (≤600px): fuentes, documentos y ajustes
+        suben desde abajo con asa; el slide-over lateral se mantiene en
+        tablet.
    ---------------------------------------------------------------------- */
 
 /* asa/grabber: solo visible en modo bottom sheet */
@@ -2706,7 +3251,8 @@ button.doc-badge-failed:hover {
 
 @media (max-width: 600px) {
   .sources-panel,
-  .docs-panel {
+  .docs-panel,
+  .settings-panel {
     top: auto;
     left: 0;
     right: 0;
@@ -2726,7 +3272,8 @@ button.doc-badge-failed:hover {
   }
 
   .sources-inner,
-  .docs-inner {
+  .docs-inner,
+  .settings-inner {
     width: 100%;
     height: auto;
     min-height: 0;
@@ -2758,7 +3305,8 @@ button.doc-badge-failed:hover {
     padding-top: 6px;
   }
 
-  .docs-header {
+  .docs-header,
+  .settings-header {
     padding-top: 4px;
   }
 
@@ -2793,7 +3341,8 @@ button.doc-badge-failed:hover {
 }
 
 .new-chat-btn:active,
-.docs-retry-btn:active {
+.docs-retry-btn:active,
+.user-role-btn:active {
   border-color: var(--accent-border);
   background: var(--hover);
 }
@@ -2849,6 +3398,7 @@ button.doc-badge-failed:active {
   button.doc-badge-failed,
   .citation-chip,
   .docs-retry-btn,
+  .user-role-btn,
   .docs-poll-warn button {
     position: relative;
   }
@@ -2864,6 +3414,7 @@ button.doc-badge-failed:active {
   button.doc-badge-failed::after,
   .citation-chip::after,
   .docs-retry-btn::after,
+  .user-role-btn::after,
   .docs-poll-warn button::after {
     content: '';
     position: absolute;
@@ -3279,35 +3830,8 @@ button.doc-badge-failed:active {
   background: var(--accent-soft);
 }
 
-.sidebar-signout-btn {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 7px 10px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-2);
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.sidebar-signout-btn svg {
-  color: var(--text-3);
-  flex-shrink: 0;
-  transition: color 0.15s ease;
-}
-
-.sidebar-signout-btn:hover,
-.sidebar-signout-btn:active {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.sidebar-signout-btn:hover svg,
-.sidebar-signout-btn:active svg {
-  color: var(--accent);
-}
+/* cerrar sesión ya no vive en el pie del sidebar: está en Ajustes > Mi
+   cuenta (.settings-signout, §12c), en un solo sitio para todos los roles */
 
 /* --- documentos en solo lectura (rol vendedor) --- */
 .docs-readonly-note {
@@ -3358,9 +3882,16 @@ button.doc-badge-failed:active {
     padding-bottom: 11px;
   }
 
-  .sidebar-signout-btn {
+  .settings-signout {
     padding-top: 11px;
     padding-bottom: 11px;
+  }
+
+  /* la fila de usuario es el target: ya nace alta, pero el desplegable de
+     acciones y la búsqueda se ganan aire en táctil */
+  .user-row {
+    padding-top: 13px;
+    padding-bottom: 12px;
   }
 }
 

@@ -221,7 +221,7 @@ export function AuthScreen({ expired = false }: AuthScreenProps) {
         </form>
 
         <p className="auth-domain-note">
-          Solo se permiten correos <strong>@{ALLOWED_DOMAIN}</strong>. Los catálogos son
+          Solo se permiten correos <strong>@{ALLOWED_DOMAIN}</strong>. Los archivos son
           compartidos; tus conversaciones son privadas.
         </p>
       </main>
