@@ -80,9 +80,14 @@ o productos hay; qué catálogos o marcas existen) usa la herramienta \
 `inventario_del_indice`, que consulta el índice REAL en este momento, y cita \
 esos datos como [inventario del índice]. Nunca respondas conteos del corpus \
 desde fragmentos de búsqueda.
-13. Para "el más barato/mejor precio de CADA suplidor o marca": primero \
-`inventario_del_indice` para conocer las marcas existentes, y luego UNA llamada \
-a `buscar_por_precio` por cada marca principal usando su nombre exacto.
+13. Para "el más barato/mejor precio de CADA suplidor": primero \
+`inventario_del_indice`, y luego EXACTAMENTE UNA llamada a `buscar_por_precio` \
+por cada SUPLIDOR de la lista "Suplidores" (son 4 o 5 líneas comerciales), \
+pasando el nombre del suplidor en `marca`. NUNCA recorras la lista de "Marcas" \
+(hay más de una docena y no alcanza el presupuesto): las marcas de Notifier \
+(VESDA, System Sensor, Fire-Lite...) ya quedan cubiertas por su suplidor. \
+Nunca repitas una llamada con los mismos parámetros: si ya la hiciste, usa \
+sus resultados.
 
 Responde siempre en español, de forma clara, estructurada y concisa. Nunca uses \
 el guion largo (—) en tus respuestas: separa las ideas con comas, puntos o dos puntos.\
@@ -375,6 +380,11 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
     accumulated: dict[str, Chunk] = {}  # dedup por id, conserva orden de llegada
     hops: list[dict] = []
     hop_count = 0
+    # Llamadas ya ejecutadas en esta pregunta: (tool, args canónicos) → visto.
+    # Una repetición idéntica no re-ejecuta nada ni consume presupuesto: el
+    # patrón degenerado medido en producción quemaba 7 de 8 hops repitiendo
+    # la misma búsqueda y acababa en "no pude completar".
+    executed_calls: set[tuple[str, str]] = set()
     sources_emitted = False
     # Todo el texto emitido como eventos `token` a lo largo de TODAS las rondas
     # (incluye el preámbulo que el modelo pueda escribir antes de una tool call).
@@ -460,7 +470,6 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 }
             )
             for tc in ordered:
-                hop_count += 1
                 try:
                     args = json.loads(tc["arguments"] or "{}")
                 except (json.JSONDecodeError, TypeError):
@@ -469,6 +478,28 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 marca = args.get("marca") or None
                 is_price_tool = tc["name"] == "buscar_por_precio"
                 is_inventory_tool = tc["name"] == "inventario_del_indice"
+
+                call_key = (
+                    tc["name"],
+                    json.dumps(args, sort_keys=True, ensure_ascii=False),
+                )
+                if call_key in executed_calls:
+                    # Repetición exacta: ni se ejecuta ni cuenta como hop.
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": (
+                                "Esta llamada es IDÉNTICA a una que ya ejecutaste "
+                                "en esta pregunta: sus resultados están arriba. "
+                                "Cambia los parámetros o responde con lo que ya "
+                                "tienes."
+                            ),
+                        }
+                    )
+                    continue
+                executed_calls.add(call_key)
+                hop_count += 1
 
                 if is_inventory_tool:
                     hop_label = "inventario del índice"
