@@ -216,16 +216,26 @@ pueden borrar por esta vía (403). → `{ "ok": true }`
 ### `POST /api/feedback` Body: `{ "message_id": str, "rating": 1|-1, "comment": str|null }` → `{ "ok": true }`
 
 ## Agente multi-hop
-- Loop de tool calling con OpenAI. TRES tools:
-  - `buscar_productos(query, marca?, categoria?)` → hybrid search Qdrant (top 30, con
-    fast-path de SKU exacto) → reranker LLM → top 8 chunks con `[archivo p.X]`.
-  - `buscar_por_precio(query, marca?, orden?, limite?)` → pool amplio ordenado por el
-    PRECIO real del payload + clasificación binaria de relevancia; obligatoria para
-    superlativos de precio ("el más barato").
-  - `inventario_del_indice()` → facets/counts en vivo de Qdrant; obligatoria para
-    preguntas sobre el corpus (cuántos catálogos/suplidores/marcas hay).
-- Máximo `MAX_HOPS` llamadas de tool por pregunta (default 4 en código; el entorno
-  actual usa 8 para permitir inventario + una búsqueda por precio por marca).
+- Loop de tool calling con OpenAI. UNA sola tool general, `consultar_catalogo`, que
+  expone el álgebra de consulta del catálogo estructurado (el enrutamiento vive en el
+  MOTOR, no en reglas del prompt por tipo de pregunta):
+  `{ semantico?, suplidor?, marca?, precio_min?, precio_max?,
+     ordenar?: precio_asc|precio_desc, agrupar_por?: suplidor|marca|archivo,
+     limite?, por_grupo? }`
+  - Solo `semantico` → híbrida/dense + fast-path de SKU + reranker (top 8).
+  - `ordenar` sin `semantico` → scroll de Qdrant ordenado por el payload `price_usd`
+    (neto si existe, si no lista; backfill sin re-embeber), EXACTO y sin LLM.
+  - `ordenar` + `semantico` → pool híbrido + clasificación binaria de relevancia +
+    orden por precio real.
+  - `agrupar_por` con `ordenar` → un scroll exacto por grupo ("el más barato de cada
+    suplidor" = UNA llamada). `agrupar_por` solo → conteos reales por facets
+    ("¿cuántas marcas hay?").
+  - `suplidor` filtra en Qdrant por el payload `supplier` (exacto y confiable);
+    `marca` es post-filtro por término, tolerante a los errores de etiquetado del
+    origen. Pool vacío se reporta vacío: sin fallbacks silenciosos.
+- Guard de deduplicación: una llamada idéntica repetida no se re-ejecuta ni consume
+  presupuesto. Máximo `MAX_HOPS` llamadas por pregunta (con la tool compuesta, las
+  preguntas de agregación resuelven en 1).
 - **Fidelidad**: system prompt exige responder SOLO con lo recuperado, citar `[archivo, pág. X]`
   en cada afirmación factual, y decir explícitamente cuando algo no está en los catálogos.
   Precios siempre con moneda y con la advertencia de que provienen del catálogo (pueden estar desactualizados).

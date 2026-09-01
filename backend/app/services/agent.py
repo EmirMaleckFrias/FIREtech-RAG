@@ -18,12 +18,15 @@ from openai import AsyncOpenAI
 from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
 from app.services.qdrant import (
+    GROUP_FIELDS,
+    _MAX_GROUPS,
     detect_brand_in_text,
     find_by_skus,
+    group_values,
     hybrid_search,
-    index_inventory,
     resolve_brand,
     resolve_supplier,
+    scan_by_price,
 )
 from app.services.reranker import filter_relevant, rerank
 
@@ -62,149 +65,82 @@ Croker, AGF, Notifier, System Sensor, VESDA...). Si un producto no aparece bajo 
 marca que el usuario supone, repite la búsqueda SIN mencionar marca: el equivalente \
 puede venir de otro fabricante del catálogo (y dilo en la respuesta).
 
-10. Si el usuario pide "el más barato", "mejor precio", "más económico", "más caro" \
-o cualquier superlativo de precio, usa OBLIGATORIAMENTE la herramienta \
-`buscar_por_precio` (ordena por el precio real del catálogo). NUNCA declares que \
-algo es "el mejor precio" o "el más barato" basándote solo en `buscar_productos`: \
-si por alguna razón no usaste `buscar_por_precio`, di "el más barato entre lo \
-consultado", nunca un superlativo absoluto.
-
-11. La conversación previa es SOLO contexto opcional. Cada pregunta nueva puede \
+10. La conversación previa es SOLO contexto opcional. Cada pregunta nueva puede \
 cambiar de tema por completo: trátala como independiente salvo que contenga una \
 referencia explícita a lo anterior ("ese modelo", "y el precio de cada uno", "el \
 segundo"). Nunca reduzcas el alcance de una pregunta general al tema de la \
-conversación (si preguntan "¿cuántos suplidores hay?" tras hablar de VESDA, la \
-respuesta cubre TODO el índice, no solo VESDA), y no respondas desde tus turnos \
-anteriores: haz búsquedas nuevas para la pregunta nueva.
-12. Para preguntas sobre el corpus en sí (cuántos catálogos, suplidores, marcas \
-o productos hay; qué catálogos o marcas existen) usa la herramienta \
-`inventario_del_indice`, que consulta el índice REAL en este momento, y cita \
-esos datos como [inventario del índice]. Nunca respondas conteos del corpus \
-desde fragmentos de búsqueda.
-13. Para "el más barato/mejor precio de CADA suplidor": primero \
-`inventario_del_indice`, y luego EXACTAMENTE UNA llamada a `buscar_por_precio` \
-por cada SUPLIDOR de la lista "Suplidores" (son 4 o 5 líneas comerciales), \
-pasando el nombre del suplidor en `marca`. NUNCA recorras la lista de "Marcas" \
-(hay más de una docena y no alcanza el presupuesto): las marcas de Notifier \
-(VESDA, System Sensor, Fire-Lite...) ya quedan cubiertas por su suplidor. \
-Nunca repitas una llamada con los mismos parámetros: si ya la hiciste, usa \
-sus resultados.
+conversación, y no respondas desde tus turnos anteriores: consulta de nuevo.
+11. Tu herramienta ejecuta orden, conteos y agrupaciones de forma EXACTA sobre \
+el catálogo completo: componla en UNA sola llamada cuando la pregunta lo permita \
+("de cada suplidor" = ordenar + agrupar_por='suplidor'; "cuántos hay" = \
+agrupar_por sin semantico; "el más barato" = ordenar='precio_asc'). Nunca \
+declares un superlativo de precio ni un conteo que no venga de la herramienta \
+con ordenar/agrupar_por, y nunca repitas una llamada con parámetros idénticos.
 
 Responde siempre en español, de forma clara, estructurada y concisa. Nunca uses \
 el guion largo (—) en tus respuestas: separa las ideas con comas, puntos o dos puntos.\
 """
 
-_TOOL = {
+_CATALOG_TOOL = {
     "type": "function",
     "function": {
-        "name": "buscar_productos",
+        "name": "consultar_catalogo",
         "description": (
-            "Busca en los catálogos de productos indexados (búsqueda híbrida "
-            "semántica + léxica con reranking). Devuelve fragmentos del catálogo "
-            "con su archivo, página y marca. Úsala tantas veces como necesites "
-            "(consultas distintas y específicas) antes de responder."
+            "Consulta el catálogo combinando, según lo pida la pregunta: "
+            "búsqueda por significado (semantico), filtros exactos (suplidor, "
+            "marca, rango de precio), orden por el PRECIO REAL del catálogo y "
+            "agrupación. Ejemplos: 'el más barato de cada suplidor' = "
+            "ordenar='precio_asc' + agrupar_por='suplidor' en UNA llamada; "
+            "'¿cuántas marcas hay?' = agrupar_por='marca' sin nada más "
+            "(devuelve el conteo real); 'detector VESDA más barato' = "
+            "semantico='detector de humo por aspiración' + marca='VESDA' + "
+            "ordenar='precio_asc'; 'ficha del NFS-320' = semantico solo. "
+            "El orden y los conteos los ejecuta el motor de forma exacta, "
+            "no los estimes tú."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {
+                "semantico": {
                     "type": "string",
                     "description": (
-                        "Consulta de búsqueda específica, en el idioma del catálogo, "
-                        "con términos del dominio (modelo, SKU, K-factor, etc.)."
+                        "Qué buscar por significado (tipo de producto, modelo, "
+                        "SKU, specs). Omitir si la pregunta es puramente de "
+                        "precios/conteos con filtros."
+                    ),
+                },
+                "suplidor": {
+                    "type": "string",
+                    "description": (
+                        "Línea comercial exacta: ALEUM CO., RELIABLE, Croker, "
+                        "Notifier by Honeywell (se toleran variantes)."
                     ),
                 },
                 "marca": {
                     "type": "string",
-                    "description": (
-                        "Filtro opcional por marca exacta (p. ej. 'Reliable'). "
-                        "Omitir para buscar en todas las marcas."
-                    ),
+                    "description": "Marca dentro de un suplidor (VESDA, System Sensor...).",
                 },
-                "categoria": {
+                "precio_min": {"type": "number"},
+                "precio_max": {"type": "number"},
+                "ordenar": {
                     "type": "string",
+                    "enum": ["precio_asc", "precio_desc"],
+                    "description": "Orden por precio real. Obligatorio para superlativos de precio.",
+                },
+                "agrupar_por": {
+                    "type": "string",
+                    "enum": ["suplidor", "marca", "archivo"],
                     "description": (
-                        "Filtro opcional por categoría exacta (p. ej. 'sprinklers'). "
-                        "Omitir para buscar en todas las categorías."
+                        "Un resultado por grupo (con ordenar) o el conteo por "
+                        "grupo (sin ordenar ni semantico)."
                     ),
                 },
+                "limite": {"type": "integer", "description": "Resultados (default 8, máx 20)."},
+                "por_grupo": {"type": "integer", "description": "Resultados por grupo (default 3, máx 5)."},
             },
-            "required": ["query"],
         },
     },
 }
-
-
-_PRICE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "buscar_por_precio",
-        "description": (
-            "Busca productos y los devuelve ORDENADOS POR PRECIO REAL del catálogo "
-            "(no por similitud). Úsala siempre que el usuario pida el más barato, "
-            "el mejor precio, el más económico, el más caro o un ranking de precios. "
-            "Recupera un pool amplio de candidatos y los ordena por su campo de "
-            "precio exacto, así el resultado #1 sí es el extremo verdadero."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "Qué producto/categoría buscar (ej. 'detector aspiración "
-                        "VESDA completo', 'coupling rígido 2\"')."
-                    ),
-                },
-                "marca": {
-                    "type": "string",
-                    "description": "Filtro opcional por marca exacta.",
-                },
-                "orden": {
-                    "type": "string",
-                    "enum": ["asc", "desc"],
-                    "description": "asc = más baratos primero (default), desc = más caros.",
-                },
-                "limite": {
-                    "type": "integer",
-                    "description": "Cuántos devolver (default 10, máx 20).",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-}
-
-
-_INVENTORY_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "inventario_del_indice",
-        "description": (
-            "Devuelve el inventario REAL del índice en este momento, calculado "
-            "en vivo: total de productos, archivos/catálogos indexados, "
-            "suplidores y marcas con su cantidad de chunks. Úsala para toda "
-            "pregunta sobre el corpus (cuántos catálogos/suplidores/marcas/"
-            "productos hay, qué catálogos existen) y para conocer los nombres "
-            "exactos de marca antes de iterar búsquedas por marca."
-        ),
-        "parameters": {"type": "object", "properties": {}},
-    },
-}
-
-
-def _format_inventory(inv: dict) -> str:
-    lines = [
-        "Inventario del índice (calculado en vivo; cítalo como [inventario del índice]):",
-        f"- Chunks totales: {inv['total_chunks']} | Productos: {inv['productos']}",
-        "- Archivos/catálogos indexados:",
-    ]
-    lines += [f"    {a['valor']} ({a['chunks']} chunks)" for a in inv["archivos"]]
-    lines.append("- Suplidores (líneas comerciales):")
-    lines += [f"    {s['valor']} ({s['chunks']} chunks)" for s in inv["suplidores"]]
-    lines.append("- Marcas (valores exactos para el filtro `marca`):")
-    lines += [f"    {m['valor']} ({m['chunks']} chunks)" for m in inv["marcas"]]
-    return "\n".join(lines)
 
 
 @dataclass
@@ -249,10 +185,17 @@ def _extract_sku_candidates(query: str) -> list[str]:
     return list(dict.fromkeys(out))[:6]
 
 
-async def _execute_search(query: str, marca: str | None, categoria: str | None) -> list[Chunk]:
+async def _execute_search(
+    query: str,
+    marca: str | None,
+    categoria: str | None,
+    supplier: str | None = None,
+) -> list[Chunk]:
     settings = get_settings()
     marca = resolve_brand(marca)
-    filters = SearchFilters(brand=marca or None, category=categoria or None)
+    filters = SearchFilters(
+        brand=marca or None, category=categoria or None, supplier=supplier
+    )
 
     # Fast-path de SKU exacto: si la consulta trae códigos tipo SKU, se
     # recuperan por match exacto en el payload y se garantizan entre los
@@ -296,6 +239,118 @@ async def _execute_search(query: str, marca: str | None, categoria: str | None) 
     if must_keep:
         ranked = (must_keep + ranked)[: settings.rerank_top_k]
     return ranked
+
+
+async def _execute_catalog_query(args: dict) -> tuple[list[Chunk], str]:
+    """Ejecuta el álgebra de consultar_catalogo. Devuelve (chunks, texto).
+
+    El enrutamiento vive AQUÍ, en el motor, decidido por los parámetros de la
+    consulta (no por reglas del prompt sobre tipos de pregunta): agrupar,
+    ordenar y filtrar se ejecutan exactos sobre el payload de Qdrant; lo
+    semántico usa el retrieval híbrido + reranker de siempre.
+    """
+    semantico = str(args.get("semantico") or "").strip() or None
+    suplidor = resolve_supplier(args.get("suplidor") or args.get("marca"))
+    marca_raw = args.get("marca") or (None if suplidor else args.get("suplidor"))
+    precio_min = args.get("precio_min")
+    precio_max = args.get("precio_max")
+    ordenar = args.get("ordenar") or None
+    desc = ordenar == "precio_desc"
+    grupo = GROUP_FIELDS.get(str(args.get("agrupar_por") or ""))
+    limite = max(1, min(int(args.get("limite") or 8), 20))
+    por_grupo = max(1, min(int(args.get("por_grupo") or 3), 5))
+
+    # --- agrupaciones ---
+    if grupo:
+        valores = await asyncio.to_thread(group_values, grupo)
+        if not valores:
+            return [], "El índice no devolvió grupos para ese campo."
+
+        # Solo conteos: pregunta sobre el corpus.
+        if not ordenar and not semantico:
+            lineas = [
+                "Conteo REAL por grupo (calculado en vivo; cítalo como "
+                "[inventario del índice]):"
+            ]
+            lineas += [f"- {v['valor']}: {v['chunks']} chunks" for v in valores]
+            lineas.append(f"Total de grupos: {len(valores)}")
+            return [], "\n".join(lineas)
+
+        recortado = len(valores) > _MAX_GROUPS
+        chunks_total: list[Chunk] = []
+        secciones: list[str] = []
+        for v in valores[:_MAX_GROUPS]:
+            if ordenar:
+                filas = await asyncio.to_thread(
+                    lambda val=v["valor"]: scan_by_price(
+                        supplier=suplidor,
+                        price_min=precio_min,
+                        price_max=precio_max,
+                        group_field=grupo,
+                        group_value=val,
+                        descending=desc,
+                        limit=por_grupo,
+                    )
+                )
+            else:
+                sf = SearchFilters(
+                    supplier=v["valor"] if grupo == "supplier" else suplidor,
+                    brand=v["valor"] if grupo == "brand" else None,
+                )
+                filas = (await hybrid_search(semantico, sf, por_grupo * 3))[:por_grupo]
+            if filas:
+                chunks_total.extend(filas)
+                secciones.append(
+                    f"=== GRUPO {v['valor']} ===\n" + _format_results(filas)
+                )
+            else:
+                secciones.append(f"=== GRUPO {v['valor']} ===\nSin resultados.")
+        encabezado = (
+            f"Resultados por grupo ({'precio ' + ('desc' if desc else 'asc') if ordenar else 'relevancia'}):"
+        )
+        if recortado:
+            encabezado += f" (solo los primeros {_MAX_GROUPS} grupos de {len(valores)})"
+        return chunks_total, encabezado + "\n\n" + "\n\n".join(secciones)
+
+    # --- orden por precio, sin agrupación ---
+    if ordenar:
+        if semantico:
+            filas = await _execute_price_search(
+                semantico,
+                args.get("marca") or args.get("suplidor"),
+                "desc" if desc else "asc",
+                limite,
+            )
+        else:
+            filas = await asyncio.to_thread(
+                lambda: scan_by_price(
+                    supplier=suplidor,
+                    brand=resolve_brand(marca_raw) if not suplidor else None,
+                    price_min=precio_min,
+                    price_max=precio_max,
+                    descending=desc,
+                    limit=limite,
+                )
+            )
+        etiqueta = "descendente" if desc else "ascendente"
+        texto = (
+            f"Productos ordenados por PRECIO REAL del catálogo ({etiqueta}); "
+            f"el #1 es el extremo verdadero del conjunto filtrado:\n\n"
+            + _format_results(filas)
+        )
+        return filas, texto
+
+    # --- semántico puro (con filtros opcionales) ---
+    if semantico:
+        filas = await _execute_search(
+            semantico, marca_raw, None, supplier=suplidor
+        )
+        return filas, _format_results(filas)
+
+    return [], (
+        "Consulta vacía: indica `semantico`, u `ordenar`/`agrupar_por` con "
+        "filtros. Ejemplo: ordenar='precio_asc' + agrupar_por='suplidor'."
+    )
 
 
 _PRICE_POOL = 120  # candidatos recuperados antes de ordenar por precio
@@ -412,7 +467,7 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             "model": settings.openai_model,
             "messages": messages,
             "stream": True,
-            "tools": [_TOOL, _PRICE_TOOL, _INVENTORY_TOOL],
+            "tools": [_CATALOG_TOOL],
             # Tras MAX_HOPS tool calls se fuerza la respuesta final.
             "tool_choice": "none" if force_final else "auto",
         }
@@ -488,11 +543,6 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                     args = json.loads(tc["arguments"] or "{}")
                 except (json.JSONDecodeError, TypeError):
                     args = {}
-                query = str(args.get("query") or "").strip() or message
-                marca = args.get("marca") or None
-                is_price_tool = tc["name"] == "buscar_por_precio"
-                is_inventory_tool = tc["name"] == "inventario_del_indice"
-
                 call_key = (
                     tc["name"],
                     json.dumps(args, sort_keys=True, ensure_ascii=False),
@@ -515,36 +565,24 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 executed_calls.add(call_key)
                 hop_count += 1
 
-                if is_inventory_tool:
-                    hop_label = "inventario del índice"
-                elif is_price_tool:
-                    hop_label = f"por precio: {query}"
-                else:
-                    hop_label = query
+                partes = []
+                if args.get("semantico"):
+                    partes.append(str(args["semantico"]))
+                if args.get("ordenar"):
+                    partes.append(
+                        "precio ↓" if args["ordenar"] == "precio_desc" else "precio ↑"
+                    )
+                if args.get("agrupar_por"):
+                    partes.append(f"por {args['agrupar_por']}")
+                if args.get("suplidor") or args.get("marca"):
+                    partes.append(str(args.get("suplidor") or args.get("marca")))
+                hop_label = " · ".join(partes) or message
                 hop_info = {"n": hop_count, "query": hop_label}
                 hops.append(hop_info)
                 yield AgentEvent("hop", hop_info)
 
                 try:
-                    if is_inventory_tool:
-                        chunks = []
-                        result_text = _format_inventory(
-                            await asyncio.to_thread(index_inventory)
-                        )
-                    elif is_price_tool:
-                        orden = args.get("orden") or "asc"
-                        limite = args.get("limite") or 10
-                        chunks = await _execute_price_search(query, marca, orden, limite)
-                        etiqueta = "ascendente" if orden != "desc" else "descendente"
-                        result_text = (
-                            f"Productos ordenados por PRECIO REAL del catálogo "
-                            f"({etiqueta}); el #1 es el extremo dentro del pool "
-                            f"consultado:\n\n" + _format_results(chunks)
-                        )
-                    else:
-                        categoria = args.get("categoria") or None
-                        chunks = await _execute_search(query, marca, categoria)
-                        result_text = _format_results(chunks)
+                    chunks, result_text = await _execute_catalog_query(args)
                 except Exception as exc:  # la búsqueda no debe tumbar el stream
                     logger.warning("%s falló (hop %d): %s", tc["name"], hop_count, exc)
                     chunks = []

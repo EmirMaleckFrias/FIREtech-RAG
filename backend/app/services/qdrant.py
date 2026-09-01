@@ -279,6 +279,109 @@ def _build_filter(filters: SearchFilters) -> models.Filter | None:
     return models.Filter(must=must) if must else None
 
 
+# ---------------------------------------------------------------------------
+# Consulta estructurada: el álgebra general (filtrar + ordenar + agrupar)
+# ejecutada EXACTA sobre el payload. Es lo que hace que "el más barato de
+# cada suplidor" o "cuántas marcas hay" funcionen por construcción, sin
+# reglas por tipo de pregunta.
+# ---------------------------------------------------------------------------
+GROUP_FIELDS = {"suplidor": "supplier", "marca": "brand", "archivo": "source_file"}
+
+_MAX_GROUPS = 16  # tope de grupos a recorrer en una agrupación
+
+
+def _base_filter(
+    supplier: str | None = None,
+    brand: str | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    group_field: str | None = None,
+    group_value: str | None = None,
+    solo_productos: bool = True,
+) -> models.Filter:
+    must: list[models.Condition] = []
+    if solo_productos:
+        must.append(
+            models.FieldCondition(
+                key="chunk_type", match=models.MatchValue(value="product")
+            )
+        )
+    if supplier:
+        must.append(
+            models.FieldCondition(
+                key="supplier", match=models.MatchValue(value=supplier)
+            )
+        )
+    if brand:
+        must.append(
+            models.FieldCondition(key="brand", match=models.MatchValue(value=brand))
+        )
+    if price_min is not None or price_max is not None:
+        must.append(
+            models.FieldCondition(
+                key="price_usd",
+                range=models.Range(gte=price_min, lte=price_max),
+            )
+        )
+    if group_field and group_value is not None:
+        must.append(
+            models.FieldCondition(
+                key=group_field, match=models.MatchValue(value=group_value)
+            )
+        )
+    return models.Filter(must=must)
+
+
+def scan_by_price(
+    *,
+    supplier: str | None = None,
+    brand: str | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    group_field: str | None = None,
+    group_value: str | None = None,
+    descending: bool = False,
+    limit: int = 10,
+) -> list[Chunk]:
+    """Productos ordenados por el PRECIO real del payload, exacto y sin LLM.
+
+    Requiere el índice float de `price_usd`; los puntos sin precio quedan
+    fuera del orden por construcción (se añade el rango >= 0 explícito).
+    """
+    settings = get_settings()
+    flt = _base_filter(
+        supplier, brand, price_min if price_min is not None else 0.0, price_max,
+        group_field, group_value,
+    )
+    points, _ = get_client().scroll(
+        collection_name=settings.qdrant_collection,
+        scroll_filter=flt,
+        order_by=models.OrderBy(
+            key="price_usd",
+            direction=models.Direction.DESC if descending else models.Direction.ASC,
+        ),
+        limit=limit,
+        with_payload=True,
+    )
+    return [_point_to_chunk(p) for p in points]
+
+
+def group_values(group_field: str, min_count: int = 1) -> list[dict]:
+    """Valores vivos de un campo agrupable con su conteo de chunks."""
+    settings = get_settings()
+    res = get_client().facet(
+        collection_name=settings.qdrant_collection,
+        key=group_field,
+        limit=60,
+        exact=True,
+    )
+    return [
+        {"valor": str(h.value), "chunks": h.count}
+        for h in res.hits
+        if str(h.value).strip() and h.count >= min_count
+    ]
+
+
 def index_inventory() -> dict:
     """Inventario EN VIVO del índice: totales, archivos, suplidores y marcas.
 
