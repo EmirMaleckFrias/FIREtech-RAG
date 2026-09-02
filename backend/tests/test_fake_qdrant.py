@@ -29,11 +29,22 @@ def test_respuestas_configurables_y_callables(settings_override, fake_qdrant):
             ]
         ),
     )
-    assert qdrant.group_values("supplier") == [
-        {"valor": "supplier-A", "chunks": 3},
-        {"valor": "supplier-B", "chunks": 1},
+    fake_qdrant.set_response("count", types.SimpleNamespace(count=7))
+
+    inv = qdrant.index_inventory()
+
+    assert inv["total_chunks"] == 7
+    # El valor vacío se descarta: son los huecos, no un valor real del campo.
+    assert inv["archivos"] == [
+        {"valor": "source_file-A", "chunks": 3},
+        {"valor": "source_file-B", "chunks": 1},
     ]
-    assert fake_qdrant.calls_to("facet")[0]["key"] == "supplier"
+    assert inv["idiomas"] == [
+        {"valor": "language-A", "chunks": 3},
+        {"valor": "language-B", "chunks": 1},
+    ]
+    claves = [kw["key"] for kw in fake_qdrant.calls_to("facet")]
+    assert claves == ["source_file", "document_type", "language", "project_id"]
 
 
 def test_info_y_excepciones(settings_override, fake_qdrant):
@@ -82,9 +93,27 @@ def test_retrieval_mode_fuerza_la_carga_de_bm25(settings_override, monkeypatch):
     assert qdrant.retrieval_mode() == "dense-only"
 
 
-def test_price_usd_prefiere_el_neto_y_deja_none_sin_precio():
-    assert qdrant._price_usd({"price_net_usd": 12.5, "price_list_usd": 20.0}) == 12.5
-    assert qdrant._price_usd({"price_net_usd": None, "price_list_usd": 20.0}) == 20.0
-    assert qdrant._price_usd({"price_list_usd": 20.0}) == 20.0
-    assert qdrant._price_usd({"price_net_usd": None, "price_list_usd": None}) is None
-    assert qdrant._price_usd({"chunk_type": "tabla"}) is None
+def test_el_payload_es_una_lista_blanca(settings_override, fake_qdrant):
+    """Lo que el parser no declare en _PAYLOAD_KEYS no llega a Qdrant.
+
+    Es la garantía de que un campo nuevo en la ingesta no se filtra al índice
+    por accidente, y con documentos ajenos eso importa.
+    """
+    qdrant.upsert_chunks(
+        [
+            {
+                "id": "1",
+                "dense": [0.1, 0.2],
+                "text": "hola",
+                "source_file": "a.pdf",
+                "page": 3,
+                "campo_no_declarado": "no debe viajar",
+            }
+        ]
+    )
+
+    punto = fake_qdrant.calls_to("upsert")[0]["points"][0]
+    assert set(punto.payload) == set(qdrant._PAYLOAD_KEYS)
+    assert punto.payload["text"] == "hola"
+    assert punto.payload["page"] == 3
+    assert punto.payload["language"] is None  # no lo puso el parser

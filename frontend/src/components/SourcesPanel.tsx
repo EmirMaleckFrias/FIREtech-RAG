@@ -102,14 +102,16 @@ function scorePercent(score: number | null): number | null {
   return Math.round(clamped * 100);
 }
 
-/** Título de la tarjeta documental. */
+/** Título de la tarjeta: la referencia del trabajo si se conoce.
+ *  Para quien investiga, "Allegri et al., 2021" identifica la fuente; el
+ *  nombre del archivo es solo dónde está guardada. */
 function cardTitle(s: Source): string {
-  return s.source_file;
+  return s.citation || s.title || s.source_file;
 }
 
-/** Badge del tipo de chunk (solo los que aportan contexto). */
+/** Badge del tipo de fragmento (solo los que aportan contexto). */
 function chunkBadge(chunkType: string | undefined): string | null {
-  if (chunkType === 'doc_text' || chunkType === 'doc_row') return 'Documento subido';
+  if (chunkType === 'table') return 'Tabla';
   return null;
 }
 
@@ -232,7 +234,13 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
     if (!titleIsFile) {
       metaParts.push({ text: s.source_file, className: 'source-meta-file', title: s.source_file });
     }
-    if (s.page !== null) metaParts.push({ text: `pág. ${s.page}` });
+    // El localizador lo decide el backend segun el formato: un .docx no tiene
+    // paginas, asi que la UI no debe inventarse un "pag. N".
+    const locator = s.locator || (s.page !== null ? `pág. ${s.page}` : '');
+    if (locator) metaParts.push({ text: locator });
+    if (s.section && locator !== `sección: ${s.section}`) {
+      metaParts.push({ text: s.section });
+    }
     if (s.document_type) metaParts.push({ text: s.document_type });
     if (s.language) metaParts.push({ text: s.language });
 

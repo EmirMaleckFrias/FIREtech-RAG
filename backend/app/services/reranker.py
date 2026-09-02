@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 
 from app.config import get_settings
 from app.models import Chunk
@@ -55,40 +56,65 @@ async def _json_completion(messages: list[dict], note: str) -> dict:
 _TRUNCATE_CHARS = 600
 
 _SYSTEM_PROMPT = (
-    "Eres un reranker de fragmentos de catálogos de productos de protección "
-    "contra incendios. Recibes una consulta y una lista de fragmentos "
-    "numerados. Devuelve SOLO un objeto JSON con la forma "
+    "Eres un reranker de fragmentos de documentos. Recibes una consulta y una "
+    "lista de fragmentos numerados. Devuelve SOLO un objeto JSON con la forma "
     '{"ranking": [índices]} donde "ranking" contiene los índices de TODOS '
     "los fragmentos ordenados de mayor a menor relevancia respecto de la "
-    "consulta. No incluyas texto adicional ni explicaciones."
+    "consulta. Ordena por cuánta evidencia aporta el fragmento para responder "
+    "la consulta, no por parecido de palabras. No incluyas texto adicional ni "
+    "explicaciones."
 )
 
 _FILTER_SYSTEM_PROMPT = (
-    "Eres un clasificador de productos de catálogos de protección contra "
-    "incendios. Recibes una consulta y una lista de productos numerados. "
-    "Devuelve SOLO un objeto JSON {\"relevantes\": [índices]} con los índices "
-    "de los productos que SON el tipo de producto que pide la consulta. "
-    "Decide por la DESCRIPCIÓN del producto (las etiquetas de tipo del "
-    "catálogo no son fiables). Excluye todo lo que no sea la unidad funcional "
-    "completa del tipo pedido: accesorios, repuestos/spares, filtros, "
-    "licencias, tuberías, puntos de muestreo, fuentes de poder, pantallas/"
-    "displays, módulos, sensores sueltos, tarjetas y kits de partes, SALVO "
-    "que la consulta pida exactamente eso. Ante la duda sobre una unidad "
-    "completa del tipo pedido, inclúyela."
+    "Decides qué fragmentos de documentos sirven de evidencia para una "
+    "consulta. Recibes la consulta y una lista de fragmentos numerados. "
+    'Devuelve SOLO un objeto JSON {"relevantes": [índices]} con los índices '
+    "de los fragmentos que contienen información que ayuda a responder la "
+    "consulta, aunque sea parcialmente. Incluye el fragmento si aporta un "
+    "dato, una definición, una cifra, un método o un resultado sobre el tema "
+    "preguntado. Excluye solo los que hablan de otro tema, los que son "
+    "índices, portadas, bibliografías o encabezados sin contenido, y los que "
+    "se limitan a mencionar el tema de pasada sin decir nada de él. Si "
+    "NINGUNO sirve, devuelve la lista vacía: es una respuesta legítima y "
+    "necesaria, porque quien pregunta debe poder saber que el índice no tiene "
+    "esa información. Ante la duda sobre un fragmento que parece aportar "
+    "algo, inclúyelo."
 )
 
 _FILTER_TRUNCATE_CHARS = 450
 
 
-async def filter_relevant(query: str, chunks: list[Chunk]) -> list[Chunk]:
-    """Filtro binario de relevancia por ítem (para el camino de precios).
+@dataclass(frozen=True)
+class RelevanceOutcome:
+    """Resultado del filtro de relevancia, con tres estados distinguibles.
+
+    - `kept` con elementos y `verificado=True`: esos fragmentos sirven.
+    - `kept` vacío y `verificado=True`: el modelo dijo que NINGUNO sirve. Es
+      información real y hay que pasarla al agente para que responda que no
+      encuentra nada, en vez de entregarle fragmentos de otro tema.
+    - `verificado=False`: el filtro no se pudo aplicar (API caída, JSON roto).
+      `kept` trae los fragmentos sin filtrar y nadie debe concluir nada de
+      que no se hayan descartado.
+    """
+
+    kept: list[Chunk]
+    verificado: bool
+    motivo: str
+
+
+async def filter_relevant(query: str, chunks: list[Chunk]) -> RelevanceOutcome:
+    """Filtro binario de relevancia por fragmento.
 
     A diferencia del ranking listwise, clasificar sí/no por ítem es fiable
-    con pools grandes: el orden de entrada (por precio) se PRESERVA en la
-    salida. Ante cualquier fallo devuelve los chunks sin filtrar.
+    con listas grandes y PRESERVA el orden de entrada en la salida.
     """
-    if len(chunks) <= 1:
-        return chunks
+    if not chunks:
+        return RelevanceOutcome([], True, "sin candidatos")
+    if len(chunks) == 1:
+        # Con un solo candidato no vale la pena una llamada, pero tampoco se
+        # puede afirmar que sea relevante: queda sin verificar.
+        return RelevanceOutcome(list(chunks), False, "un solo candidato, no se filtra")
+
     numbered = "\n".join(
         f"[{i}] {c.text[:_FILTER_TRUNCATE_CHARS]}" for i, c in enumerate(chunks)
     )
@@ -98,7 +124,7 @@ async def filter_relevant(query: str, chunks: list[Chunk]) -> list[Chunk]:
                 {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": f"Consulta: {query}\n\nProductos:\n{numbered}",
+                    "content": f"Consulta: {query}\n\nFragmentos:\n{numbered}",
                 },
             ],
             note=f"filter_relevant n={len(chunks)}",
@@ -116,12 +142,14 @@ async def filter_relevant(query: str, chunks: list[Chunk]) -> list[Chunk]:
                 continue
             if 0 <= idx < len(chunks):
                 keep.add(idx)
-        if not keep:
-            return chunks  # filtro que vacía todo = filtro roto; mejor sin filtrar
-        return [c for i, c in enumerate(chunks) if i in keep]
+        return RelevanceOutcome(
+            [c for i, c in enumerate(chunks) if i in keep],
+            True,
+            f"{len(keep)} de {len(chunks)} fragmentos aportan evidencia",
+        )
     except Exception as exc:
         logger.warning("filter_relevant falló (%s); se continúa sin filtrar.", exc)
-        return chunks
+        return RelevanceOutcome(list(chunks), False, f"filtro no aplicado: {exc}")
 
 
 def _apply_ranking(ranking: object, chunks: list[Chunk]) -> list[Chunk]:

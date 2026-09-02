@@ -41,25 +41,16 @@ except Exception:  # ImportError u otros fallos de carga del paquete
 
 _UPSERT_BATCH = 64
 
-# Índices de payload que la colección necesita. `price_usd` (float) lo exige
-# `scan_by_price` para el order_by y el rango de precio; `price_status`
-# (keyword) lo facetea check_index.py. Misma lista que
-# check_index.EXPECTED_INDEXES (ese script no importa este módulo a propósito,
-# para no arrastrar embeddings/fastembed): si cambia una, cambiar la otra.
+# Índices de payload que la colección necesita: los campos por los que se
+# filtra. `project_id` y `document_id` son los que sostienen el aislamiento,
+# así que sin su índice una búsqueda filtrada sería un escaneo.
 PAYLOAD_INDEXES: tuple[tuple[str, models.PayloadSchemaType], ...] = (
     ("project_id", models.PayloadSchemaType.KEYWORD),
     ("document_id", models.PayloadSchemaType.KEYWORD),
     ("document_type", models.PayloadSchemaType.KEYWORD),
     ("language", models.PayloadSchemaType.KEYWORD),
-    ("brand", models.PayloadSchemaType.KEYWORD),
-    ("category", models.PayloadSchemaType.KEYWORD),
     ("source_file", models.PayloadSchemaType.KEYWORD),
-    ("has_price", models.PayloadSchemaType.BOOL),
-    ("skus", models.PayloadSchemaType.KEYWORD),
-    ("supplier", models.PayloadSchemaType.KEYWORD),
     ("chunk_type", models.PayloadSchemaType.KEYWORD),
-    ("price_usd", models.PayloadSchemaType.FLOAT),
-    ("price_status", models.PayloadSchemaType.KEYWORD),
 )
 
 # Singletons módulo-level, inicializados de forma lazy para que importar este
@@ -214,6 +205,9 @@ def _sparse_vectors_for(texts: list[str]) -> list[models.SparseVector | None]:
         return [None] * len(texts)
 
 
+# Lo único que se guarda en el payload. Es una lista blanca a propósito: lo
+# que el parser no ponga aquí no llega nunca a Qdrant, así que un campo nuevo
+# en la ingesta no se filtra al índice por accidente.
 _PAYLOAD_KEYS = (
     "text",
     "source_file",
@@ -225,51 +219,11 @@ _PAYLOAD_KEYS = (
     "document_type",
     "source_pages",
     "metadata",
-    "brand",
-    "category",
-    "skus",
-    "product_names",
-    "has_price",
     "chunk_type",
-    # Campos ricos del esquema canónico (docs/sintesis_esquema.json). Se
-    # almacenan en el payload para filtros/auditoría futuros; _point_to_chunk
-    # NO los expone, así que nunca salen por la API pública. En particular
-    # cost_internal_usd (margen del distribuidor) vive solo aquí y jamás debe
-    # entrar en "text".
-    "supplier",
-    "category_es",
-    "product_type",
-    "model_series",
-    "size_raw",
-    "approvals",
-    "box_qty",
-    "price_net_usd",
-    "price_list_usd",
-    "cost_internal_usd",
-    "price_status",
-    "price_effective_date",
-    "currency_assumed",
-    "is_active",
-    "visibility",
-    "data_quality_flags",
-    "source_row",
-    "source_pages",
+    "title",
+    "citation",
+    "doi",
 )
-
-
-def _price_usd(chunk: dict) -> float | None:
-    """Precio unificado del payload: el neto si existe, si no el de lista.
-
-    Es el campo `price_usd` por el que ordena y filtra `scan_by_price` (índice
-    float). Se deriva aquí, en el upsert, para que una ingesta desde cero
-    produzca lo mismo que el backfill que lo creó en las colecciones actuales;
-    los productos sin precio numérico (call, discontinued, missing) y los
-    chunks que no son producto quedan en None y fuera del orden.
-    """
-    net = chunk.get("price_net_usd")
-    if net is not None:
-        return net
-    return chunk.get("price_list_usd")
 
 
 def upsert_chunks(chunks: list[dict]) -> int:
@@ -291,7 +245,6 @@ def upsert_chunks(chunks: list[dict]) -> int:
         if sv is not None and len(sv.indices) > 0:
             vector["bm25"] = sv
         payload = {key: chunk.get(key) for key in _PAYLOAD_KEYS}
-        payload["price_usd"] = _price_usd(chunk)
         points.append(
             models.PointStruct(id=chunk["id"], vector=vector, payload=payload)
         )
@@ -350,143 +303,21 @@ def _build_filter(filters: SearchFilters) -> models.Filter | None:
                 key="language", match=models.MatchValue(value=filters.language)
             )
         )
-    if filters.brand:
-        must.append(
-            models.FieldCondition(
-                key="brand", match=models.MatchValue(value=filters.brand)
-            )
-        )
-    if filters.category:
-        must.append(
-            models.FieldCondition(
-                key="category", match=models.MatchValue(value=filters.category)
-            )
-        )
-    if filters.supplier:
-        must.append(
-            models.FieldCondition(
-                key="supplier", match=models.MatchValue(value=filters.supplier)
-            )
-        )
     return models.Filter(must=must) if must else None
 
 
-# ---------------------------------------------------------------------------
-# Consulta estructurada: el álgebra general (filtrar + ordenar + agrupar)
-# ejecutada EXACTA sobre el payload. Es lo que hace que "el más barato de
-# cada suplidor" o "cuántas marcas hay" funcionen por construcción, sin
-# reglas por tipo de pregunta.
-# ---------------------------------------------------------------------------
-GROUP_FIELDS = {"suplidor": "supplier", "marca": "brand", "archivo": "source_file"}
-
-_MAX_GROUPS = 16  # tope de grupos a recorrer en una agrupación
-
-
-def _base_filter(
-    supplier: str | None = None,
-    brand: str | None = None,
-    price_min: float | None = None,
-    price_max: float | None = None,
-    group_field: str | None = None,
-    group_value: str | None = None,
-    solo_productos: bool = True,
-) -> models.Filter:
-    must: list[models.Condition] = []
-    if solo_productos:
-        must.append(
-            models.FieldCondition(
-                key="chunk_type", match=models.MatchValue(value="product")
-            )
-        )
-    if supplier:
-        must.append(
-            models.FieldCondition(
-                key="supplier", match=models.MatchValue(value=supplier)
-            )
-        )
-    if brand:
-        must.append(
-            models.FieldCondition(key="brand", match=models.MatchValue(value=brand))
-        )
-    if price_min is not None or price_max is not None:
-        must.append(
-            models.FieldCondition(
-                key="price_usd",
-                range=models.Range(gte=price_min, lte=price_max),
-            )
-        )
-    if group_field and group_value is not None:
-        must.append(
-            models.FieldCondition(
-                key=group_field, match=models.MatchValue(value=group_value)
-            )
-        )
-    return models.Filter(must=must)
-
-
-def scan_by_price(
-    *,
-    supplier: str | None = None,
-    brand: str | None = None,
-    price_min: float | None = None,
-    price_max: float | None = None,
-    group_field: str | None = None,
-    group_value: str | None = None,
-    descending: bool = False,
-    limit: int = 10,
-) -> list[Chunk]:
-    """Productos ordenados por el PRECIO real del payload, exacto y sin LLM.
-
-    Requiere el índice float de `price_usd`; los puntos sin precio quedan
-    fuera del orden por construcción (se añade el rango >= 0 explícito).
-    """
-    settings = get_settings()
-    flt = _base_filter(
-        supplier, brand, price_min if price_min is not None else 0.0, price_max,
-        group_field, group_value,
-    )
-    points, _ = get_client().scroll(
-        collection_name=settings.qdrant_collection,
-        scroll_filter=flt,
-        order_by=models.OrderBy(
-            key="price_usd",
-            direction=models.Direction.DESC if descending else models.Direction.ASC,
-        ),
-        limit=limit,
-        with_payload=True,
-    )
-    return [_point_to_chunk(p) for p in points]
-
-
-def group_values(group_field: str, min_count: int = 1) -> list[dict]:
-    """Valores vivos de un campo agrupable con su conteo de chunks."""
-    settings = get_settings()
-    res = get_client().facet(
-        collection_name=settings.qdrant_collection,
-        key=group_field,
-        limit=60,
-        exact=True,
-    )
-    return [
-        {"valor": str(h.value), "chunks": h.count}
-        for h in res.hits
-        if str(h.value).strip() and h.count >= min_count
-    ]
-
-
 def index_inventory() -> dict:
-    """Inventario EN VIVO del índice: totales, archivos, suplidores y marcas.
+    """Inventario EN VIVO del índice: totales y valores reales de cada campo.
 
-    Todo sale de facets/counts de Qdrant en el momento de la llamada, así el
-    agente responde preguntas sobre el corpus con datos reales (incluidos los
-    documentos subidos después de la ingesta inicial), sin nada hardcodeado.
+    Todo sale de facets y counts de Qdrant en el momento de la llamada, así que
+    refleja los documentos subidos hace un segundo y no hay nada hardcodeado.
     """
     settings = get_settings()
     client = get_client()
     name = settings.qdrant_collection
 
     def _facet(key: str) -> list[dict]:
-        res = client.facet(collection_name=name, key=key, limit=60, exact=True)
+        res = client.facet(collection_name=name, key=key, limit=200, exact=True)
         # count > 0: el facet devuelve "lápidas" de valores cuyos puntos ya
         # fueron borrados (documentos eliminados) con conteo cero.
         return [
@@ -495,160 +326,13 @@ def index_inventory() -> dict:
             if str(h.value).strip() and h.count > 0
         ]
 
-    total = client.count(collection_name=name, exact=True).count
-    products = client.count(
-        collection_name=name,
-        exact=True,
-        count_filter=models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="chunk_type", match=models.MatchValue(value="product")
-                )
-            ]
-        ),
-    ).count
     return {
-        "total_chunks": total,
-        "productos": products,
+        "total_chunks": client.count(collection_name=name, exact=True).count,
         "archivos": _facet("source_file"),
-        "suplidores": _facet("supplier"),
-        "marcas": _facet("brand"),
+        "tipos": _facet("document_type"),
+        "idiomas": _facet("language"),
+        "proyectos": _facet("project_id"),
     }
-
-
-_KNOWN_SUPPLIERS: list[str] | None = None
-
-
-def resolve_supplier(nombre: str | None) -> str | None:
-    """Mapea un nombre libre al valor EXACTO del payload `supplier`.
-
-    'reliable' → 'RELIABLE', 'notifier' → 'Notifier by Honeywell', 'aleum' →
-    'ALEUM CO.'. None si no matchea (entonces se intenta como marca). La
-    lista sale del facet en vivo, con caché de proceso.
-    """
-    global _KNOWN_SUPPLIERS
-    if not nombre:
-        return None
-    if _KNOWN_SUPPLIERS is None:
-        try:
-            settings = get_settings()
-            res = get_client().facet(
-                collection_name=settings.qdrant_collection,
-                key="supplier",
-                limit=50,
-            )
-            _KNOWN_SUPPLIERS = [str(h.value) for h in res.hits if str(h.value).strip()]
-        except Exception as exc:
-            logger.warning("No se pudo facetar suppliers (%s).", exc)
-            return None
-    needle = nombre.strip().lower()
-    if not needle:
-        return None
-    if "rasco" in needle:
-        needle = "reliable"
-    for known in _KNOWN_SUPPLIERS:
-        kl = known.lower()
-        if not kl:
-            continue
-        if needle == kl or needle in kl or kl in needle:
-            return known
-        # 'notifier' debe matchear 'Notifier by Honeywell' por primera palabra.
-        if kl.split()[0] == needle.split()[0] and len(needle.split()[0]) >= 4:
-            return known
-    return None
-
-
-_KNOWN_BRANDS: list[str] | None = None
-
-
-def resolve_brand(marca: str | None) -> str | None:
-    """Mapea la marca que escribe el usuario/LLM al valor EXACTO del payload.
-
-    'aleum' → 'ALEUM CO.', 'rasco' → 'Reliable', 'agf' → 'AGF Manufacturing
-    Inc.'. Los filtros de Qdrant son case-sensitive y exactos: sin esto, un
-    filtro por 'Aleum' devuelve 0 resultados en silencio. None si no matchea
-    (mejor sin filtro que con filtro imposible).
-    """
-    global _KNOWN_BRANDS
-    if not marca:
-        return None
-    if _KNOWN_BRANDS is None:
-        try:
-            settings = get_settings()
-            res = get_client().facet(
-                collection_name=settings.qdrant_collection,
-                key="brand",
-                limit=100,
-            )
-            _KNOWN_BRANDS = [str(h.value) for h in res.hits]
-        except Exception as exc:
-            logger.warning("No se pudo facetar brands (%s).", exc)
-            return marca  # sin lista: usa el valor tal cual
-    needle = marca.strip().lower()
-    if not needle:
-        return None
-    # RASCO es el nombre comercial de Reliable en los catálogos.
-    if "rasco" in needle:
-        needle = "reliable"
-    for known in _KNOWN_BRANDS:
-        kl = known.lower()
-        if not kl:
-            continue  # docs subidos sin marca: '' matchearía cualquier cosa
-        if needle == kl or needle in kl or kl in needle:
-            return known
-    return None
-
-
-def detect_brand_in_text(text: str) -> str | None:
-    """Marca conocida mencionada en un texto libre, o None si hay 0 o varias.
-
-    Determinista y sin LLM: compara contra la lista viva de marcas del índice.
-    Se usa para auto-filtrar por payload cuando la consulta nombra una marca
-    ('detector VESDA barato' → brand=VESDA) sin depender del clasificador.
-    """
-    if not text:
-        return None
-    resolve_brand("x")  # fuerza la carga lazy de _KNOWN_BRANDS
-    if not _KNOWN_BRANDS:
-        return None
-    lowered = f" {text.lower()} "
-    matches: list[str] = []
-    for known in _KNOWN_BRANDS:
-        first_word = known.lower().split()[0] if known.strip() else ""
-        if len(first_word) >= 4 and f" {first_word}" in lowered:
-            matches.append(known)
-        elif "rasco" in lowered and known.lower() == "reliable":
-            matches.append(known)
-    matches = list(dict.fromkeys(matches))
-    return matches[0] if len(matches) == 1 else None
-
-
-def find_by_skus(skus: list[str], limit: int = 8) -> list[Chunk]:
-    """Match exacto por SKU/short-code en el payload (fast-path del agente).
-
-    `skus` es un campo keyword[] en el payload: MatchAny acierta si el punto
-    contiene cualquiera de los códigos dados. Devuelve [] ante cualquier fallo.
-    """
-    if not skus:
-        return []
-    settings = get_settings()
-    try:
-        points, _ = get_client().scroll(
-            collection_name=settings.qdrant_collection,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="skus", match=models.MatchAny(any=skus)
-                    )
-                ]
-            ),
-            limit=limit,
-            with_payload=True,
-        )
-    except Exception as exc:
-        logger.warning("find_by_skus falló (%s); se continúa sin fast-path.", exc)
-        return []
-    return [_point_to_chunk(p) for p in points]
 
 
 def _point_to_chunk(point: Any) -> Chunk:
@@ -665,17 +349,12 @@ def _point_to_chunk(point: Any) -> Chunk:
         document_type=payload.get("document_type") or "",
         source_pages=payload.get("source_pages") or [],
         metadata=payload.get("metadata") or {},
-        brand=payload.get("brand") or "",
-        category=payload.get("category") or "",
-        skus=payload.get("skus") or [],
-        product_names=payload.get("product_names") or [],
-        has_price=bool(payload.get("has_price") or False),
-        chunk_type=payload.get("chunk_type") or "page",
+        chunk_type=payload.get("chunk_type") or "text",
+        title=payload.get("title") or "",
+        citation=payload.get("citation") or "",
+        doi=payload.get("doi") or "",
         # Los Records de scroll() no traen score (solo los de query_points).
         score=float(getattr(point, "score", 0.0) or 0.0),
-        price_net_usd=payload.get("price_net_usd"),
-        price_list_usd=payload.get("price_list_usd"),
-        price_status=payload.get("price_status") or "",
     )
 
 

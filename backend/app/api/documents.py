@@ -1,15 +1,13 @@
 """Gestión de documentos: subir / listar / borrar con indexación dinámica.
 
 Contrato: SPEC.md, sección "Gestión de documentos (indexación dinámica)".
-- GET    /api/documents            → registro (Supabase o memoria) fusionado
-                                     con los 6 catálogos canónicos.
+- GET    /api/documents            → registro (Supabase o memoria).
 - POST   /api/documents/upload     → 202 + ingesta en background
-                                     (parse genérico → embed → Qdrant).
-- DELETE /api/documents/{file_name}→ borra puntos de Qdrant + registro
-                                     (403 para los catálogos canónicos).
+                                     (parse → embed → Qdrant).
+- DELETE /api/documents/{file_name}→ borra puntos de Qdrant + registro.
 
 Autenticación (SPEC.md § "Autenticación multiusuario"): los documentos son
-compartidos — cualquier usuario autenticado los ve y los consulta —, pero
+compartidos (cualquier usuario autenticado los ve y los consulta), pero
 subirlos y borrarlos es exclusivo de `admin` (403 para vendedor).
 """
 from __future__ import annotations
@@ -33,9 +31,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app.config import PROJECT_DIR
-from app.ingest.chunk import SUPPLIERS
 from app.ingest.generic import parse_generic
-from app.ingest.pipeline import CANONICAL_FILES
 from app.services import supabase_db
 from app.services.auth import AuthUser, current_user, require_admin
 
@@ -43,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-ALLOWED_EXTENSIONS = {".pdf", ".xlsx", ".csv", ".txt", ".md"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"}
 MAX_UPLOAD_BYTES_LOCAL = 25 * 1024 * 1024
 
 # --- Modo serverless (Vercel define VERCEL=1) -------------------------------
@@ -86,24 +82,9 @@ def _doc_row(row: dict) -> dict:
         "file_name": row.get("file_name") or "",
         "pages": int(row.get("pages") or 0),
         "chunks": int(row.get("chunks") or 0),
-        "brand": row.get("brand") or "",
         "status": row.get("status") or "ready",
         "error": row.get("error"),
         "ingested_at": row.get("ingested_at"),
-    }
-
-
-def _canonical_placeholder(file_name: str) -> dict:
-    """Fila sintética para un catálogo base aún no registrado en Supabase."""
-    return {
-        "id": file_name,
-        "file_name": file_name,
-        "pages": 0,
-        "chunks": 0,
-        "brand": SUPPLIERS.get(file_name, ""),
-        "status": "ready",
-        "error": None,
-        "ingested_at": None,
     }
 
 
@@ -143,7 +124,12 @@ def _cleanup_deleted_during_processing(path: Path, file_name: str) -> None:
         logger.warning("No se pudo borrar %s: %s", path, exc)
 
 
-def _ingest_uploaded(path: Path, file_name: str) -> str:
+def _ingest_uploaded(
+    path: Path,
+    file_name: str,
+    document_id: str | None = None,
+    project_id: str | None = None,
+) -> str:
     """parse genérico → embed → ensure_collection + delete_by_file + upsert.
 
     Todo dentro de try/except: cualquier fallo marca el documento 'failed'
@@ -163,6 +149,9 @@ def _ingest_uploaded(path: Path, file_name: str) -> str:
         )
 
         chunks, pages = parse_generic(path, file_name)
+        for chunk in chunks:
+            chunk["document_id"] = document_id
+            chunk["project_id"] = project_id
         logger.info(
             "Ingesta de '%s': %d chunks, %d páginas/filas.",
             file_name, len(chunks), pages,
@@ -215,17 +204,7 @@ def _ingest_uploaded(path: Path, file_name: str) -> str:
 async def list_documents(user: AuthUser = Depends(current_user)) -> dict:
     """Abierto a cualquier usuario autenticado (documentos compartidos)."""
     rows = await run_in_threadpool(supabase_db.list_documents)
-    by_name = {r.get("file_name"): r for r in rows}
-
-    documents: list[dict] = []
-    # 1. Los 6 catálogos base, siempre presentes y en orden canónico.
-    for name in CANONICAL_FILES:
-        row = by_name.pop(name, None)
-        documents.append(_doc_row(row) if row else _canonical_placeholder(name))
-    # 2. El resto (subidos), en orden de ingesta.
-    documents.extend(_doc_row(r) for r in by_name.values())
-
-    return {"documents": documents}
+    return {"documents": [_doc_row(r) for r in rows]}
 
 
 @router.post("/documents/upload", status_code=202)
@@ -260,14 +239,6 @@ async def upload_document(
     if not data:
         raise HTTPException(status_code=400, detail="El archivo está vacío")
 
-    if file_name in CANONICAL_FILES:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"'{file_name}' es un catálogo base y no puede reemplazarse "
-                f"por esta vía"
-            ),
-        )
     existing = await run_in_threadpool(supabase_db.list_documents)
     if any(r.get("file_name") == file_name for r in existing):
         raise HTTPException(
@@ -292,7 +263,6 @@ async def upload_document(
             sha256=sha256,
             pages=0,
             chunks=0,
-            brand="",
             status="processing",
             uploaded_by=user.id,
         )
@@ -303,7 +273,9 @@ async def upload_document(
     # final; el frontend ya tolera "ready"/"failed" inmediatos (simplemente
     # no arranca el polling).
     if IS_SERVERLESS:
-        status = await run_in_threadpool(_ingest_uploaded, dest, file_name)
+        status = await run_in_threadpool(
+            _ingest_uploaded, dest, file_name, doc_id, None
+        )
         return JSONResponse(
             status_code=200,
             content={
@@ -313,7 +285,7 @@ async def upload_document(
             },
         )
 
-    background_tasks.add_task(_ingest_uploaded, dest, file_name)
+    background_tasks.add_task(_ingest_uploaded, dest, file_name, doc_id, None)
     return {"id": doc_id or file_name, "file_name": file_name, "status": "processing"}
 
 
@@ -321,12 +293,6 @@ async def upload_document(
 async def delete_document(
     file_name: str, user: AuthUser = Depends(require_admin)
 ) -> dict:
-    if file_name in CANONICAL_FILES:
-        raise HTTPException(
-            status_code=403,
-            detail=f"'{file_name}' es un catálogo base y no puede borrarse",
-        )
-
     safe_name = _sanitize_file_name(file_name)
     rows = await run_in_threadpool(supabase_db.list_documents)
     if not any(r.get("file_name") == file_name for r in rows):

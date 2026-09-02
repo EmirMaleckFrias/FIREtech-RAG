@@ -41,20 +41,11 @@ import {
   IconX,
 } from './icons';
 
-/** Los 6 catálogos base: el backend responde 403 al DELETE; aquí, candadito. */
-const BASE_CATALOGS = new Set<string>([
-  'Catalogo_Aleum.pdf',
-  'Catalogo_Croker__2.pdf',
-  'Catalogo_Reliable_1.pdf',
-  'Catalogo_Reliable_2.pdf',
-  'Catalogo_Reliable_3.pdf',
-  'Notifier_.pdf',
-]);
 
 const POLL_INTERVAL_MS = 4_000;
 const MAX_POLL_FAILURES = 3;
 const JUST_READY_MS = 1_800;
-const ALLOWED_EXT_RE = /\.(pdf|xlsx|csv|txt|md)$/i;
+const ALLOWED_EXT_RE = /\.(pdf|docx|xlsx|csv|txt|md)$/i;
 /** Fallback si /api/health aún no anuncia upload_limit_mb (backends antiguos). */
 const DEFAULT_UPLOAD_LIMIT_MB = 25;
 
@@ -89,7 +80,7 @@ interface UploadState {
 
 function validateFile(file: File, docs: DocumentInfo[] | null, limitMb: number): string | null {
   if (!ALLOWED_EXT_RE.test(file.name)) {
-    return 'Formato no admitido. Solo se aceptan PDF, XLSX, CSV, TXT o MD.';
+    return 'Formato no admitido. Solo se aceptan PDF, Word (.docx), XLSX, CSV, TXT o MD.';
   }
   if (file.size > limitMb * 1024 * 1024) {
     const mb = (file.size / (1024 * 1024)).toFixed(1);
@@ -292,7 +283,6 @@ export function DocumentsPanel({
           file_name: accepted.file_name,
           pages: 0,
           chunks: 0,
-          brand: '',
           status: accepted.status,
           error: null,
           ingested_at: new Date().toISOString(),
@@ -481,7 +471,7 @@ export function DocumentsPanel({
                     Arrastra un archivo o haz clic para subirlo
                   </span>
                   <span className="dropzone-hint">
-                    PDF, XLSX, CSV, TXT o MD · máx. {limitMb} MB
+                    PDF, DOCX, XLSX, CSV, TXT o MD · máx. {limitMb} MB
                   </span>
                 </button>
               ) : (
@@ -523,7 +513,7 @@ export function DocumentsPanel({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".pdf,.xlsx,.csv,.txt,.md"
+                accept=".pdf,.docx,.xlsx,.csv,.txt,.md"
                 style={{ display: 'none' }}
                 tabIndex={-1}
                 aria-hidden="true"
@@ -591,14 +581,13 @@ export function DocumentsPanel({
           {docs !== null && docs.length > 0 && (
             <ul className="docs-list">
               {docs.map((d) => {
-                const isBase = BASE_CATALOGS.has(d.file_name);
                 const isDeleting = deleting.has(d.file_name);
                 const isConfirm = confirmFor === d.file_name;
                 const errOpen = openErrors.has(d.file_name);
                 const popped = justReady.has(d.file_name);
                 const rowError = rowErrors[d.file_name];
-                // Los catálogos base pueden venir sin chunks/páginas pero con
-                // marca: se muestra lo que haya, separado por puntos medios.
+                // Se muestra lo que haya, separado por puntos medios: un
+                // documento en cola aún no tiene chunks ni páginas.
                 const metaParts: string[] = [];
                 if (d.chunks > 0) {
                   metaParts.push(
@@ -610,7 +599,6 @@ export function DocumentsPanel({
                     `${d.pages.toLocaleString('es')} ${d.pages === 1 ? 'pág.' : 'págs.'}`,
                   );
                 }
-                if (d.brand !== '') metaParts.push(d.brand);
                 return (
                   <li
                     key={d.file_name}
@@ -687,15 +675,7 @@ export function DocumentsPanel({
                             {/* gestión solo para admin: el vendedor ve la
                                 ficha completa, sin acciones */}
                             {canManage &&
-                              (isBase ? (
-                                <span
-                                  className="doc-lock"
-                                  title="Catálogo base, no se puede borrar"
-                                  aria-label="Catálogo base, no se puede borrar"
-                                >
-                                  <IconLock size={14} />
-                                </span>
-                              ) : isDeleting ? (
+                              (isDeleting ? (
                                 <span
                                   className="doc-lock"
                                   role="status"

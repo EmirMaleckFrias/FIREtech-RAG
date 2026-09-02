@@ -35,6 +35,6 @@ export const supabase = createClient(url ?? FALLBACK_URL, anonKey ?? FALLBACK_KE
     autoRefreshToken: true,
     // El enlace de confirmación de correo vuelve con el token en la URL.
     detectSessionInUrl: true,
-    storageKey: 'firetech-rag-auth',
+    storageKey: 'rag-docs-auth',
   },
 });

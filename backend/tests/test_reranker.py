@@ -25,7 +25,8 @@ async def test_filter_relevant_conserva_el_orden(settings_override, fake_openai)
 
     out = await filter_relevant("detector", chunks)
 
-    assert _ids(out) == ["c0", "c2"]  # orden de entrada, no el del JSON
+    assert _ids(out.kept) == ["c0", "c2"]  # orden de entrada, no el del JSON
+    assert out.verificado is True
     assert len(fake_openai.calls) == 1
     kwargs = fake_openai.calls[0]
     assert kwargs["model"] == settings_override.rerank_model_resolved
@@ -34,35 +35,71 @@ async def test_filter_relevant_conserva_el_orden(settings_override, fake_openai)
     assert "[2] producto 2" in kwargs["messages"][-1]["content"]
 
 
-async def test_filter_relevant_sin_lista_devuelve_todos(settings_override, fake_openai):
+async def test_filter_relevant_respuesta_ilegible_no_se_da_por_verificada(
+    settings_override, fake_openai
+):
+    """JSON sin la lista esperada: se devuelven todos, pero SIN verificar.
+
+    Es la diferencia que importa: nadie puede concluir de aquí que los tres
+    fragmentos sirvan, solo que el filtro no se pudo aplicar.
+    """
     chunks = _chunks(3)
     fake_openai.queue(make_json_completion({"relevantes": "todos"}, usage=make_usage(50, 5)))
-    assert _ids(await filter_relevant("detector", chunks)) == ["c0", "c1", "c2"]
+    out = await filter_relevant("detector", chunks)
+    assert _ids(out.kept) == ["c0", "c1", "c2"]
+    assert out.verificado is False
 
     fake_openai.queue(make_json_completion({}, usage=make_usage(50, 5)))
-    assert _ids(await filter_relevant("detector", chunks)) == ["c0", "c1", "c2"]
+    out = await filter_relevant("detector", chunks)
+    assert _ids(out.kept) == ["c0", "c1", "c2"]
+    assert out.verificado is False
 
 
-async def test_filter_relevant_vacio_o_indices_invalidos_no_filtra(settings_override, fake_openai):
+async def test_filter_relevant_ninguno_relevante_es_una_respuesta_legitima(
+    settings_override, fake_openai
+):
+    """Lista vacía verificada: el índice no cubre el tema, y hay que decirlo."""
     chunks = _chunks(3)
     fake_openai.queue(make_json_completion({"relevantes": []}))
-    assert _ids(await filter_relevant("x", chunks)) == ["c0", "c1", "c2"]
 
+    out = await filter_relevant("x", chunks)
+
+    assert out.kept == []
+    assert out.verificado is True
+
+
+async def test_filter_relevant_ignora_indices_invalidos(settings_override, fake_openai):
+    chunks = _chunks(3)
     fake_openai.queue(make_json_completion({"relevantes": [7, -1, "no", True, 1]}))
-    assert _ids(await filter_relevant("x", chunks)) == ["c1"]
+
+    out = await filter_relevant("x", chunks)
+
+    assert _ids(out.kept) == ["c1"]
+    assert out.verificado is True
 
 
 async def test_filter_relevant_con_un_solo_chunk_no_llama(settings_override, fake_openai):
     chunks = _chunks(1)
-    assert await filter_relevant("x", chunks) == chunks
+
+    out = await filter_relevant("x", chunks)
+
+    assert out.kept == chunks
+    # No se llamó al modelo, así que no se puede afirmar que sea relevante.
+    assert out.verificado is False
     assert fake_openai.calls == []
 
 
-async def test_filter_relevant_si_el_api_falla_devuelve_todos(settings_override, fake_openai):
+async def test_filter_relevant_si_el_api_falla_devuelve_todos_sin_verificar(
+    settings_override, fake_openai
+):
     chunks = _chunks(3)
     fake_openai.queue(RuntimeError("api caída"))
     tel = telemetry.start()
-    assert _ids(await filter_relevant("x", chunks)) == ["c0", "c1", "c2"]
+
+    out = await filter_relevant("x", chunks)
+
+    assert _ids(out.kept) == ["c0", "c1", "c2"]
+    assert out.verificado is False
     assert len(tel.rounds) == 1 and tel.rounds[0].ok is False
     assert tel.rounds[0].component == "reranker"
 

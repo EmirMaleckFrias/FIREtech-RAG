@@ -1,38 +1,37 @@
-"""CLI de ingesta del RAG de productos.
+"""CLI de ingesta de documentos.
 
 Uso (desde backend/, con el venv activo):
-    python ingest.py --dry-run [--only <archivo>] [--source pdf|xlsx]
-    python ingest.py --environment local|production [--only <archivo>]
-                     [--source pdf|xlsx] [--reset --yes [--include-uploads]]
+    python ingest.py --dry-run ../documentos
+    python ingest.py --environment local ../documentos --proyecto alzheimer
+    python ingest.py --environment local doc1.pdf doc2.docx --max-usd 0.05
 
---dry-run   parse + chunk + validaciones SIN llamadas a OpenAI/Qdrant/Supabase;
-            imprime stats por archivo; exit code 1 si alguna validación falla.
+Acepta carpetas (recorridas hacia dentro) y archivos sueltos. Los formatos
+soportados los decide app/ingest/generic.py; lo demás se ignora en silencio.
+
+--dry-run   descubre y parsea SIN llamar a OpenAI, Qdrant ni Supabase, e
+            imprime cuántos chunks salen y CUÁNTO COSTARÍA embeberlos. Es lo
+            que hay que correr siempre antes de gastar.
 --environment
             OBLIGATORIO para la ingesta real (el dry-run puede omitirlo).
             Etiqueta las filas de `documents` en Supabase (prod y local
             comparten la tabla pero tienen Qdrants distintos). Se fija en la
             variable ENVIRONMENT antes de cargar la configuración; si esa
-            variable ya existe en el entorno con OTRO valor, el comando aborta
-            con exit 2. NO elige el Qdrant: ese sigue saliendo de QDRANT_URL
-            (.env); el preflight imprime el host para que lo confirmes.
---reset     borra y recrea la colección Qdrant antes de ingestar. Exige --yes
-            (si no, aborta con exit 2 sin tocar nada). Además, si la colección
-            contiene chunks de documentos subidos por usuarios (chunk_type
-            doc_text/doc_row), se niega salvo que se pase --include-uploads:
-            esos documentos se perderían y habría que volver a subirlos.
+            variable ya existe con otro valor, el comando aborta con exit 2.
+            NO elige el Qdrant: ese sale de QDRANT_URL (.env) y el preflight
+            imprime el host para que lo confirmes.
+--proyecto  etiqueta todos los chunks de esta corrida con ese project_id, para
+            poder acotar después las búsquedas a ese conjunto de documentos.
+--max-usd   tope de gasto: si el coste estimado de los embeddings lo supera,
+            aborta con exit 2 sin embeber nada.
+--force     reingiere aunque el archivo no haya cambiado (mismo sha256).
+--sin-recursion
+            no entra en las subcarpetas.
+--reset     borra y recrea la colección Qdrant antes de ingestar. Exige --yes.
 --yes       confirma la operación destructiva de --reset.
---include-uploads
-            junto con --reset: acepta perder los chunks de documentos subidos.
---only      procesa un solo archivo (p. ej. --only Catalogo_Aleum.pdf o
-            --only Catalogo_Aleum.xlsx).
---source    'xlsx' toma los valores de los Excel originales (data/raw_xlsx,
-            fuente de verdad) y cruza las páginas de cita desde el PDF por
-            número de fila; 'pdf' parsea los renders PDF (data/raw).
-            Default: xlsx si data/raw_xlsx existe y está completa, si no pdf.
 
 Antes de embeber nada, la ingesta real imprime un preflight (entorno, host y
-colección Qdrant con sus puntos, filas de `documents` del entorno) y solo
-entonces gasta tokens. Exit codes: 0 ok, 1 fallo, 2 abortado por una guarda.
+colección Qdrant con sus puntos, documentos registrados) y solo entonces gasta
+tokens. Exit codes: 0 ok, 1 fallo, 2 abortado por una guarda.
 """
 from __future__ import annotations
 
@@ -40,54 +39,58 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 
 ENVIRONMENTS = ("local", "production")
 
 
 def main() -> int:
-    # Consola Windows (cp1252) no imprime ■/á/°: forzar UTF-8 en stdout/err.
+    # Consola Windows (cp1252) no imprime acentos: forzar UTF-8 en stdout/err.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
 
-    parser = argparse.ArgumentParser(description="Ingesta de catálogos → Qdrant")
+    parser = argparse.ArgumentParser(
+        description="Ingesta de documentos hacia Qdrant"
+    )
+    parser.add_argument(
+        "rutas", nargs="+", metavar="RUTA",
+        help="carpetas o archivos a ingerir",
+    )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="parse + chunk + validaciones, sin OpenAI/Qdrant/Supabase",
+        help="parsea e informa del coste estimado, sin OpenAI/Qdrant/Supabase",
     )
     parser.add_argument(
         "--environment", choices=ENVIRONMENTS, default=None,
         help="entorno que etiqueta las filas de documents en Supabase; "
-             "obligatorio para la ingesta real (no para --dry-run). Fija la "
-             "variable ENVIRONMENT antes de cargar la configuración.",
+             "obligatorio para la ingesta real (no para --dry-run)",
+    )
+    parser.add_argument(
+        "--proyecto", metavar="ID", default=None,
+        help="project_id con el que se etiquetan los chunks de esta corrida",
+    )
+    parser.add_argument(
+        "--max-usd", type=float, default=None, metavar="USD",
+        help="aborta si el coste estimado de los embeddings supera este tope",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="reingiere aunque el archivo no haya cambiado (mismo sha256)",
+    )
+    parser.add_argument(
+        "--sin-recursion", action="store_true",
+        help="no entra en las subcarpetas",
     )
     parser.add_argument(
         "--reset", action="store_true",
-        help="borra y recrea la colección antes de ingestar (exige --yes; se "
-             "niega si hay chunks de documentos subidos salvo --include-uploads)",
+        help="borra y recrea la colección antes de ingestar (exige --yes)",
     )
     parser.add_argument(
         "--yes", action="store_true",
         help="confirma la operación destructiva de --reset",
-    )
-    parser.add_argument(
-        "--include-uploads", action="store_true",
-        help="con --reset: acepta perder los chunks de documentos subidos por "
-             "usuarios (chunk_type doc_text/doc_row) que haya en la colección",
-    )
-    parser.add_argument(
-        "--only", metavar="ARCHIVO", default=None,
-        help="procesa solo ese archivo (p. ej. Catalogo_Croker__2.pdf "
-             "o Catalogo_Croker__2.xlsx)",
-    )
-    parser.add_argument(
-        "--source", choices=("pdf", "xlsx"), default=None,
-        help="fuente de los valores: 'xlsx' = Excel originales (data/raw_xlsx,"
-             " fuente de verdad; páginas de cita cruzadas desde el PDF por"
-             " fila), 'pdf' = renders PDF (data/raw). Default: xlsx si"
-             " data/raw_xlsx está completa, si no pdf.",
     )
     args = parser.parse_args()
 
@@ -95,8 +98,7 @@ def main() -> int:
     if args.reset and not args.yes:
         print(
             "ABORTADO: --reset borra la colección Qdrant completa y exige "
-            "confirmación explícita. Repite el comando añadiendo --yes "
-            "(y --include-uploads si aceptas perder documentos subidos).",
+            "confirmación explícita. Repite el comando añadiendo --yes.",
             file=sys.stderr,
         )
         return 2
@@ -131,12 +133,14 @@ def main() -> int:
     from app.ingest.pipeline import run_ingest
 
     return run_ingest(
-        only=args.only,
+        targets=[Path(r) for r in args.rutas],
         dry_run=args.dry_run,
         reset=args.reset,
-        source=args.source,
         environment=args.environment,
-        include_uploads=args.include_uploads,
+        project_id=args.proyecto,
+        force=args.force,
+        recursive=not args.sin_recursion,
+        max_usd=args.max_usd,
     )
 
 

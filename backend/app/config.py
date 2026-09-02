@@ -32,11 +32,13 @@ class Settings(BaseSettings):
     # Versión del prompt del agente. Viaja en /api/health, /api/stats, en la
     # telemetría de cada respuesta y en los resultados de evals para que dos
     # mediciones solo se comparen si usaron el mismo prompt.
-    prompt_version: str = "v1"
+    prompt_version: str = "v2"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
-    qdrant_collection: str = "productos"
+    # Colección de documentos. La colección del proyecto anterior se queda
+    # intacta en su Qdrant: este backend ya no la mira.
+    qdrant_collection: str = "documentos"
 
     supabase_url: str = ""
     supabase_service_key: str = ""
@@ -50,7 +52,6 @@ class Settings(BaseSettings):
     max_hops: int = 4
     rerank_top_k: int = 8
     search_top_k: int = 30
-    sku_fastpath: bool = True  # match exacto de SKUs detectados en la consulta
     cors_origins: str = "http://localhost:5173"
 
     @property

@@ -1,7 +1,7 @@
 """Entrypoint serverless para Vercel.
 
 El runtime Python de Vercel detecta la variable módulo-level `app` (ASGI) y
-sirve la aplicación FastAPI completa — incluido el streaming SSE de /api/chat.
+sirve la aplicación FastAPI completa, incluido el streaming SSE de /api/chat.
 
 El código real vive en backend/app/, así que se añade backend/ al sys.path
 (relativo a este archivo: en el bundle de Vercel la raíz del repo se preserva,

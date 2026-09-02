@@ -1,6 +1,10 @@
-# SPEC: RAG de Productos (Protección Contra Incendios)
+# SPEC: RAG de documentos
 
 Contrato de arquitectura. Cualquier código del proyecto debe respetar estas interfaces.
+
+El sistema responde preguntas sobre un corpus de documentos propios, citando de dónde sale
+cada afirmación. No sabe nada del dominio de esos documentos: lo que entra es una carpeta de
+archivos y lo que sale son respuestas con su cita.
 
 ## Stack
 - **Vector DB**: Qdrant (local vía Docker Compose, o Qdrant Cloud vía env)
@@ -13,28 +17,32 @@ Contrato de arquitectura. Cualquier código del proyecto debe respetar estas int
 
 ## Estructura del repo
 ```
-Rag - Productos/
-├── data/raw/                  # los 6 PDFs fuente
+proyecto/
 ├── backend/
-│   ├── requirements.txt
+│   ├── requirements.txt       # + requirements-dev.txt (pytest)
 │   ├── .env.example
-│   ├── ingest.py              # CLI: python ingest.py --environment local|production
-│   │                          #      [--dry-run] [--reset --yes [--include-uploads]] [--only ...] [--source ...]
-│   ├── check_index.py         # solo lectura: estado real del índice (ver docs/OPERACION.md)
+│   ├── ingest.py              # CLI: python ingest.py [--dry-run] RUTA...
+│   │                          #      [--environment local|production] [--proyecto ID]
+│   │                          #      [--max-usd X] [--force] [--reset --yes]
+│   ├── tests/                 # pytest offline: sin red, sin OpenAI, sin Qdrant
 │   └── app/
 │       ├── main.py            # FastAPI app + CORS
 │       ├── config.py          # pydantic-settings, lee .env
-│       ├── api/routes.py      # endpoints REST + SSE
+│       ├── models.py          # Chunk, SearchFilters, SourceRef
+│       ├── api/
+│       │   ├── routes.py      # endpoints REST + SSE
+│       │   └── documents.py   # subir, listar y borrar documentos
 │       ├── services/
 │       │   ├── qdrant.py      # cliente, setup colección, hybrid search
 │       │   ├── embeddings.py  # OpenAI embeddings con batching
-│       │   ├── reranker.py    # reranking LLM listwise
+│       │   ├── openai_client.py  # cliente único + semáforo de concurrencia
+│       │   ├── reranker.py    # reranking listwise + filtro de relevancia
+│       │   ├── telemetry.py   # usage y coste estimado por petición
 │       │   ├── agent.py       # agente multi-hop con tool calling
 │       │   └── supabase_db.py # persistencia chat
 │       └── ingest/
-│           ├── parse.py       # parseo PDF por archivo (estructura específica)
-│           ├── chunk.py       # chunking según SPEC de síntesis
-│           └── pipeline.py    # orquesta: parse → chunk → embed → upsert
+│           ├── generic.py     # parseo por formato, produce los chunks
+│           └── pipeline.py    # descubrir → parse → embed → upsert
 ├── frontend/                  # Vite + React + TS
 ├── supabase/migrations/       # 001..007, aplicar EN ORDEN (esquema, estados de
 │                              # documentos, entornos, auth, bloqueo, revocaciones)
@@ -43,7 +51,7 @@ Rag - Productos/
 ```
 
 ## Colección Qdrant
-- Nombre: `productos` (env `QDRANT_COLLECTION`)
+- Nombre: `documentos` (env `QDRANT_COLLECTION`)
 - Vectores nombrados:
   - `dense`: 3072 dims, coseno (OpenAI text-embedding-3-large)
   - `bm25`: sparse vector (BM25 vía fastembed). Si fastembed no está disponible la búsqueda
@@ -55,30 +63,28 @@ Rag - Productos/
   ```json
   {
     "text": "texto completo del chunk (lo que ve el LLM)",
-    "source_file": "Catalogo_Reliable_1.pdf",
+    "source_file": "estudio_cohorte.pdf",
     "page": 3,
-    "brand": "Reliable",
-    "category": "sprinklers",
-    "skus": ["RA1414", "..."],
-    "product_names": ["..."],
-    "has_price": true,
-    "supplier": "RELIABLE",
-    "price_usd": 123.45,
-    "price_status": "numeric | call | discontinued | missing",
-    "chunk_type": "product | family_summary | doc_text | doc_row"
+    "project_id": "id del proyecto o null",
+    "document_id": "id del documento o null",
+    "section": "Métodos",
+    "language": "es",
+    "document_type": "pdf | docx | xlsx | csv | txt | md",
+    "source_pages": [3, 4],
+    "metadata": {},
+    "chunk_type": "text | table",
+    "title": "título del trabajo, si el documento es un artículo",
+    "citation": "Allegri et al., 2021",
+    "doi": "10.1016/j.jalz.2021.04.002"
   }
   ```
-  `product` y `family_summary` salen de los 6 catálogos; `doc_text` y `doc_row` de los
-  documentos subidos por la API (ver "Parseo genérico"). El payload completo (campos ricos del
-  esquema canónico, costo interno incluido) es `_PAYLOAD_KEYS` en `app/services/qdrant.py`
-  más `price_usd`, que `upsert_chunks` deriva al indexar (`price_net_usd` si existe, si no
-  `price_list_usd`; None sin precio numérico); `_point_to_chunk` no expone los internos.
-- Índices de payload (9): `brand`, `category`, `source_file`, `has_price` (bool), `skus`,
-  `supplier`, `chunk_type` (keyword), `price_usd` (float, lo usa el orden por precio) y
-  `price_status` (keyword). La lista vive en `qdrant.PAYLOAD_INDEXES` (los crea
-  `ensure_collection` con la colección) y, duplicada a propósito, en
-  `check_index.EXPECTED_INDEXES`; `check_index.py` compara los existentes con ella y
-  `--apply-indexes` crea los que falten en una colección ya existente.
+  La lista es CERRADA: `_PAYLOAD_KEYS` en `app/services/qdrant.py` es una lista blanca, así
+  que lo que el parser no declare ahí no llega nunca al índice y un campo nuevo en la
+  ingesta no se filtra por accidente.
+- Índices de payload (6): `project_id`, `document_id`, `document_type`, `language`,
+  `source_file` y `chunk_type`, todos keyword. La lista vive en `qdrant.PAYLOAD_INDEXES` y
+  la crea `ensure_collection` junto con la colección. `project_id` y `document_id` son
+  además la frontera de acceso: sin su índice, una búsqueda acotada sería un escaneo.
 
 ## API Backend (contrato para el frontend)
 Base: `http://localhost:8000`
@@ -92,18 +98,24 @@ Base: `http://localhost:8000`
 `dense-only` (el estado permanente de producción).
 
 ### `POST /api/search`
-Body: `{ "query": str, "top_k": int = 8, "brand": str|null, "category": str|null }`
-→ `{ "results": [{ "text", "score", "source_file", "page", "brand", "category", "skus" }] }`
+Body: `{ "query": str, "top_k": int = 8, "project_id": str|null, "document_id": str|null,
+         "document_type": str|null, "language": str|null }`
+→ `{ "results": [{ "text", "score", "source_file", "page", "section", "document_type",
+                   "language", "project_id", "document_id" }] }`
+Búsqueda cruda, sin agente ni reranker: sirve para depurar el retrieval.
 
 ### `POST /api/chat`  (SSE stream)
 Body: `{ "session_id": str|null, "message": str }`
 Respuesta: `text/event-stream`, eventos:
 - `event: session` → `data: {"session_id": "uuid"}` (primero, siempre)
-- `event: hop` → `data: {"n": 1, "query": "resumen legible de la llamada a consultar_catalogo"}`
+- `event: hop` → `data: {"n": 1, "query": "resumen legible de la llamada a buscar_documentos"}`
   (una por llamada a la herramienta). El mismo dict, ya persistido en `chat_messages.hops`,
   lleva además `ms` (duración), `resultados` (chunks devueltos) y `chars` (tamaño del texto
   que volvió al modelo): el agente lo muta in place tras ejecutar la llamada.
-- `event: sources` → `data: {"sources": [{"source_file", "page", "brand", "snippet", "score"}]}` (antes de los tokens; puede re-emitirse durante el stream: el frontend usa el ÚLTIMO evento recibido)
+- `event: sources` → `data: {"sources": [SourceRef...]}` con `source_file`, `page`,
+  `section`, `document_type`, `language`, `project_id`, `document_id`, `source_pages`,
+  `chunk_type`, `snippet` y `score` (antes de los tokens; puede re-emitirse durante el
+  stream: el frontend usa el ÚLTIMO evento recibido)
 - `event: token` → `data: {"text": "..."}` (delta de texto de la respuesta)
 - `event: metrics` → `data: telemetry.summary()` (aditivo, justo antes de `done`; el frontend
   lo ignora hoy). Payload: `ms_total`, `rounds_total`, `agent_rounds`,
@@ -170,7 +182,7 @@ Slide-over (bottom sheet en móvil) que se abre desde el pie del sidebar, con pe
 
 `GET /api/stats` (solo admin) →
 ```json
-{ "index": {"products", "chunks", "files", "suppliers": []},
+{ "index": {"chunks", "files", "types": [], "languages": []},
   "activity": {"questions_total", "questions_7d", "active_users_7d", "feedback_up", "feedback_down"},
   "config": {"model", "rerank_model", "embedding_model", "max_hops", "prompt_version",
              "search_top_k", "rerank_top_k", "openai_concurrency",
@@ -223,28 +235,57 @@ proceso, si no `dense-only`.
 ### Gestión de documentos (indexación dinámica)
 
 #### `GET /api/documents`
-→ `{ "documents": [{ "id", "file_name", "pages": int, "chunks": int, "brand": str, "status": "processing"|"ready"|"failed", "error": str|null, "ingested_at" }] }`
-Incluye los 6 catálogos originales (status "ready") y todo documento subido después.
+→ `{ "documents": [{ "id", "file_name", "pages": int, "chunks": int, "status": "processing"|"ready"|"failed", "error": str|null, "ingested_at" }] }`
+Todos los documentos registrados, en orden de ingesta.
 
 #### `POST /api/documents/upload`  (multipart/form-data, campo `file`)
-Extensiones permitidas: .pdf .xlsx .csv .txt .md · máx 25 MB · nombre saneado (sin rutas).
+Extensiones permitidas: .pdf .docx .xlsx .csv .txt .md · máx 25 MB en local y 4 MB en
+Vercel (`upload_limit_mb` en `/api/health` dice el vigente) · nombre saneado (sin rutas).
 Rechazos → 400 con `{ "detail" }`. Duplicado de un archivo ya indexado → 409 (usar DELETE primero).
 → 202 `{ "id", "file_name", "status": "processing" }` y la ingesta corre en background
-(FastAPI BackgroundTasks): parseo genérico → chunking → embeddings → upsert a Qdrant →
-registro con status "ready" (o "failed" + error). El archivo se guarda en `data/uploads/`.
+(FastAPI BackgroundTasks): parseo → chunking → embeddings → upsert a Qdrant → registro con
+status "ready" (o "failed" + error). El archivo se guarda en `data/uploads/`.
 
 #### `DELETE /api/documents/{file_name}`
-Borra los puntos de Qdrant (`delete_by_file`) + el registro. Los 6 catálogos base NO se
-pueden borrar por esta vía (403). → `{ "ok": true }`
+Borra los puntos de Qdrant (`delete_by_file`) + el registro. → `{ "ok": true }`
 
-**Parseo genérico** (`app/ingest/generic.py`, para documentos que no son los 6 catálogos):
+**Parseo** (`app/ingest/generic.py`, el único camino de ingesta; lo comparten la subida por
+la web y el CLI):
 - PDF → texto por página (pdfplumber), chunks por párrafos ~400 tokens con overlap 15%,
-  `page` = primera página del chunk, `source_pages` = todas, `chunk_type` = "doc_text".
+  `page` = primera página del chunk, `source_pages` = todas, `chunk_type` = "text".
+- DOCX → párrafos agrupados por sección (el encabezado vigente, detectado por estilo) sin
+  mezclar dos secciones en un chunk, más una tabla por chunk (`chunk_type` = "table",
+  numeradas 1..n). Word no tiene páginas: las calcula el visor al renderizar.
+- **Conciencia de artículo** (`app/ingest/paper.py`, solo PDF, todo determinista y sin LLM):
+  - `section`: el encabezado vigente, arrastrado desde el último detectado. Se reconocen las
+    secciones habituales en inglés y español, con numeración (`3. Methods`, `III. RESULTADOS`).
+    La detección exige que la línea COMPLETA sea el nombre de la sección, para que "the methods
+    described by Smith et al." no cuente como encabezado. Un chunk nunca mezcla dos secciones.
+  - `title`, `citation` y `doi`: el título sale del bloque de mayor tamaño de fuente de la
+    cabecera, exigiendo que sea estrictamente mayor que el cuerpo (si no, no hay título
+    maquetado y no se inventa uno); el apellido del primer autor, de la línea siguiente; el
+    año, de la vecindad del DOI y descartando las líneas de marca de descarga, porque un PDF
+    bajado en 2026 no es un artículo de 2026. Si algo no se puede extraer con confianza queda
+    vacío y la cita cae al nombre del archivo: nunca se fabrica una referencia.
+  - La **bibliografía se descarta** por defecto (`skip_references=True`): son títulos de
+    trabajos ajenos, matchean con casi cualquier consulta, no son evidencia de nada y se pagan
+    igual al embeberlos (medido en un artículo de prueba: 30% menos tokens).
+  - Se descartan las marcas de agua de revista y las **cabeceras y pies repetidos**, detectados
+    por aparecer en el borde de al menos el 60% de las páginas y en 3 o más. Solo se miran las
+    dos primeras y dos últimas líneas de cada página: perder contenido por una frase repetida
+    sería mucho peor que arrastrar una cabecera.
 - XLSX/CSV → detección de fila de encabezado, un chunk por fila ("Campo: valor"),
-  `chunk_type` = "doc_row", `page` = número de fila.
+  `chunk_type` = "table", `page` = número de fila.
 - TXT/MD → chunks por párrafos, `page` = índice de chunk (1-based).
-- Payload: mismas claves de `_PAYLOAD_KEYS` (brand/category "", has_price false, skus =
-  tokens tipo SKU detectados en el chunk para el fast-path). Citas: `[archivo, pág. X]`.
+- .doc (Word 97-2003) se rechaza con un error que dice cómo convertirlo.
+- **Citas honestas**: no todo formato tiene páginas, así que el localizador lo decide
+  `Chunk.locator()` según lo que exista de verdad: `pág. N` en PDF, `fila N` en hoja de
+  cálculo, `tabla N` en una tabla de Word, `sección: X` si hay encabezado y `fragmento N`
+  como último recurso. A quién se cita lo decide `Chunk.fuente()`: la referencia del trabajo
+  (`citation`) si se conoce, y el nombre del archivo si no. `_format_results` entrega la cita
+  ya montada para que el modelo la copie literal; el prompt le prohíbe inventarse un número
+  de página. El evento `sources` lleva `citation`, `title`, `doi` y `locator` resueltos, para
+  que el frontend muestre la misma cita que usa el modelo en vez de reconstruirla.
 - La tabla `documents` gana columnas `status text default 'ready'` y `error text`
   (migración `002_document_status.sql`).
 
@@ -253,47 +294,48 @@ pueden borrar por esta vía (403). → `{ "ok": true }`
 ### `POST /api/feedback` Body: `{ "message_id": str, "rating": 1|-1, "comment": str|null }` → `{ "ok": true }`
 
 ## Agente multi-hop
-- Loop de tool calling con OpenAI. UNA sola tool general, `consultar_catalogo`, que
-  expone el álgebra de consulta del catálogo estructurado (el enrutamiento vive en el
-  MOTOR, no en reglas del prompt por tipo de pregunta):
-  `{ semantico?, suplidor?, marca?, precio_min?, precio_max?,
-     ordenar?: precio_asc|precio_desc, agrupar_por?: suplidor|marca|archivo,
-     limite?, por_grupo? }`
-  - Solo `semantico` → híbrida/dense + fast-path de SKU + reranker (top 8).
-  - `ordenar` sin `semantico` → scroll de Qdrant ordenado por el payload `price_usd`
-    (neto si existe, si no lista; lo escribe `upsert_chunks` en cada ingesta y en las
-    colecciones actuales llegó por backfill sin re-embeber), EXACTO y sin LLM.
-  - `ordenar` + `semantico` → pool híbrido + clasificación binaria de relevancia +
-    orden por precio real.
-  - `agrupar_por` con `ordenar` → un scroll exacto por grupo ("el más barato de cada
-    suplidor" = UNA llamada). `agrupar_por` solo → conteos reales por facets
-    ("¿cuántas marcas hay?").
-  - `suplidor` filtra en Qdrant por el payload `supplier` (exacto y confiable);
-    `marca` es post-filtro por término, tolerante a los errores de etiquetado del
-    origen. Pool vacío se reporta vacío: sin fallbacks silenciosos.
+- Loop de tool calling con OpenAI. UNA sola tool, `buscar_documentos`:
+  `{ semantico, project_id?, document_id?, document_type?, language?, limit? }`
+  (`limit` entre 1 y 20; por defecto `RERANK_TOP_K`).
+- Cada llamada la resuelve `_execute_document_search`: `hybrid_search` (top
+  `SEARCH_TOP_K`) → `rerank` (top `limit`) → `filter_relevant`.
+- **Contrato de honestidad del resultado**, que es lo que permite responder "no encuentro
+  esto" en vez de citar fragmentos de otro tema. La herramienta devuelve un texto distinto
+  en cada situación:
+  - Qdrant no devuelve nada → se dice, y se menciona si había filtros puestos.
+  - El filtro verificó que NINGÚN fragmento aporta evidencia → se le dice al modelo que el
+    índice no cubre el tema y que no lo presente como un fallo de búsqueda.
+  - Filtrado parcial → se declara cuántos aportan evidencia y cuántos se descartaron.
+  - El filtro no se pudo aplicar (API caída, JSON roto) → aviso explícito de que la
+    relevancia no está verificada, en vez de callarlo.
 - Guard de deduplicación: una llamada idéntica repetida no se re-ejecuta ni consume
-  presupuesto. Máximo `MAX_HOPS` llamadas por pregunta (con la tool compuesta, las
-  preguntas de agregación resuelven en 1).
+  presupuesto. Máximo `MAX_HOPS` llamadas por pregunta.
 - Cliente OpenAI único por loop (`app/services/openai_client.py`) con semáforo
   (`OPENAI_CONCURRENCY`), timeout y reintentos de settings. Cada ronda se pide con
   `stream_options: {include_usage: true}` y se registra en `app/services/telemetry.py`
   (componente `agente`); el reranker y los embeddings registran los suyos. El resumen sale
   como evento SSE `metrics`.
-- **Fidelidad**: system prompt exige responder SOLO con lo recuperado, citar `[archivo, pág. X]`
-  en cada afirmación factual, y decir explícitamente cuando algo no está en los catálogos.
-  Precios siempre con moneda y con la advertencia de que provienen del catálogo (pueden estar desactualizados).
+- **Fidelidad**: el system prompt exige responder SOLO con lo recuperado, copiar LITERAL la
+  cita que trae cada resultado en su cabecera, decir explícitamente cuando algo no está en
+  los documentos, conservar unidades y nombres tal como aparecen en la fuente, y distinguir
+  evidencia directa de interpretación y de ausencia de evidencia.
 - Respuesta final en streaming.
 
-## Reranker
-- Listwise LLM: un solo request con query + candidatos numerados → JSON `{"ranking": [idx...], "scores": {...}}`.
-- Modelo: `RERANK_MODEL` (default `gpt-5.4-mini`; vacío = hereda `OPENAI_MODEL`). Corta a
-  `RERANK_TOP_K=8`. También lo usa el filtro binario de relevancia del camino de precios.
-- Fallback: si el JSON falla, mantener orden de Qdrant.
+## Reranker y filtro de relevancia
+- `rerank`: listwise, un solo request con query + candidatos numerados → JSON
+  `{"ranking": [idx...]}`. Ordena por evidencia aportada, no por parecido de palabras.
+  Si hay `top_k` o menos candidatos no llama al LLM. Fallback: orden de Qdrant.
+- `filter_relevant`: clasificación binaria por fragmento que PRESERVA el orden de entrada.
+  Devuelve `RelevanceOutcome(kept, verificado, motivo)` con tres estados distinguibles:
+  hay relevantes, ninguno es relevante (verificado, y es una respuesta legítima), o no se
+  pudo verificar. Esa distinción es la que consume el agente; sin ella no hay forma de
+  saber si una lista vacía significa "no hay" o "falló algo".
+- Modelo: `RERANK_MODEL` (default `gpt-5.4-mini`; vacío = hereda `OPENAI_MODEL`).
 
 ## Supabase (tablas)
 - `chat_sessions(id uuid pk, title text, created_at)`
 - `chat_messages(id uuid pk, session_id fk, role text, content text, sources jsonb, hops jsonb, created_at)`
-- `documents(id uuid pk, file_name text unique, sha256 text, pages int, chunks int, brand text, ingested_at)`
+- `documents(id uuid pk, file_name text, sha256 text, pages int, chunks int, brand text, environment text, ingested_at)` con unique `(file_name, environment)` desde la migración 006. La columna `brand` es heredada y ya no se usa.
 - `ingestion_runs(id uuid pk, started_at, finished_at, status text, stats jsonb, error text)`
 - `message_feedback(id uuid pk, message_id fk, rating int, comment text, created_at)`
 - El frontend NUNCA habla con Supabase directo: todo pasa por el backend (service key solo en backend).
@@ -310,13 +352,12 @@ OPENAI_CONCURRENCY=3        # semáforo de llamadas concurrentes a OpenAI
 PROMPT_VERSION=v1           # etiqueta del prompt; viaja en health, stats, metrics y evals
 QDRANT_URL=http://localhost:6333
 QDRANT_API_KEY=          # vacío para local
-QDRANT_COLLECTION=productos
+QDRANT_COLLECTION=documentos
 SUPABASE_URL=
 SUPABASE_SERVICE_KEY=
 MAX_HOPS=4
 RERANK_TOP_K=8
 SEARCH_TOP_K=30
-SKU_FASTPATH=true
 ENVIRONMENT=local        # 'production' en Vercel
 CORS_ORIGINS=http://localhost:5173
 ```
@@ -336,9 +377,11 @@ def get_client() -> qdrant_client.QdrantClient: ...
 def ensure_collection() -> None            # crea colección + índices payload si no existen (idempotente)
 def collection_count() -> int | None       # None si Qdrant no responde
 def upsert_chunks(chunks: list[dict]) -> int
-    # cada dict: {"id": str(uuid), "text", "source_file", "page", "brand", "category",
-    #             "skus", "product_names", "has_price", "chunk_type", "dense": list[float]}
-    # calcula bm25 internamente si fastembed está disponible
+    # cada dict: las claves de _PAYLOAD_KEYS (lista blanca) + "id" + "dense": list[float].
+    # Lo que no esté en _PAYLOAD_KEYS se descarta; lo que falte queda en None.
+    # Calcula bm25 internamente si fastembed está disponible.
+def index_inventory() -> dict
+    # inventario en vivo por facets: total_chunks, archivos, tipos, idiomas, proyectos
 def delete_by_file(source_file: str) -> None
 async def hybrid_search(query: str, filters: SearchFilters, top_k: int) -> list[Chunk]
     # dense (embed_query) + bm25 con fusión RRF vía Query API de Qdrant; fallback dense-only sin fastembed
@@ -348,6 +391,15 @@ async def hybrid_search(query: str, filters: SearchFilters, top_k: int) -> list[
 ```python
 async def rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]
     # listwise LLM (JSON mode). Ante cualquier fallo devuelve chunks[:top_k] con warning en log.
+
+@dataclass(frozen=True)
+class RelevanceOutcome:
+    kept: list[Chunk]      # fragmentos que aportan evidencia
+    verificado: bool       # False = el filtro no se pudo aplicar, no concluyas nada
+    motivo: str
+
+async def filter_relevant(query: str, chunks: list[Chunk]) -> RelevanceOutcome
+    # kept=[] con verificado=True significa "ninguno sirve", y es una respuesta legítima.
 ```
 
 `app/services/agent.py`:
@@ -359,18 +411,12 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
     #   sources: {"sources": [SourceRef.model_dump()]}
     #   token: {"text": str} | final: {"content": str, "sources": [...], "hops": [...]}
     # Internamente: loop de tool-calling (máx MAX_HOPS) con UNA sola tool,
-    # consultar_catalogo (_CATALOG_TOOL), parámetros: semantico, suplidor, marca,
-    # precio_min, precio_max, ordenar (precio_asc|precio_desc),
-    # agrupar_por (suplidor|marca|archivo), limite (default 8, máx 20),
-    # por_grupo (default 3, máx 5). Cada llamada la resuelve _execute_catalog_query:
-    #   - agrupar_por sin ordenar ni semantico → conteos reales por facets;
-    #   - agrupar_por + ordenar → scan_by_price por grupo (scroll ordenado por price_usd);
-    #   - ordenar solo → scan_by_price sobre el payload, exacto y sin LLM;
-    #   - ordenar + semantico → _execute_price_search: pool híbrido (120) filtrado por
-    #     suplidor en Qdrant o por marca como post-filtro, orden por price_usd del payload
-    #     y filtro binario de relevancia (filter_relevant) que preserva el orden;
-    #   - semantico solo → _execute_search: hybrid_search(top SEARCH_TOP_K) + fast-path
-    #     de SKU + rerank(→ RERANK_TOP_K).
+    # buscar_documentos (_DOCUMENT_SEARCH_TOOL), parámetros: semantico, project_id,
+    # document_id, document_type, language, limit (1..20, default RERANK_TOP_K).
+    # Cada llamada la resuelve _execute_document_search:
+    #   hybrid_search(top SEARCH_TOP_K) → rerank(top limit) → filter_relevant,
+    #   y el texto devuelto declara qué pasó (nada recuperado, ninguno relevante,
+    #   filtrado parcial, o relevancia sin verificar). Ver "Agente multi-hop".
     # Una llamada con parámetros idénticos a una ya ejecutada no se repite. Cada ronda
     # del LLM va con stream_options include_usage y se registra en telemetry; la
     # respuesta final se emite en streaming.
@@ -384,15 +430,17 @@ def list_sessions() -> list[dict]
 def get_messages(session_id: str) -> list[dict]
 def save_message(session_id: str, role: str, content: str, sources: list, hops: list) -> dict  # devuelve fila con id
 def save_feedback(message_id: str, rating: int, comment: str | None) -> None
-def register_document(file_name: str, sha256: str, pages: int, chunks: int, brand: str) -> None
+def register_document(file_name: str, sha256: str, pages: int, chunks: int, brand: str = "") -> None
 def start_run() -> str | None; def finish_run(run_id, status, stats, error=None) -> None
 # Si SUPABASE_URL está vacío → fallback en memoria (dicts módulo-level) con los mismos contratos.
 ```
 
 ## Frontend (requisitos)
 - Chat con streaming SSE (fetch + ReadableStream, parsear eventos del contrato de arriba).
-- Panel lateral de fuentes: badges `archivo · pág. X · marca`, snippet expandible, score.
-- Indicador de hops del agente ("🔍 buscando: rociadores k-factor...") mientras piensa.
+- Panel lateral de fuentes: badges `archivo · localizador · sección`, snippet expandible,
+  score. El localizador es el que traiga la fuente (página, sección, fila o tabla): la UI
+  no debe asumir que todo documento tiene páginas.
+- Indicador de hops del agente ("buscando: biomarcadores en LCR...") mientras piensa.
 - Lista de sesiones (GET /api/sessions), crear nueva, continuar existente.
 - Feedback 👍/👎 por mensaje → POST /api/feedback.
 - Español, tema oscuro/claro según sistema, sin librerías UI pesadas (CSS propio está bien).

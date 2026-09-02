@@ -1,9 +1,8 @@
-# Operación del RAG de catálogos FIREtech
+# Operación del RAG de documentos
 
-Guía práctica para quien opera el sistema: qué rotar, qué configurar, cómo ingerir,
-cómo comprobar el índice, cómo medir y cómo desplegar. El contrato técnico vive en
-[SPEC.md](../SPEC.md); el panorama general, en el [README](../README.md). Aquí solo hay
-comandos y decisiones operativas.
+Guía práctica para quien opera el sistema: qué rotar, qué configurar, cómo ingerir y cómo
+desplegar. El contrato técnico vive en [SPEC.md](../SPEC.md); el panorama general, en el
+[README](../README.md). Aquí solo hay comandos y decisiones operativas.
 
 Convenciones: los comandos se ejecutan desde `backend/` con el venv del proyecto
 (`.venv\Scripts\python.exe`, Python 3.14 en local). En PowerShell conviene añadir `-X utf8`
@@ -36,8 +35,7 @@ versiona (está en `.gitignore` y en `.vercelignore`).
 ## 2. Variables de entorno
 
 Las lee `backend/app/config.py` (pydantic-settings) desde `backend/.env` en local y desde las
-variables del proyecto en Vercel en producción. Las de `backend/.env.example` más las nuevas de
-la Fase 0:
+variables del proyecto en Vercel en producción.
 
 | Variable | Default en código | Dónde vive | Notas |
 |---|---|---|---|
@@ -45,20 +43,19 @@ la Fase 0:
 | `OPENAI_MODEL` | `gpt-5.4` | local `.env` y Vercel | Modelo del agente |
 | `EMBEDDING_MODEL` | `text-embedding-3-large` | local `.env` y Vercel | Cambiarlo obliga a reindexar |
 | `EMBEDDING_DIMS` | `3072` | normalmente no se toca | Debe coincidir con el vector `dense` de la colección |
-| `RERANK_MODEL` | `gpt-5.4-mini` | local `.env` y Vercel | Reranker y filtro de relevancia. Recomendación explícita: fijar `RERANK_MODEL=gpt-5.4-mini` en Vercel. Antes heredaba `OPENAI_MODEL` y un despliegue sin la variable rerankeaba con `gpt-5.4` (unas 5 veces más caro por token). Vacío = hereda `OPENAI_MODEL` |
+| `RERANK_MODEL` | `gpt-5.4-mini` | local `.env` y Vercel | Reranker y filtro de relevancia. Recomendación explícita: fijar `RERANK_MODEL=gpt-5.4-mini` en Vercel. Vacío = hereda `OPENAI_MODEL`, unas 5 veces más caro por token |
 | `OPENAI_TIMEOUT_S` | `120` | local `.env` y Vercel | Timeout por request del cliente OpenAI único |
-| `OPENAI_MAX_RETRIES` | `2` | local `.env` y Vercel | Reintentos del SDK ante 429/5xx |
+| `OPENAI_MAX_RETRIES` | `2` | local `.env` y Vercel | Reintentos del SDK ante 429 o 5xx |
 | `OPENAI_CONCURRENCY` | `3` | local `.env` y Vercel | Semáforo de llamadas concurrentes a OpenAI por proceso |
-| `PROMPT_VERSION` | `v1` | local `.env` y Vercel | Etiqueta del prompt del agente; viaja en health, stats, telemetría y evals |
+| `PROMPT_VERSION` | `v1` | local `.env` y Vercel | Etiqueta del prompt del agente; viaja en health, stats y telemetría |
 | `QDRANT_URL` | `http://localhost:6333` | local `.env` y Vercel | En Vercel apunta al cluster de Qdrant Cloud |
 | `QDRANT_API_KEY` | vacío | Vercel (local vacío) | Clave del cluster |
-| `QDRANT_COLLECTION` | `productos` | local `.env` y Vercel | |
+| `QDRANT_COLLECTION` | `documentos` | local `.env` y Vercel | La colección `productos` del proyecto anterior sigue en su Qdrant y este backend ya no la mira |
 | `SUPABASE_URL` | vacío | local `.env` y Vercel | Vacía en local = modo dev sin autenticación, persistencia en memoria |
 | `SUPABASE_SERVICE_KEY` | vacío | local `.env` y Vercel | Solo en el backend, jamás en el frontend |
-| `MAX_HOPS` | `4` | local `.env` y Vercel | Tope de llamadas a la herramienta por pregunta. Vercel tiene hoy 8, heredado del flujo de tres herramientas; con `consultar_catalogo` las agregaciones resuelven en 1 llamada. Revisar el valor en Vercel con los evals antes de bajarlo |
-| `RERANK_TOP_K` | `8` | local `.env` y Vercel | Chunks que llegan al agente tras el rerank |
+| `MAX_HOPS` | `4` | local `.env` y Vercel | Tope de llamadas a la herramienta por pregunta. Comprobar el valor real en `/api/health`: en Vercel quedó en 8 del proyecto anterior |
+| `RERANK_TOP_K` | `8` | local `.env` y Vercel | Fragmentos que llegan al agente tras el rerank |
 | `SEARCH_TOP_K` | `30` | local `.env` y Vercel | Candidatos que salen de Qdrant antes del rerank |
-| `SKU_FASTPATH` | `true` | local `.env` | Match exacto de SKUs detectados en la consulta |
 | `ENVIRONMENT` | `local` | local `.env` (`local`) y Vercel (`production`) | Separa el registro de `documents` por entorno; también lo exige `ingest.py` |
 | `CORS_ORIGINS` | `http://localhost:5173` | local `.env` | En Vercel no hace falta: frontend y API comparten dominio |
 | `VITE_SUPABASE_URL` | | `frontend/.env` y Vercel (build) | Frontend |
@@ -66,153 +63,55 @@ la Fase 0:
 
 Después de cambiar una variable en Vercel hace falta un redeploy: las funciones leen el entorno
 al arrancar. `GET /api/health` y el bloque `config` de `GET /api/stats` muestran los valores
-vigentes (`model`, `rerank_model`, `max_hops`, `prompt_version`, `retrieval`, `bm25_backend`,
-`python`, `environment` en ambos; `/api/stats` añade `embedding_model`, `search_top_k`,
-`rerank_top_k`, `openai_concurrency`, `upload_limit_mb` y `qdrant_version`), así que la forma
-de confirmar un cambio es mirarlos ahí, no suponerlo.
+vigentes, así que la forma de confirmar un cambio es mirarlos ahí, no suponerlo.
 
 ## 3. Ingesta
 
-Los catálogos (`data/raw_xlsx/*.xlsx`, con los PDF de `data/raw/` para las páginas de cita) no
-están versionados. `ingest.py` corre desde `backend/`:
+El mismo parser (`app/ingest/generic.py`) alimenta los dos caminos: la subida por la web y el
+CLI. Formatos: `.pdf .docx .xlsx .csv .txt .md`.
 
 ```powershell
-# Solo parse + chunk + validaciones. No llama a OpenAI, Qdrant ni Supabase.
-.venv\Scripts\python.exe -X utf8 ingest.py --dry-run
+# Descubre, parsea e informa del coste. No llama a OpenAI, Qdrant ni Supabase.
+.venv\Scripts\python -X utf8 ingest.py --dry-run ..\documentos
 
 # Ingesta real al Qdrant local (QDRANT_URL de backend/.env).
-.venv\Scripts\python.exe -X utf8 ingest.py --environment local
+.venv\Scripts\python -X utf8 ingest.py --environment local ..\documentos
+
+# Etiquetando el conjunto, para poder acotar las búsquedas después.
+.venv\Scripts\python -X utf8 ingest.py --environment local ..\documentos --proyecto tesis
+
+# Con tope de gasto: aborta con exit 2 si el estimado lo supera, sin embeber nada.
+.venv\Scripts\python -X utf8 ingest.py --environment local ..\documentos --max-usd 0.05
 
 # Ingesta real a producción: QDRANT_URL y QDRANT_API_KEY deben apuntar al cluster
 # de Qdrant Cloud (por .env o por variables de entorno de la sesión).
-.venv\Scripts\python.exe -X utf8 ingest.py --environment production
-
-# Un solo archivo, o forzar la fuente.
-.venv\Scripts\python.exe -X utf8 ingest.py --environment local --only Catalogo_Croker__2.xlsx
-.venv\Scripts\python.exe -X utf8 ingest.py --environment local --source pdf
+.venv\Scripts\python -X utf8 ingest.py --environment production ..\documentos
 
 # Reset: borra y recrea la colección antes de ingerir. Pide confirmación explícita.
-.venv\Scripts\python.exe -X utf8 ingest.py --environment local --reset --yes
+.venv\Scripts\python -X utf8 ingest.py --environment local ..\documentos --reset --yes
 ```
 
-Guardas que hay que conocer:
+Lo que hay que tener claro:
 
-- `--environment {local,production}` es obligatorio en toda ingesta real. En `--dry-run` no se
-  pide, porque no toca ningún servicio.
-- Antes de embeber, el preflight imprime el host de Qdrant, la colección, cuántos puntos tiene y
-  cuántas filas hay en la tabla `documents` para ese entorno. Léelo: es el momento de abortar si
-  el host no es el que esperabas.
-- `--reset` exige `--yes`, y se niega si la colección contiene documentos subidos por usuarios
-  (`chunk_type` `doc_text` o `doc_row`), porque el reset los borraría y no hay forma de
-  regenerarlos desde `data/`. Solo se fuerza con `--include-uploads`, a sabiendas.
-- Las validaciones corren siempre, también en `--dry-run`. Si un costo interno (`COSTO
-  FIRETECH`, `Unit Cost`) aparece en un texto que se va a embeber, `find_cost_leaks` lo detecta y
-  la ingesta aborta con exit code 1 antes de tocar OpenAI o Qdrant.
+- **Siempre `--dry-run` primero.** Es lo único que dice cuánto va a costar antes de costarlo,
+  y no puede gastar: los imports de servicios están diferidos. La cifra es un estimado con
+  tarifa asumida, y así se etiqueta.
+- **`--environment` es obligatorio** en toda ingesta real. Etiqueta las filas de `documents`
+  (local y producción comparten la tabla y tienen Qdrants distintos). No elige el Qdrant: ese
+  sale de `QDRANT_URL`, y el preflight imprime el host para que lo confirmes.
+- **El preflight no escribe nada**: imprime entorno, host de Qdrant sin credenciales, versión
+  del servidor, colección y sus puntos, y cuántos documentos hay registrados. Si Qdrant no
+  responde, aborta antes de embeber.
+- **Idempotencia por sha256**: un archivo que no cambió se salta. `--force` lo reingesta igual.
+  Reingerir uno modificado borra sus fragmentos viejos antes de insertar los nuevos, así que
+  no quedan huérfanos de la versión anterior.
+- **`--reset` borra la colección entera**, incluidos los documentos que se subieron por la web
+  y no estén en la carpeta de esta ingesta. Exige `--yes`.
+- Exit codes: 0 correcto, 1 fallo, 2 abortado por una guarda (nada se tocó).
+- Un archivo que no se puede parsear (PDF de imágenes sin OCR, `.doc` antiguo, archivo
+  corrupto) no tumba la corrida: se informa y se sigue con los demás.
 
-## 4. Verificar el índice
-
-`backend/check_index.py` es de solo lectura (con una única excepción, `--apply-indexes`) y sirve
-para responder "qué hay en la colección" sin abrir la consola de Qdrant:
-
-```powershell
-# Informe legible: totales por chunk_type, índices existentes frente a los esperados,
-# cobertura por campo, facetas de producto, cardinalidades, min/max de price_usd,
-# documentos subidos.
-.venv\Scripts\python.exe -X utf8 check_index.py
-
-# Lo mismo en JSON (para guardarlo junto a una medición).
-.venv\Scripts\python.exe -X utf8 check_index.py --json
-
-# Solo un archivo (el valor de `source_file` en el payload: los catálogos llevan el nombre del PDF).
-.venv\Scripts\python.exe -X utf8 check_index.py --source-file Catalogo_Croker__2.pdf
-
-# Falla (exit 1) si los totales no son los esperados: total,product,family,doc.
-.venv\Scripts\python.exe -X utf8 check_index.py --expect 3573,3483,86,4
-
-# Otra colección (por ejemplo, una de prueba).
-.venv\Scripts\python.exe -X utf8 check_index.py --collection productos_test
-
-# Única escritura: crea los índices de payload que falten. No toca puntos.
-.venv\Scripts\python.exe -X utf8 check_index.py --apply-indexes
-```
-
-Exit codes: `0` todo en orden, `1` falló la aserción de facetas o el `--expect`, `2` no se pudo
-hablar con Qdrant o la colección no existe. Los índices faltantes solo se informan (no cambian
-el exit code); se crean con `--apply-indexes`.
-
-La aserción de facetas es la que más vale: la suma de los conteos por `supplier` debe ser igual
-al número de puntos con `chunk_type = product`. Si no cuadra, hay productos sin suplidor o
-suplidores duplicados por variantes de escritura, y las agrupaciones del agente saldrán mal.
-
-Instantánea local de referencia (1 de septiembre de 2026):
-
-| Medida | Valor |
-|---|---|
-| Puntos totales | 3573 |
-| `product` | 3483 |
-| `family_summary` | 86 |
-| `doc_text` | 4 |
-| Índices de payload | 9: `brand`, `category`, `source_file`, `has_price`, `skus`, `supplier`, `chunk_type`, `price_usd` (float), `price_status` |
-
-Producción se compara contra su propia instantánea (no tiene por qué tener los mismos
-documentos subidos), pero `product` y `family_summary` deben coincidir con local si ambos se
-ingirieron desde los mismos catálogos.
-
-## 5. Evals y mediciones
-
-Dos runners, ambos desde `backend/`:
-
-- `evals\run_eval.py`: retrieval sobre el gold set de 60 preguntas (`hit@30`, `hit@8`, `MRR@8`).
-- `evals\judge_answers.py`: respuesta final del agente juzgada por LLM (regresiones reales,
-  muestra del gold set, y con `--agregacion` los casos de orden/conteo/agrupación).
-
-```powershell
-# Retrieval con el pipeline local (híbrido dense + BM25).
-.venv\Scripts\python.exe -X utf8 evals\run_eval.py --retrieval hybrid
-
-# Retrieval en el modo REAL de producción (dense-only forzado), tres repeticiones
-# para ver la varianza.
-.venv\Scripts\python.exe -X utf8 evals\run_eval.py --retrieval dense --repeat 3
-
-# Respuestas, modo producción.
-.venv\Scripts\python.exe -X utf8 evals\judge_answers.py --retrieval dense
-
-# Agregación, y además actualizar docs/EVAL_AGREGACION.md.
-.venv\Scripts\python.exe -X utf8 evals\judge_answers.py --agregacion --write-docs
-
-# Guardar los resultados en otra carpeta.
-.venv\Scripts\python.exe -X utf8 evals\run_eval.py --retrieval dense --results-dir C:\mediciones\run1
-```
-
-Dónde queda cada corrida: `backend/evals/results/<timestamp>-<label>/` con `results.json` (dato
-crudo, incluye la telemetría por caso) y `report.md` (informe legible). La carpeta está en
-`.gitignore`. Los informes públicos `docs/EVAL_*.md` solo se escriben con `--write-docs` y solo
-si la corrida fue completa (una corrida abortada por cuota o por `--max-cost`, o un `--dry-run`,
-ignora el flag con aviso); sin el flag ningún runner los sobrescribe, así que una corrida
-exploratoria nunca pisa la referencia.
-
-Exit codes de ambos runners:
-
-| Código | Significado |
-|---|---|
-| `0` | Corrida completa y métricas dentro del umbral |
-| `1` | Corrida completa pero alguna métrica quedó bajo el umbral |
-| `2` | Error de infraestructura, cuota de OpenAI o corrida abortada por `--max-cost`. Al primer `insufficient_quota`/`billing` o error de autenticación el runner se detiene sin reintentar, para no producir una medición a medias; un 429 puntual (límite de RPM/TPM) no es cuota y se reintenta con backoff |
-| `3` | El informe generado contiene el guion largo (regla del proyecto: no se publica) |
-
-Regla de honestidad en los costes:
-
-- **Medido** es lo que devuelve el `usage` del API: tokens de entrada, entrada cacheada, salida y
-  razonamiento, por ronda y por componente (`agente`, `reranker`, `embeddings`, `juez`). Eso es
-  lo que se compara entre corridas.
-- **Estimado** es cualquier cifra en USD. Se calcula con `telemetry.ASSUMED_PRICES` (tarifas
-  asumidas, no facturación real) y siempre va acompañada de la etiqueta
-  `telemetry.PRICING_LABEL` ("estimado, tarifas asumidas"). Un USD sin esa etiqueta no se
-  publica, ni en informes ni en el evento `metrics` del chat.
-- Dos mediciones solo se comparan si tienen el mismo `prompt_version`, el mismo `retrieval`
-  (`hybrid` o `dense-only`) y los mismos modelos; todo eso queda en `meta` de cada resultado.
-
-## 6. Despliegue
+## 4. Despliegue
 
 Vercel construye el frontend y sirve el backend como una única función Python (`api/index.py`).
 Lo que conviene saber al desplegar:
@@ -223,14 +122,13 @@ Lo que conviene saber al desplegar:
   (`>=`); los pins exactos están pendientes de confirmar con un deploy de preview antes de
   fijarlos, para no romper producción con una versión que no se probó.
 - `fastembed` queda fuera del bundle a propósito: arrastra `onnxruntime` (unos 200 MB) y no cabe
-  en la función. Por eso producción es dense-only, y lo seguirá siendo hasta la Fase 4 del plan.
-  `retrieval` en `/api/health` lo dice tal cual: `hybrid` solo si BM25 funciona, si no
-  `dense-only`.
+  en la función. Por eso producción es dense-only. `retrieval` en `/api/health` lo dice tal
+  cual: `hybrid` solo si BM25 funciona, si no `dense-only`.
 - Variables de entorno: las de la tabla de la sección 2. Tras cambiarlas, redeploy.
-- Comprobación mínima después de cada deploy: `GET /api/health` responde `qdrant: true`,
-  `retrieval: dense-only`, y el `python` y `prompt_version` que esperabas.
+- Comprobación mínima después de cada deploy: `GET /api/health` responde `qdrant: true`, y el
+  `python`, `retrieval` y `prompt_version` que esperabas.
 
-## 7. Tests
+## 5. Tests
 
 ```powershell
 pip install -r backend/requirements-dev.txt
@@ -238,6 +136,19 @@ cd backend
 python -m pytest -q
 ```
 
-Los tests no llaman a OpenAI ni a Qdrant: usan `set_async_client_for_tests` del cliente único y
-`get_settings.cache_clear()` para aislar la configuración. Si un test necesita red, está mal
-escrito.
+Los tests no llaman a OpenAI, ni a Qdrant, ni a la red: usan `set_async_client_for_tests` del
+cliente único, un cliente espía de Qdrant y `get_settings.cache_clear()` para aislar la
+configuración. Si un test necesita red, está mal escrito.
+
+## 6. Qué NO hay todavía
+
+Para que nadie lo busque en vano:
+
+- **No hay evaluación automática.** El gold set y los runners del proyecto anterior se
+  eliminaron con el cambio de dominio. Medir la fidelidad de las respuestas de este corpus
+  exige preguntas reales de quien lo usa.
+- **No hay OCR**, así que un PDF escaneado se rechaza al ingerir.
+- **No hay detección de idioma**: el campo `language` existe y se puede filtrar, pero la
+  ingesta lo deja vacío.
+- **No hay script de verificación del índice**. `GET /api/stats` da el inventario en vivo
+  (fragmentos, archivos, tipos, idiomas) y para lo demás está la consola de Qdrant.

@@ -111,8 +111,10 @@ def _log_metrics(session_id: str | None, metrics: dict) -> None:
 class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(8, ge=1, le=100)
-    brand: str | None = None
-    category: str | None = None
+    project_id: str | None = None
+    document_id: str | None = None
+    document_type: str | None = None
+    language: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -178,14 +180,14 @@ async def stats(admin: AuthUser = Depends(require_admin)) -> dict:
     try:
         inv = await asyncio.to_thread(index_inventory)
         index = {
-            "products": inv["productos"],
             "chunks": inv["total_chunks"],
             "files": len(inv["archivos"]),
-            "suppliers": [s["valor"] for s in inv["suplidores"]],
+            "types": [t["valor"] for t in inv["tipos"]],
+            "languages": [i["valor"] for i in inv["idiomas"]],
         }
     except Exception as exc:
         logger.warning("Inventario del índice no disponible: %s", exc)
-        index = {"products": 0, "chunks": 0, "files": 0, "suppliers": []}
+        index = {"chunks": 0, "files": 0, "types": [], "languages": []}
 
     activity = await run_in_threadpool(supabase_db.activity_stats)
     version = await run_in_threadpool(server_version)
@@ -249,7 +251,12 @@ async def delete_user(
 async def search(
     body: SearchRequest, user: AuthUser = Depends(current_user)
 ) -> dict:
-    filters = SearchFilters(brand=body.brand, category=body.category)
+    filters = SearchFilters(
+        project_id=body.project_id,
+        document_id=body.document_id,
+        document_type=body.document_type,
+        language=body.language,
+    )
     chunks = await hybrid_search(body.query, filters, body.top_k)
     return {
         "results": [
@@ -258,9 +265,11 @@ async def search(
                 "score": ch.score,
                 "source_file": ch.source_file,
                 "page": ch.page,
-                "brand": ch.brand,
-                "category": ch.category,
-                "skus": ch.skus,
+                "section": ch.section,
+                "document_type": ch.document_type,
+                "language": ch.language,
+                "project_id": ch.project_id,
+                "document_id": ch.document_id,
             }
             for ch in chunks
         ]

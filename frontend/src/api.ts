@@ -210,7 +210,6 @@ function normalizeDocuments(raw: unknown): DocumentInfo[] {
       file_name: typeof d.file_name === 'string' ? d.file_name : 'desconocido',
       pages: typeof d.pages === 'number' ? d.pages : 0,
       chunks: typeof d.chunks === 'number' ? d.chunks : 0,
-      brand: typeof d.brand === 'string' ? d.brand : '',
       status,
       error: typeof d.error === 'string' && d.error !== '' ? d.error : null,
       ingested_at: typeof d.ingested_at === 'string' ? d.ingested_at : '',
@@ -229,7 +228,7 @@ function failureFrom(status: number, body: string): ErrorBody {
   return parsed;
 }
 
-/** GET /api/documents: lista de documentos indexados (incluye los 6 catálogos base). */
+/** GET /api/documents: lista de documentos indexados. */
 export async function fetchDocuments(): Promise<DocumentInfo[]> {
   let res: Response;
   try {
@@ -338,7 +337,7 @@ export async function uploadDocument(
   });
 }
 
-/** DELETE /api/documents/{file_name}: los 6 catálogos base devuelven 403. */
+/** DELETE /api/documents/{file_name}: borra el documento y sus fragmentos. */
 export async function deleteDocument(fileName: string): Promise<void> {
   let res: Response;
   try {
@@ -353,7 +352,7 @@ export async function deleteDocument(fileName: string): Promise<void> {
   if (res.status === 401) throw unauthorized();
   const { detail } = await failure(res);
   if (res.status === 403) {
-    throw new Error(detail ?? 'Este catálogo base no se puede borrar.');
+    throw new Error(detail ?? 'No se pudo borrar este documento.');
   }
   if (res.status === 404) {
     throw new Error(detail ?? 'El documento ya no existe en el índice.');
@@ -541,8 +540,8 @@ export async function deleteUser(userId: string): Promise<void> {
   throw new Error(detail ?? `Error HTTP ${res.status} al eliminar la cuenta.`);
 }
 
-/** Lista de proveedores del índice: strings no vacíos, sin duplicados. */
-function normalizeSuppliers(raw: unknown): string[] {
+/** Lista de valores de un campo del índice: strings no vacíos, sin duplicados. */
+function normalizeStringList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
   for (const v of raw) {
@@ -588,10 +587,10 @@ export async function fetchStats(): Promise<AdminStats> {
 
   return {
     index: {
-      products: asCount(index.products),
       chunks: asCount(index.chunks),
       files: asCount(index.files),
-      suppliers: normalizeSuppliers(index.suppliers),
+      types: normalizeStringList(index.types),
+      languages: normalizeStringList(index.languages),
     },
     activity: {
       questions_total: asCount(activity.questions_total),
@@ -610,15 +609,6 @@ export async function fetchStats(): Promise<AdminStats> {
 }
 
 /** Array de strings no vacíos, recortado a `max` (campos enriquecidos). */
-function normalizeStringArray(raw: unknown, max: number): string[] {
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
-  for (const v of raw) {
-    if (typeof v === 'string' && v.trim() !== '') out.push(v.trim());
-    if (out.length >= max) break;
-  }
-  return out;
-}
 
 /**
  * Normaliza el campo `sources` (jsonb: puede venir null o con campos
@@ -634,7 +624,6 @@ export function normalizeSources(raw: unknown): Source[] {
     out.push({
       source_file: typeof s.source_file === 'string' ? s.source_file : 'desconocido',
       page: typeof s.page === 'number' ? s.page : null,
-      brand: typeof s.brand === 'string' && s.brand ? s.brand : null,
       snippet: typeof s.snippet === 'string' ? s.snippet : '',
       score: typeof s.score === 'number' ? s.score : null,
       project_id: typeof s.project_id === 'string' ? s.project_id : null,
@@ -643,10 +632,11 @@ export function normalizeSources(raw: unknown): Source[] {
       language: typeof s.language === 'string' ? s.language.trim() : '',
       document_type: typeof s.document_type === 'string' ? s.document_type.trim() : '',
       source_pages: normalizeNumberArray(s.source_pages),
-      skus: normalizeStringArray(s.skus, 8),
-      product_names: normalizeStringArray(s.product_names, 2),
-      category: typeof s.category === 'string' ? s.category.trim() : '',
       chunk_type: typeof s.chunk_type === 'string' ? s.chunk_type : '',
+      title: typeof s.title === 'string' ? s.title.trim() : '',
+      citation: typeof s.citation === 'string' ? s.citation.trim() : '',
+      doi: typeof s.doi === 'string' ? s.doi.trim() : '',
+      locator: typeof s.locator === 'string' ? s.locator.trim() : '',
     });
   }
   return out;

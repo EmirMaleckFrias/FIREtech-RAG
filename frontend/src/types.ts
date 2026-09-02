@@ -48,10 +48,12 @@ export interface UserAccount {
 /** Estado del sistema para el panel de ajustes (GET /api/stats, solo admin). */
 export interface AdminStats {
   index: {
-    products?: number;
     chunks: number;
     files: number;
-    suppliers?: string[];
+    /** Extensiones presentes en el índice (pdf, docx...). */
+    types: string[];
+    /** Idiomas detectados en los documentos. */
+    languages: string[];
   };
   activity: {
     questions_total: number;
@@ -77,7 +79,6 @@ export interface SessionInfo {
 export interface Source {
   source_file: string;
   page: number | null;
-  brand: string | null;
   snippet: string;
   score: number | null;
   project_id?: string | null;
@@ -86,18 +87,14 @@ export interface Source {
   language?: string;
   document_type?: string;
   source_pages?: number[];
-  /* --- campos enriquecidos del backend (2026-08) ---
-     Mensajes ANTIGUOS persistidos en Supabase no los traen: son opcionales
-     y normalizeSources (api.ts) les da defaults ([] / ""), de modo que la
-     UI degrada con gracia al formato clásico archivo · pág · marca. */
-  /** SKUs presentes en el chunk (hasta 8). */
-  skus?: string[];
-  /** Nombres de producto (hasta 2). */
-  product_names?: string[];
-  /** Categoría del producto o familia ("" si se desconoce). */
-  category?: string;
-  /** "product" | "family_summary" | "doc_text" | "doc_row" | "page" | "". */
   chunk_type?: string;
+  /** Titulo del trabajo, si el documento es un articulo. */
+  title?: string;
+  /** Referencia corta ("Allegri et al., 2023"); vacia si no se pudo extraer. */
+  citation?: string;
+  doi?: string;
+  /** Localizador ya resuelto por el backend: "pag. 12", "seccion: Metodos". */
+  locator?: string;
 }
 
 export interface Hop {
@@ -138,7 +135,6 @@ export interface DocumentInfo {
   file_name: string;
   pages: number;
   chunks: number;
-  brand: string;
   status: DocumentStatus;
   error: string | null;
   ingested_at: string;

@@ -513,7 +513,9 @@ def register_document(
     sha256: str,
     pages: int,
     chunks: int,
-    brand: str,
+    # Columna heredada de la tabla `documents`. Ya no se usa para nada: se
+    # mantiene con default vacío para no exigir una migración solo por esto.
+    brand: str = "",
     status: str = "ready",
     error: str | None = None,
     uploaded_by: str | None = None,

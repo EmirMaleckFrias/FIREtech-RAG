@@ -1,17 +1,19 @@
-"""Parseo genérico para documentos subidos por el usuario (no canónicos).
+"""Parseo de documentos: el único camino de ingesta del sistema.
 
 Contrato (SPEC.md, "Gestión de documentos"):
 - PDF   → texto por página (pdfplumber), chunks por párrafos de ~400 tokens
           con overlap del 15%; `page` = primera página del chunk,
-          `source_pages` = todas, `chunk_type` = "doc_text".
+          `source_pages` = todas, `chunk_type` = "text".
+- DOCX  → párrafos agrupados por sección (el encabezado vigente) y una
+          tabla por chunk; Word no tiene páginas, así que se cita por sección.
 - XLSX/CSV → detección de fila de encabezado, un chunk por fila
-          ("Campo: valor"); `chunk_type` = "doc_row", `page` = número de fila.
+          ("Campo: valor"); `chunk_type` = "table", `page` = número de fila.
 - TXT/MD → chunks por párrafos; `page` = índice de chunk (1-based).
 
 Cada chunk producido es un dict con TODAS las claves de
 `app.services.qdrant._PAYLOAD_KEYS` + `id` (uuid4), listo para
-embed_texts → upsert_chunks. Los campos ricos del esquema canónico quedan
-en valores neutros (brand/category "", has_price False, precios None).
+embed_texts → upsert_chunks. `project_id` y `document_id` los rellena quien
+llama, que es el único que sabe a qué proyecto pertenece el archivo.
 
 Saneo: chunks con texto vacío se omiten; documentos que generan más de
 MAX_CHUNKS chunks (o cero) levantan ValueError con mensaje claro.
@@ -25,6 +27,8 @@ import re
 import uuid
 from pathlib import Path
 
+from app.ingest.idioma import detectar_idioma
+
 logger = logging.getLogger(__name__)
 
 MAX_CHUNKS = 4000          # tope duro por documento (error claro si se excede)
@@ -32,36 +36,6 @@ _TARGET_TOKENS = 400       # tamaño objetivo de chunk (aprox.)
 _OVERLAP_TOKENS = 60       # 15% de 400
 _MAX_PARA_TOKENS = 500     # párrafos más largos se subdividen por oraciones
 _MAX_CHUNK_CHARS = 8000    # límite duro de texto por chunk (= truncado embeddings)
-_MAX_SKUS_PER_CHUNK = 32
-
-# ---------------------------------------------------------------------------
-# Detección de tokens tipo SKU.
-# COPIADO de app/services/agent.py (_SKU_TOKEN_RE / _extract_sku_candidates)
-# a propósito: importar agent.py acoplaría la ingesta al agente (OpenAI,
-# reranker). Misma normalización (upper) para que el fast-path por SKU del
-# agente matchee contra el payload `skus` de estos chunks.
-# ---------------------------------------------------------------------------
-# Tokens con pinta de SKU: ≥4 chars, al menos un dígito y una letra o guion.
-# Los falsos positivos (300PSI, NFPA-13) son inocuos: la búsqueda exacta
-# simplemente no encuentra nada.
-_SKU_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9./-]{3,}\b")
-
-
-def _extract_sku_candidates(text: str, limit: int = _MAX_SKUS_PER_CHUNK) -> list[str]:
-    out: list[str] = []
-    for tok in _SKU_TOKEN_RE.findall(text):
-        has_digit = any(c.isdigit() for c in tok)
-        has_alpha_or_dash = any(c.isalpha() or c == "-" for c in tok)
-        # SKUs 100% numéricos largos. ≥6 dígitos evita confundir medidas.
-        if re.fullmatch(r"\d{6,}", tok):
-            out.append(tok)
-        # Excluye medidas puras tipo 11/2, 1.25, 2026-03-12.
-        elif has_digit and has_alpha_or_dash and not re.fullmatch(
-            r"[\d./-]+", tok
-        ):
-            out.append(tok.upper())
-    return list(dict.fromkeys(out))[:limit]
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,47 +51,44 @@ def _base_chunk(
     page: int,
     source_pages: list[int],
     chunk_type: str,
+    section: str = "",
     source_row: int | None = None,
+    meta: object | None = None,
 ) -> dict:
-    """Dict de chunk con TODAS las claves de qdrant._PAYLOAD_KEYS + id."""
+    """Dict de chunk con TODAS las claves de qdrant._PAYLOAD_KEYS + id.
+
+    `project_id` y `document_id` los rellena quien llama (la ruta de subida o
+    el CLI de ingesta), porque el parser no sabe a qué proyecto pertenece el
+    archivo. `language` queda vacío hasta que se detecte.
+
+    `meta` es un `paper.PaperMeta` cuando el documento es un artículo: lo que
+    permite citar "Allegri et al., 2023" en vez del nombre del archivo. Se
+    repite en cada fragmento a propósito, para que una cita no necesite ir a
+    buscar nada más.
+    """
     text = text[:_MAX_CHUNK_CHARS]
     return {
         "id": str(uuid.uuid4()),
         "text": text,
         "source_file": file_name,
         "page": page,
+        "project_id": None,
+        "document_id": None,
+        "section": section,
+        "language": "",
         "document_type": Path(file_name).suffix.lower().lstrip(".") or "unknown",
         "source_pages": source_pages,
-        "brand": "",
-        "category": "",
-        "skus": _extract_sku_candidates(text),
-        "product_names": [],
-        "has_price": False,
+        "metadata": {"source_row": source_row} if source_row is not None else {},
         "chunk_type": chunk_type,
-        # Campos ricos del esquema canónico: neutros en documentos genéricos.
-        "supplier": "",
-        "category_es": "",
-        "product_type": "",
-        "model_series": "",
-        "size_raw": "",
-        "approvals": [],
-        "box_qty": None,
-        "price_net_usd": None,
-        "price_list_usd": None,
-        "cost_internal_usd": None,
-        "price_status": "",
-        "price_effective_date": None,
-        "currency_assumed": "",
-        "is_active": True,
-        "visibility": "public",
-        "data_quality_flags": [],
-        "source_row": source_row,
+        "title": getattr(meta, "titulo", "") or "",
+        "citation": getattr(meta, "referencia", "") or "",
+        "doi": getattr(meta, "doi", "") or "",
     }
 
 
 def _split_long_paragraph(para: str) -> list[str]:
     """Subdivide párrafos que exceden _MAX_PARA_TOKENS (por oraciones;
-    si una 'oración' sigue siendo enorme —texto sin puntuación—, por palabras)."""
+    si una 'oración' sigue siendo enorme (texto sin puntuación), por palabras)."""
     if _est_tokens(para) <= _MAX_PARA_TOKENS:
         return [para]
 
@@ -215,10 +186,37 @@ def _decode_bytes(raw: bytes) -> str:
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
-def _parse_pdf(path: Path, file_name: str) -> tuple[list[dict], int]:
+def _parse_pdf(
+    path: Path, file_name: str, skip_references: bool = True
+) -> tuple[list[dict], int, int]:
+    """PDF con conciencia de artículo: sección vigente y metadatos de la obra.
+
+    Devuelve (chunks, páginas, párrafos_de_bibliografía_descartados).
+
+    La sección se arrastra desde el último encabezado detectado, así cada
+    fragmento sabe si sale de Métodos o de Discusión. La bibliografía se
+    descarta por defecto: son títulos de trabajos ajenos que matchean con casi
+    cualquier consulta sin ser evidencia de nada, y ocupan una parte nada
+    despreciable de lo que se paga por embeber.
+    """
     import pdfplumber
 
-    paras: list[tuple[str, int]] = []
+    from app.ingest import paper as paper_mod
+
+    # (párrafo, página, sección)
+    paras: list[tuple[str, int, str]] = []
+    meta = paper_mod.PaperMeta()
+    descartados = 0
+    seccion = ""
+    canonica = ""
+
+    # Primera pasada: el texto de cada página. Hace falta entero antes de
+    # empezar, porque las cabeceras y pies se detectan por repetirse entre
+    # páginas y eso no se sabe mirando una sola.
+    paginas: list[tuple[int, list[str]]] = []
+    chars: list[dict] = []
+    cabecera_texto: list[str] = []
+
     with pdfplumber.open(path) as pdf:
         page_count = len(pdf.pages)
         for page_no, page in enumerate(pdf.pages, start=1):
@@ -230,19 +228,78 @@ def _parse_pdf(path: Path, file_name: str) -> tuple[list[dict], int]:
                     file_name, page_no, exc,
                 )
                 continue
-            for para in _split_paragraphs(text):
-                paras.append((para, page_no))
+            if page_no == 1:
+                try:
+                    chars = page.chars or []
+                except Exception:
+                    chars = []
+            if page_no <= 2:
+                cabecera_texto.append(text)
+            paginas.append((page_no, text.splitlines()))
+
+    if chars:
+        meta = paper_mod.extraer_metadatos(chars, "\n".join(cabecera_texto))
+
+    repetidas = paper_mod.lineas_repetidas([lineas for _, lineas in paginas])
+
+    # Segunda pasada: secciones y párrafos. Los encabezados se detectan línea a
+    # línea, porque un encabezado suele ser su propia línea corta.
+    for page_no, lineas in paginas:
+        utiles = [l for l in lineas if l.strip()]
+        for i, linea in enumerate(utiles):
+            if paper_mod.es_ruido_de_pagina(linea):
+                continue
+            if (
+                paper_mod.en_borde(i, len(utiles))
+                and paper_mod.normalizar(linea) in repetidas
+            ):
+                continue
+            detectada = paper_mod.detectar_seccion(linea)
+            if detectada is not None:
+                canonica = detectada
+                seccion = linea.strip()
+                continue
+            if skip_references and canonica == paper_mod.REFERENCIAS:
+                descartados += 1
+                continue
+            for para in _split_paragraphs(linea):
+                paras.append((para, page_no, seccion))
 
     chunks: list[dict] = []
-    for group in _pack_paragraphs(paras):
-        text = "\n\n".join(p for p, _ in group).strip()
-        if not text:
-            continue
-        pages = sorted({pg for _, pg in group})
-        chunks.append(
-            _base_chunk(file_name, text, pages[0], pages, "doc_text")
-        )
-    return chunks, page_count
+    # Se empaqueta sin mezclar secciones, para que la cita de un fragmento
+    # apunte a una sección de verdad y no a la frontera entre dos.
+    actual: list[tuple[str, int]] = []
+    actual_tok = 0
+    actual_sec = ""
+
+    def _cerrar() -> None:
+        nonlocal actual, actual_tok
+        if not actual:
+            return
+        texto = "\n\n".join(p for p, _ in actual).strip()
+        if texto:
+            paginas = sorted({pg for _, pg in actual})
+            chunks.append(
+                _base_chunk(
+                    file_name, texto, paginas[0], paginas, "text",
+                    section=actual_sec, meta=meta,
+                )
+            )
+        actual = []
+        actual_tok = 0
+
+    for texto, pagina, sec in paras:
+        if sec != actual_sec:
+            _cerrar()
+            actual_sec = sec
+        tok = _est_tokens(texto)
+        if actual and actual_tok + tok > _TARGET_TOKENS:
+            _cerrar()
+        actual.append((texto, pagina))
+        actual_tok += tok
+    _cerrar()
+
+    return chunks, page_count, descartados
 
 
 # ---------------------------------------------------------------------------
@@ -304,13 +361,13 @@ def _rows_to_chunks(
         if not lines:
             continue
         if sheet_label:
-            lines.insert(0, f"Hoja: {sheet_label} — Fila {row_no}")
+            lines.insert(0, f"Hoja: {sheet_label}, fila {row_no}")
         text = "\n".join(lines).strip()
         if not text:
             continue
         chunks.append(
             _base_chunk(
-                file_name, text, row_no, [row_no], "doc_row", source_row=row_no
+                file_name, text, row_no, [row_no], "table", source_row=row_no
             )
         )
     return chunks
@@ -381,28 +438,162 @@ def _parse_text(path: Path, file_name: str) -> tuple[list[dict], int]:
         chunk_text = "\n\n".join(p for p, _ in group).strip()
         if not chunk_text:
             continue
-        # page = índice de chunk (1-based) — no hay páginas reales.
-        chunks.append(_base_chunk(file_name, chunk_text, i, [i], "doc_text"))
+        # page = índice de chunk (1-based): no hay páginas reales.
+        chunks.append(_base_chunk(file_name, chunk_text, i, [i], "text"))
+    return chunks, len(chunks)
+
+
+# ---------------------------------------------------------------------------
+# Word (.docx)
+# ---------------------------------------------------------------------------
+def _es_titulo(parrafo) -> bool:
+    """¿El párrafo es un encabezado? Por estilo, que es lo fiable en Word."""
+    nombre = (getattr(parrafo.style, "name", "") or "").lower()
+    return nombre.startswith(("heading", "título", "titulo", "subtitle", "subtítulo"))
+
+
+def _tabla_a_texto(tabla) -> str:
+    """Tabla de Word como texto plano, una fila por línea.
+
+    Se conserva el orden de las celdas y se separan con ' | ' para que el
+    modelo pueda leer la fila entera; las tablas de un documento clínico
+    suelen llevar los datos que a nadie le sirve perder.
+    """
+    filas: list[str] = []
+    for fila in tabla.rows:
+        celdas = [c.text.strip().replace("\n", " ") for c in fila.cells]
+        # Word repite la celda combinada en cada columna que abarca.
+        limpias: list[str] = []
+        for celda in celdas:
+            if not limpias or celda != limpias[-1]:
+                limpias.append(celda)
+        linea = " | ".join(limpias).strip(" |")
+        if linea:
+            filas.append(linea)
+    return "\n".join(filas)
+
+
+def _parse_docx(path: Path, file_name: str) -> tuple[list[dict], int]:
+    """Word: párrafos agrupados por sección, más las tablas del documento.
+
+    Word no tiene páginas: el salto de página lo calcula el visor al
+    renderizar, así que el localizador de cita es la sección (el encabezado
+    vigente) y, a falta de encabezados, el número de fragmento.
+    """
+    import docx
+
+    documento = docx.Document(str(path))
+
+    # (texto, sección) en el orden del documento.
+    bloques: list[tuple[str, str]] = []
+    seccion = ""
+    for parrafo in documento.paragraphs:
+        texto = parrafo.text.strip()
+        if not texto:
+            continue
+        if _es_titulo(parrafo):
+            seccion = texto
+            # El título también se indexa: es la mejor pista de qué viene.
+            bloques.append((texto, seccion))
+            continue
+        for pieza in _split_long_paragraph(texto):
+            bloques.append((pieza, seccion))
+
+    # Las tablas van al final porque python-docx no da su posición relativa
+    # respecto de los párrafos sin bajar al XML; cada una es su propio chunk.
+    tablas: list[str] = []
+    for tabla in documento.tables:
+        texto = _tabla_a_texto(tabla)
+        if texto:
+            tablas.append(texto[:_MAX_CHUNK_CHARS])
+
+    chunks: list[dict] = []
+    indice = 0
+
+    # Los párrafos se empaquetan a ~_TARGET_TOKENS SIN mezclar secciones, para
+    # que la cita de un chunk apunte a una sección de verdad y no a dos.
+    actual: list[str] = []
+    actual_tok = 0
+    actual_sec = ""
+
+    def _cerrar() -> None:
+        nonlocal actual, actual_tok, indice
+        if not actual:
+            return
+        indice += 1
+        chunks.append(
+            _base_chunk(
+                file_name,
+                "\n\n".join(actual),
+                indice,
+                [indice],
+                "text",
+                section=actual_sec,
+            )
+        )
+        actual = []
+        actual_tok = 0
+
+    for texto, sec in bloques:
+        if sec != actual_sec:
+            _cerrar()
+            actual_sec = sec
+        tok = _est_tokens(texto)
+        if actual and actual_tok + tok > _TARGET_TOKENS:
+            _cerrar()
+        actual.append(texto)
+        actual_tok += tok
+    _cerrar()
+
+    # Las tablas se numeran aparte (tabla 1, tabla 2...): es como las busca
+    # quien abre el documento, y no comparten numeración con los párrafos.
+    for numero, texto in enumerate(tablas, start=1):
+        chunks.append(
+            _base_chunk(file_name, texto, numero, [numero], "table")
+        )
+
     return chunks, len(chunks)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".csv", ".txt", ".md"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"}
 
 
-def parse_generic(path: Path, file_name: str) -> tuple[list[dict], int]:
-    """Parsea un documento subido → (chunks, pages).
+def parse_generic(
+    path: Path, file_name: str, skip_references: bool = True
+) -> tuple[list[dict], int]:
+    """Parsea un documento → (chunks, pages).
 
     `pages`: nº de páginas para PDF; nº de filas/chunks para el resto (es lo
     que se muestra como "pages" en GET /documents).
+
+    `skip_references`: descarta la bibliografía de un PDF (default). Son
+    títulos de trabajos ajenos: matchean con cualquier consulta, no son
+    evidencia de nada y se pagan igual al embeberlos. Ponerlo en False solo
+    tiene sentido si lo que se quiere consultar ES la bibliografía.
+
     Levanta ValueError si la extensión no está soportada, si no se extrae
     texto alguno, o si se supera MAX_CHUNKS.
     """
     ext = path.suffix.lower()
+    descartados = 0
     if ext == ".pdf":
-        chunks, pages = _parse_pdf(path, file_name)
+        chunks, pages, descartados = _parse_pdf(
+            path, file_name, skip_references=skip_references
+        )
+        if descartados:
+            logger.info(
+                "%s: %d líneas de bibliografía descartadas.", file_name, descartados
+            )
+    elif ext == ".docx":
+        chunks, pages = _parse_docx(path, file_name)
+    elif ext == ".doc":
+        raise ValueError(
+            "El formato .doc (Word 97-2003) no se puede leer. Abre el archivo "
+            "en Word y guárdalo como .docx, o expórtalo a PDF."
+        )
     elif ext == ".xlsx":
         chunks, pages = _parse_xlsx(path, file_name)
     elif ext == ".csv":
@@ -414,6 +605,13 @@ def parse_generic(path: Path, file_name: str) -> tuple[list[dict], int]:
 
     # Saneo final: sin texto → fuera (defensa extra; ya se filtra antes).
     chunks = [c for c in chunks if c["text"].strip()]
+
+    # Idioma del documento entero, no por fragmento: un artículo está escrito
+    # en un idioma, y decidirlo sobre todo el texto es mucho más fiable que
+    # sobre un párrafo corto. Si no queda claro se deja vacío.
+    idioma = detectar_idioma("\n".join(c["text"] for c in chunks[:40]))
+    for chunk in chunks:
+        chunk["language"] = idioma
 
     if not chunks:
         raise ValueError(

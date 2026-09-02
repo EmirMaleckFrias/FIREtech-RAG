@@ -6,10 +6,8 @@ Contrato (SPEC.md):
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Literal
@@ -18,17 +16,7 @@ from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
 from app.services import telemetry
 from app.services.openai_client import get_async_client, openai_semaphore
-from app.services.qdrant import (
-    GROUP_FIELDS,
-    _MAX_GROUPS,
-    detect_brand_in_text,
-    find_by_skus,
-    group_values,
-    hybrid_search,
-    resolve_brand,
-    resolve_supplier,
-    scan_by_price,
-)
+from app.services.qdrant import hybrid_search
 from app.services.reranker import filter_relevant, rerank
 
 logger = logging.getLogger(__name__)
@@ -42,8 +30,11 @@ son los documentos indexados, que consultas con la herramienta `buscar_documento
 REGLAS ESTRICTAS DE FIDELIDAD:
 1. Responde SOLO con información que aparezca en los resultados de búsqueda de esta \
 conversación. Nada de conocimiento externo, suposiciones ni datos inventados.
-2. TODA afirmación factual debe llevar su cita con el formato exacto \
-[archivo, pág. X], tomando archivo y página del resultado del que proviene el dato.
+2. TODA afirmación factual debe llevar su cita. Cada resultado de búsqueda \
+trae la suya ya escrita entre corchetes en su cabecera: cópiala LITERAL, sin \
+cambiarla. No todos los documentos tienen páginas, así que unas citas dicen \
+"pág. 12", otras "sección: Métodos" y otras "fila 30": usa la que traiga el \
+resultado y nunca te inventes un número de página.
 3. Si algo no aparece en los resultados, dilo explícitamente, por ejemplo: \
 "no encuentro X en los documentos". Nunca rellenes huecos con estimaciones.
 4. Conserva las unidades, fechas, nombres y denominaciones tal como aparecen en la fuente.
@@ -54,13 +45,22 @@ cuando la pregunta lo requiera.
 7. Distingue claramente entre evidencia directa, interpretación y ausencia de evidencia.
 8. No inventes citas, no atribuyas una afirmación a una fuente que no la contiene y \
 señala contradicciones entre documentos.
-
-10. La conversación previa es SOLO contexto opcional. Cada pregunta nueva puede \
+9. La SECCIÓN de la que sale un fragmento cambia su peso, y en un trabajo \
+científico eso es decisivo: un dato en Resultados es evidencia del propio \
+estudio; el mismo enunciado en Discusión o Conclusiones es interpretación de \
+sus autores; en Resumen es una síntesis y en Introducción suele ser una \
+afirmación sobre trabajos ajenos. Cuando la distinción importe para la \
+respuesta, dila.
+10. Los documentos pueden estar en un idioma distinto al de la pregunta. Si una \
+búsqueda en español devuelve poco, repítela con los términos técnicos en \
+inglés antes de concluir que no hay nada: la coincidencia de palabras solo \
+funciona en el idioma del documento.
+11. La conversación previa es SOLO contexto opcional. Cada pregunta nueva puede \
 cambiar de tema por completo: trátala como independiente salvo que contenga una \
-referencia explícita a lo anterior ("ese modelo", "y el precio de cada uno", "el \
+referencia explícita a lo anterior ("ese estudio", "y en la otra cohorte", "el \
 segundo"). Nunca reduzcas el alcance de una pregunta general al tema de la \
 conversación, y no respondas desde tus turnos anteriores: consulta de nuevo.
-11. Nunca repitas una llamada con parámetros idénticos. Usa el número limitado de \
+12. Nunca repitas una llamada con parámetros idénticos. Usa el número limitado de \
 búsquedas para cubrir todas las partes relevantes de la pregunta.
 
 Responde siempre en español, de forma clara, estructurada y concisa. Nunca uses \
@@ -73,9 +73,12 @@ _DOCUMENT_SEARCH_TOOL = {
         "name": "buscar_documentos",
         "description": (
             "Busca evidencia en los documentos indexados. Usa semantico para "
-            "la consulta en lenguaje natural y los filtros documentales cuando "
-            "estén disponibles. Puedes combinar varias búsquedas para responder "
-            "preguntas complejas y comparativas."
+            "la consulta en lenguaje natural. Los filtros son OPCIONALES y solo "
+            "deben usarse cuando el usuario acota explícitamente (un proyecto, "
+            "un documento, un idioma): un filtro con un valor que no existe en "
+            "el índice deja la búsqueda sin resultados. Ante la duda, busca sin "
+            "filtros. Puedes combinar varias búsquedas para responder preguntas "
+            "complejas y comparativas."
         ),
         "parameters": {
             "type": "object",
@@ -97,40 +100,26 @@ _DOCUMENT_SEARCH_TOOL = {
                 },
                 "document_type": {
                     "type": "string",
-                    "description": "Tipo de archivo o documento, por ejemplo pdf o research_paper.",
+                    "enum": ["pdf", "docx", "xlsx", "csv", "txt", "md"],
+                    "description": (
+                        "Extensión del archivo. Es el formato, no el género del "
+                        "documento: no existen valores como 'articulo' o 'guia'."
+                    ),
                 },
                 "language": {
                     "type": "string",
-                    "description": "Idioma del documento, por ejemplo es o en.",
-                },
-                "suplidor": {
-                    "type": "string",
+                    "enum": ["es", "en", "pt", "fr"],
                     "description": (
-                        "Línea comercial exacta: ALEUM CO., RELIABLE, Croker, "
-                        "Notifier by Honeywell (se toleran variantes)."
+                        "Idioma detectado del documento. Un documento cuyo idioma "
+                        "no se pudo determinar NO casa con ningún valor, así que "
+                        "usa este filtro solo si el usuario pide expresamente "
+                        "documentos en un idioma, nunca para traducir tu consulta."
                     ),
                 },
-                "marca": {
-                    "type": "string",
-                    "description": "Marca dentro de un suplidor (VESDA, System Sensor...).",
+                "limit": {
+                    "type": "integer",
+                    "description": "Máximo de fragmentos relevantes, entre 1 y 20.",
                 },
-                "precio_min": {"type": "number"},
-                "precio_max": {"type": "number"},
-                "ordenar": {
-                    "type": "string",
-                    "enum": ["precio_asc", "precio_desc"],
-                    "description": "Orden por precio real. Obligatorio para superlativos de precio.",
-                },
-                "agrupar_por": {
-                    "type": "string",
-                    "enum": ["suplidor", "marca", "archivo"],
-                    "description": (
-                        "Un resultado por grupo (con ordenar) o el conteo por "
-                        "grupo (sin ordenar ni semantico)."
-                    ),
-                },
-                "limite": {"type": "integer", "description": "Resultados (default 8, máx 20)."},
-                "por_grupo": {"type": "integer", "description": "Resultados por grupo (default 3, máx 5)."},
             },
         },
     },
@@ -151,204 +140,23 @@ def _format_results(chunks: list[Chunk]) -> str:
         return "Sin resultados para esta búsqueda. Prueba otra formulación de la consulta."
     parts: list[str] = []
     for i, ch in enumerate(chunks, start=1):
-        header = f"--- Resultado {i} --- [{ch.source_file}, pág. {ch.page}] ({ch.brand})"
+        # La cita se entrega ya montada para que el modelo la copie literal:
+        # cada formato tiene el localizador que de verdad existe en él.
+        header = f"--- Resultado {i} --- {ch.cite()}"
+        if ch.section and ch.locator() != f"sección: {ch.section}":
+            header += f" sección: {ch.section}"
         parts.append(f"{header}\n{ch.text}")
     return "\n\n".join(parts)
 
 
-# Tokens con pinta de SKU: ≥4 chars, al menos un dígito y una letra o guion.
-# Los falsos positivos (300PSI, NFPA-13) son inocuos: la búsqueda exacta
-# simplemente no encuentra nada.
-_SKU_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9./-]{3,}\b")
-
-
-def _extract_sku_candidates(query: str) -> list[str]:
-    out: list[str] = []
-    for tok in _SKU_TOKEN_RE.findall(query):
-        has_digit = any(c.isdigit() for c in tok)
-        has_alpha_or_dash = any(c.isalpha() or c == "-" for c in tok)
-        # SKUs 100% numéricos largos (hallazgo del eval: '7R99000455'-style sin
-        # letras no disparaba el fast-path). ≥6 dígitos evita confundir medidas.
-        if re.fullmatch(r"\d{6,}", tok):
-            out.append(tok)
-        # Excluye medidas puras tipo 11/2, 1.25, 2026-03-12.
-        elif has_digit and has_alpha_or_dash and not re.fullmatch(
-            r"[\d./-]+", tok
-        ):
-            out.append(tok.upper())
-    return list(dict.fromkeys(out))[:6]
-
-
-async def _execute_search(
-    query: str,
-    marca: str | None,
-    categoria: str | None,
-    supplier: str | None = None,
-) -> list[Chunk]:
-    settings = get_settings()
-    marca = resolve_brand(marca)
-    filters = SearchFilters(
-        brand=marca or None, category=categoria or None, supplier=supplier
-    )
-
-    # Fast-path de SKU exacto: si la consulta trae códigos tipo SKU, se
-    # recuperan por match exacto en el payload y se garantizan entre los
-    # candidatos: una consulta por SKU nunca debe fallar por semántica.
-    sku_hits: list[Chunk] = []
-    if settings.sku_fastpath:
-        tokens = _extract_sku_candidates(query)
-        if tokens:
-            try:
-                sku_hits = await asyncio.to_thread(find_by_skus, tokens, 8)
-                for ch in sku_hits:
-                    ch.score = 1.0
-            except Exception as exc:
-                logger.warning("Fast-path de SKU falló: %s", exc)
-
-    try:
-        candidates = await hybrid_search(query, filters, settings.search_top_k)
-    except Exception:
-        # Un fallo transitorio (rate limit, red) no debe costarle el hop al
-        # agente: un único reintento tras una pausa corta.
-        await asyncio.sleep(3)
-        candidates = await hybrid_search(query, filters, settings.search_top_k)
-    if not candidates and (marca or categoria):
-        # Filtro demasiado estricto (valor que no existe tal cual): reintenta
-        # sin filtros antes de devolver "sin resultados".
-        candidates = await hybrid_search(query, SearchFilters(), settings.search_top_k)
-
-    seen = {ch.id for ch in sku_hits}
-    merged = sku_hits + [c for c in candidates if c.id not in seen]
-    ranked = await rerank(query, merged, settings.rerank_top_k)
-
-    # Garantía: un chunk cuyo SKU aparece textual en la consulta no puede ser
-    # descartado por el reranker.
-    ranked_ids = {ch.id for ch in ranked}
-    upper_query = query.upper()
-    must_keep = [
-        ch for ch in sku_hits
-        if ch.id not in ranked_ids
-        and any(sku and sku.upper() in upper_query for sku in ch.skus)
-    ]
-    if must_keep:
-        ranked = (must_keep + ranked)[: settings.rerank_top_k]
-    return ranked
-
-
-async def _execute_catalog_query(args: dict) -> tuple[list[Chunk], str]:
-    """Ejecuta la consulta de documentos. Devuelve (chunks, texto).
-
-    El enrutamiento vive AQUÍ, en el motor, decidido por los parámetros de la
-    consulta (no por reglas del prompt sobre tipos de pregunta): agrupar,
-    ordenar y filtrar se ejecutan exactos sobre el payload de Qdrant; lo
-    semántico usa el retrieval híbrido + reranker de siempre.
-    """
-    semantico = str(args.get("semantico") or "").strip() or None
-    suplidor = resolve_supplier(args.get("suplidor") or args.get("marca"))
-    marca_raw = args.get("marca") or (None if suplidor else args.get("suplidor"))
-    precio_min = args.get("precio_min")
-    precio_max = args.get("precio_max")
-    ordenar = args.get("ordenar") or None
-    desc = ordenar == "precio_desc"
-    grupo = GROUP_FIELDS.get(str(args.get("agrupar_por") or ""))
-    limite = max(1, min(int(args.get("limite") or 8), 20))
-    por_grupo = max(1, min(int(args.get("por_grupo") or 3), 5))
-
-    # --- agrupaciones ---
-    if grupo:
-        valores = await asyncio.to_thread(group_values, grupo)
-        if not valores:
-            return [], "El índice no devolvió grupos para ese campo."
-
-        # Solo conteos: pregunta sobre el corpus.
-        if not ordenar and not semantico:
-            lineas = [
-                "Conteo REAL por grupo (calculado en vivo; cítalo como "
-                "[inventario del índice]):"
-            ]
-            lineas += [f"- {v['valor']}: {v['chunks']} chunks" for v in valores]
-            lineas.append(f"Total de grupos: {len(valores)}")
-            return [], "\n".join(lineas)
-
-        recortado = len(valores) > _MAX_GROUPS
-        chunks_total: list[Chunk] = []
-        secciones: list[str] = []
-        for v in valores[:_MAX_GROUPS]:
-            if ordenar:
-                filas = await asyncio.to_thread(
-                    lambda val=v["valor"]: scan_by_price(
-                        supplier=suplidor,
-                        price_min=precio_min,
-                        price_max=precio_max,
-                        group_field=grupo,
-                        group_value=val,
-                        descending=desc,
-                        limit=por_grupo,
-                    )
-                )
-            else:
-                sf = SearchFilters(
-                    supplier=v["valor"] if grupo == "supplier" else suplidor,
-                    brand=v["valor"] if grupo == "brand" else None,
-                )
-                filas = (await hybrid_search(semantico, sf, por_grupo * 3))[:por_grupo]
-            if filas:
-                chunks_total.extend(filas)
-                secciones.append(
-                    f"=== GRUPO {v['valor']} ===\n" + _format_results(filas)
-                )
-            else:
-                secciones.append(f"=== GRUPO {v['valor']} ===\nSin resultados.")
-        encabezado = (
-            f"Resultados por grupo ({'precio ' + ('desc' if desc else 'asc') if ordenar else 'relevancia'}):"
-        )
-        if recortado:
-            encabezado += f" (solo los primeros {_MAX_GROUPS} grupos de {len(valores)})"
-        return chunks_total, encabezado + "\n\n" + "\n\n".join(secciones)
-
-    # --- orden por precio, sin agrupación ---
-    if ordenar:
-        if semantico:
-            filas = await _execute_price_search(
-                semantico,
-                args.get("marca") or args.get("suplidor"),
-                "desc" if desc else "asc",
-                limite,
-            )
-        else:
-            filas = await asyncio.to_thread(
-                lambda: scan_by_price(
-                    supplier=suplidor,
-                    brand=resolve_brand(marca_raw) if not suplidor else None,
-                    price_min=precio_min,
-                    price_max=precio_max,
-                    descending=desc,
-                    limit=limite,
-                )
-            )
-        etiqueta = "descendente" if desc else "ascendente"
-        texto = (
-            f"Productos ordenados por PRECIO REAL del catálogo ({etiqueta}); "
-            f"el #1 es el extremo verdadero del conjunto filtrado:\n\n"
-            + _format_results(filas)
-        )
-        return filas, texto
-
-    # --- semántico puro (con filtros opcionales) ---
-    if semantico:
-        filas = await _execute_search(
-            semantico, marca_raw, None, supplier=suplidor
-        )
-        return filas, _format_results(filas)
-
-    return [], (
-        "Consulta vacía: indica `semantico`, u `ordenar`/`agrupar_por` con "
-        "filtros. Ejemplo: ordenar='precio_asc' + agrupar_por='suplidor'."
-    )
-
-
 async def _execute_document_search(args: dict) -> tuple[list[Chunk], str]:
-    """Busca evidencia documental sin depender de campos de productos."""
+    """Busca evidencia en los documentos: recupera, reordena y filtra.
+
+    El filtro de relevancia es lo que permite responder "no encuentro esto":
+    sin él, la herramienta devuelve siempre los mejores fragmentos que haya,
+    aunque hablen de otro tema, y el modelo no tiene forma de distinguir
+    "esto es lo que hay" de "esto es lo más parecido que hay".
+    """
     query = str(args.get("semantico") or "").strip()
     if not query:
         return [], "Falta una consulta semántica para buscar en los documentos."
@@ -360,67 +168,75 @@ async def _execute_document_search(args: dict) -> tuple[list[Chunk], str]:
         document_type=str(args["document_type"]).strip() if args.get("document_type") else None,
         language=str(args["language"]).strip() if args.get("language") else None,
     )
-    chunks = await hybrid_search(query, filters, settings.search_top_k)
-    ranked = await rerank(query, chunks, settings.rerank_top_k)
-    return ranked, _format_results(ranked)
+    limit = max(1, min(int(args.get("limit") or settings.rerank_top_k), 20))
 
+    candidatos = await hybrid_search(query, filters, settings.search_top_k)
 
-_PRICE_POOL = 120  # candidatos recuperados antes de ordenar por precio
+    # Un filtro exacto sobre un valor que no existe en el índice devuelve cero
+    # sin decir por qué, y el modelo concluye que el documento no está. Pasó en
+    # producción el 2 sep 2026: cuatro búsquedas con `idioma: es` y `idioma: en`
+    # dieron 0 resultados sobre una colección que SÍ tenía el documento, porque
+    # `language` estaba vacío en todos los puntos. Así que si los filtros dejan
+    # la búsqueda vacía se repite sin ellos y se avisa: recuperar con un aviso
+    # es honesto, devolver cero en silencio no.
+    aviso_filtros = ""
+    aplicados = filters.model_dump(exclude_none=True)
+    if not candidatos and aplicados:
+        candidatos = await hybrid_search(query, SearchFilters(), settings.search_top_k)
+        detalle = ", ".join(f"{k}={v!r}" for k, v in aplicados.items())
+        if candidatos:
+            aviso_filtros = (
+                f"AVISO: con los filtros que pusiste ({detalle}) no había NINGÚN "
+                f"fragmento, así que la búsqueda se repitió SIN filtros y esto es "
+                f"lo que salió. Esos valores no existen en el índice: no vuelvas a "
+                f"usarlos y no concluyas nada de que no dieran resultado.\n\n"
+            )
+        else:
+            return [], (
+                f"Sin resultados, ni con los filtros ({detalle}) ni sin ellos. "
+                f"El índice no tiene nada parecido a esta consulta."
+            )
 
-
-async def _execute_price_search(
-    query: str, marca: str | None, orden: str, limite: int
-) -> list[Chunk]:
-    """Recupera un pool amplio y lo ordena por el PRECIO real del payload.
-
-    A diferencia de _execute_search (similitud + rerank), aquí el orden lo da
-    el campo de precio del catálogo: el resultado #1 es el extremo verdadero
-    dentro de lo que el pool semántico alcanzó a cubrir.
-    """
-    limite = max(1, min(int(limite or 10), 20))
-    # Orden de resolución del filtro:
-    # 1) SUPLIDOR (payload `supplier`): filtro exacto EN QDRANT. Es el único
-    #    confiable para "por suplidor": viene del archivo de origen y no
-    #    depende de que el pool semántico traiga productos de esa línea
-    #    (en producción dense-only, un pool genérico casi no los traía y las
-    #    4 consultas por suplidor devolvían el mismo producto).
-    # 2) MARCA: post-filtro por término en marca/categoría/texto, tolerante a
-    #    los errores de etiquetado del origen (VLF-500 con brand Fire-Lite).
-    # Sin fallback silencioso: si el filtro deja el pool vacío, se devuelve
-    # vacío y el modelo se entera, en vez de recibir resultados de OTRO
-    # suplidor como si fueran los pedidos.
-    supplier = resolve_supplier(marca)
-    if supplier is not None:
-        pool = await hybrid_search(
-            query, SearchFilters(supplier=supplier), _PRICE_POOL
+    if not candidatos:
+        return [], (
+            "El índice no devolvió ningún fragmento para esta búsqueda. "
+            "Prueba otra formulación de la consulta."
         )
-    else:
-        pool = await hybrid_search(query, SearchFilters(), _PRICE_POOL)
-        marca_term = resolve_brand(marca) or detect_brand_in_text(query)
-        if marca_term:
-            needle = marca_term.lower().split()[0]
-            pool = [
-                c for c in pool
-                if needle in c.brand.lower()
-                or needle in c.category.lower()
-                or needle in c.text[:220].lower()
-            ]
 
-    priced = [
-        c for c in pool
-        if c.chunk_type == "product" and c.price is not None
-        and (c.price_status or "numeric") == "numeric"
-    ]
-    # Orden por precio PRIMERO y filtro de relevancia binario DESPUÉS: el
-    # reranker listwise con 100+ ítems perdía productos válidos de forma no
-    # determinista (el juez detectó que "detector VESDA más barato" daba
-    # $7,221 en vez del VLF-500 de $3,088.89). Clasificar sí/no por ítem
-    # preserva el orden por precio y es fiable: el primero que sobrevive al
-    # filtro ES el extremo verdadero del pool.
-    priced.sort(key=lambda c: c.price, reverse=(orden == "desc"))
-    if len(priced) > limite:
-        priced = await filter_relevant(query, priced[:80])
-    return priced[:limite]
+    ranked = await rerank(query, candidatos, limit)
+    resultado = await filter_relevant(query, ranked)
+
+    if resultado.verificado and not resultado.kept:
+        # Se le dice al modelo qué documentos se descartaron. Afirmar "no
+        # existe" es una afirmación fuerte, y si el usuario preguntó justo por
+        # uno de estos archivos, el modelo tiene que poder darse cuenta en vez
+        # de negar su existencia.
+        vistos = list(dict.fromkeys(ch.fuente() for ch in ranked))[:5]
+        return [], (
+            aviso_filtros
+            + f"Se revisaron los {len(ranked)} fragmentos más parecidos y ninguno "
+            f"contiene información sobre esto. Los documentos de los que salían "
+            f"eran: {'; '.join(vistos)}. Si alguno de ellos ES lo que te pidieron, "
+            f"vuelve a buscar con sus propias palabras antes de responder; si no, "
+            f"di que los documentos indexados no cubren el tema, sin presentarlo "
+            f"como un fallo de búsqueda."
+        )
+
+    texto = aviso_filtros + _format_results(resultado.kept)
+    descartados = len(ranked) - len(resultado.kept)
+    if resultado.verificado and descartados:
+        texto = (
+            f"{aviso_filtros}De los {len(ranked)} fragmentos más parecidos, "
+            f"{len(resultado.kept)} aportan evidencia y {descartados} hablaban de "
+            f"otra cosa.\n\n" + _format_results(resultado.kept)
+        )
+    elif not resultado.verificado:
+        texto = (
+            "AVISO: no se pudo verificar la relevancia de estos fragmentos, así "
+            "que puede haber alguno que no venga al caso. Cita solo lo que de "
+            "verdad responda a la pregunta.\n\n" + texto
+        )
+    return resultado.kept, texto
 
 
 def _sources_payload(accumulated: dict[str, Chunk]) -> list[dict]:
@@ -434,13 +250,13 @@ def _sources_payload(accumulated: dict[str, Chunk]) -> list[dict]:
             language=ch.language,
             document_type=ch.document_type,
             source_pages=ch.source_pages,
-            brand=ch.brand,
             snippet=ch.text[:_SNIPPET_LEN],
             score=ch.score,
-            skus=ch.skus[:8],
-            product_names=[p for p in ch.product_names if p][:2],
-            category=ch.category,
             chunk_type=ch.chunk_type,
+            title=ch.title,
+            citation=ch.citation,
+            doi=ch.doi,
+            locator=ch.locator(),
         ).model_dump()
         for ch in accumulated.values()
     ]
@@ -631,14 +447,14 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 partes = []
                 if args.get("semantico"):
                     partes.append(str(args["semantico"]))
-                if args.get("ordenar"):
-                    partes.append(
-                        "precio ↓" if args["ordenar"] == "precio_desc" else "precio ↑"
-                    )
-                if args.get("agrupar_por"):
-                    partes.append(f"por {args['agrupar_por']}")
-                if args.get("suplidor") or args.get("marca"):
-                    partes.append(str(args.get("suplidor") or args.get("marca")))
+                for key, label in (
+                    ("document_type", "tipo"),
+                    ("language", "idioma"),
+                    ("project_id", "proyecto"),
+                    ("document_id", "documento"),
+                ):
+                    if args.get(key):
+                        partes.append(f"{label}: {args[key]}")
                 hop_label = " · ".join(partes) or message
                 hop_info = {"n": hop_count, "query": hop_label}
                 hops.append(hop_info)
