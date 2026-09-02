@@ -103,8 +103,8 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
     <div className="auth-screen">
       <main className="auth-card">
         <div className="sidebar-brand auth-brand">
-          <img className="brand-logo brand-logo-ai" src="/ai-robotix.svg" alt="AI ROBOTIX" />
-          <img className="brand-logo brand-logo-project" src="/alzheimer-project.svg" alt="Alzheimer Project" />
+          <img className="brand-logo brand-logo-ai" src="/ai-robotix.png" alt="AI ROBOTIX" />
+          <img className="brand-logo brand-logo-project" src="/alzheimer-project.png" alt="Alzheimer Project" />
         </div>
 
         <p className="auth-lead">Asistente documental para el equipo.</p>

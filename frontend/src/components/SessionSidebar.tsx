@@ -99,8 +99,8 @@ export function SessionSidebar({
     <aside className={`sidebar ${open ? '' : 'sidebar-closed'}`}>
       <div className="sidebar-inner">
         <div className="sidebar-brand">
-          <img className="brand-logo brand-logo-ai" src="/ai-robotix.svg" alt="AI ROBOTIX" />
-          <img className="brand-logo brand-logo-project" src="/alzheimer-project.svg" alt="Alzheimer Project" />
+          <img className="brand-logo brand-logo-ai" src="/ai-robotix.png" alt="AI ROBOTIX" />
+          <img className="brand-logo brand-logo-project" src="/alzheimer-project.png" alt="Alzheimer Project" />
         </div>
 
         <button type="button" className="new-chat-btn" onClick={onNew}>
