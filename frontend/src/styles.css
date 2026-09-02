@@ -478,20 +478,20 @@ textarea {
 }
 
 .brand-logo-ai {
-  width: 92px;
-  height: 42px;
+  width: 106px;
+  height: 50px;
 }
 
 .brand-logo-project {
-  width: 106px;
-  height: 42px;
+  width: 118px;
+  height: 50px;
 }
 
 .welcome-logos {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: 20px;
   margin-bottom: 20px;
   animation: fade-in 0.4s ease both;
 }
@@ -3387,13 +3387,13 @@ button.user-row:active {
   }
 
   .welcome-logos .brand-logo-ai {
-    width: 78px;
-    height: 34px;
+    width: 112px;
+    height: 48px;
   }
 
   .welcome-logos .brand-logo-project {
-    width: 88px;
-    height: 34px;
+    width: 128px;
+    height: 48px;
   }
 
   /* iOS hace zoom automático al enfocar campos con fuente < 16px
