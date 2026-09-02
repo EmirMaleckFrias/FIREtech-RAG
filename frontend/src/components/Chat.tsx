@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { CitationRef } from '../lib/markdown';
 import type { ChatMessage, ModoPensamiento } from '../types';
-import { IconArrowUp, IconStop } from './icons';
+import { IconCheck, IconChevronDown, IconArrowUp, IconStop } from './icons';
 import { MessageItem } from './MessageItem';
 import { WelcomeIntro, WelcomeSuggestions } from './Welcome';
 
@@ -21,18 +21,23 @@ interface ChatProps {
 }
 
 /** Los dos modos, con la explicación que ve el usuario al pasar por encima. */
-const MODOS: { valor: ModoPensamiento; etiqueta: string; ayuda: string }[] = [
+const MODOS: {
+  valor: ModoPensamiento;
+  etiqueta: string;
+  corta: string;
+  ayuda: string;
+}[] = [
   {
     valor: 'normal',
     etiqueta: 'Pensamiento normal',
-    ayuda: 'Una o dos búsquedas y respuesta. Para preguntas directas.',
+    corta: 'Normal',
+    ayuda: 'Una o dos búsquedas. Para preguntas directas.',
   },
   {
     valor: 'extendido',
     etiqueta: 'Pensamiento extendido',
-    ayuda:
-      'Busca sin tope, descompone la pregunta y contrasta entre documentos. '
-      + 'Para preguntas complejas: tarda más y cuesta más.',
+    corta: 'Extendido',
+    ayuda: 'Busca sin tope y contrasta entre documentos. Tarda y cuesta más.',
   },
 ];
 
@@ -58,6 +63,9 @@ export function Chat({
   onShowSources,
 }: ChatProps) {
   const [draft, setDraft] = useState('');
+  const [modoMenuAbierto, setModoMenuAbierto] = useState(false);
+  const modoActual = MODOS.find((m) => m.valor === modo) ?? MODOS[0];
+  const modoRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const stickToBottomRef = useRef(true);
@@ -65,6 +73,24 @@ export function Chat({
   // Ventana durante la cual el scroll suave programático está en curso: sus
   // eventos de scroll intermedios no deben des-fijar el auto-stick.
   const smoothUntilRef = useRef(0);
+
+  // El menu de modo se cierra al pulsar fuera o con Escape, como cualquier
+  // menu: si no, queda abierto tapando el composer.
+  useEffect(() => {
+    if (!modoMenuAbierto) return;
+    const fuera = (e: MouseEvent) => {
+      if (!modoRef.current?.contains(e.target as Node)) setModoMenuAbierto(false);
+    };
+    const escape = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') setModoMenuAbierto(false);
+    };
+    document.addEventListener('mousedown', fuera);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('mousedown', fuera);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [modoMenuAbierto]);
 
   // Autoscroll mientras llegan tokens, salvo que el usuario haya subido.
   // Suave solo en saltos discretos (nuevo par de mensajes); durante el goteo
@@ -244,22 +270,6 @@ export function Chat({
       </div>
 
       <div className="composer-area">
-        <div className="modo-switch" role="radiogroup" aria-label="Modo de pensamiento">
-          {MODOS.map((m) => (
-            <button
-              key={m.valor}
-              type="button"
-              role="radio"
-              aria-checked={modo === m.valor}
-              className={`modo-opcion ${modo === m.valor ? 'modo-activa' : ''}`}
-              title={m.ayuda}
-              onClick={() => onModoChange(m.valor)}
-              disabled={isStreaming}
-            >
-              {m.etiqueta}
-            </button>
-          ))}
-        </div>
         <form className="composer" onSubmit={handleSubmit}>
           <textarea
             ref={textareaRef}
@@ -274,27 +284,69 @@ export function Chat({
             onKeyDown={handleKeyDown}
             disabled={isStreaming || loadingMessages}
           />
-          {isStreaming ? (
-            <button
-              type="button"
-              className="send-btn send-stop"
-              onClick={onStop}
-              title="Detener la generación"
-              aria-label="Detener la generación"
-            >
-              <IconStop />
-            </button>
-          ) : (
-            <button
-              type="submit"
-              className={`send-btn ${canSend ? 'send-ready' : ''}`}
-              disabled={!canSend}
-              title="Enviar mensaje"
-              aria-label="Enviar mensaje"
-            >
-              <IconArrowUp />
-            </button>
-          )}
+          <div className="composer-controles">
+            <div className="modo-selector" ref={modoRef}>
+              <button
+                type="button"
+                className="modo-boton"
+                aria-haspopup="menu"
+                aria-expanded={modoMenuAbierto}
+                disabled={isStreaming}
+                onClick={() => setModoMenuAbierto((v) => !v)}
+              >
+                <span>{modoActual.corta}</span>
+                <IconChevronDown size={12} />
+              </button>
+              {modoMenuAbierto && (
+                <div className="modo-menu" role="menu" aria-label="Modo de pensamiento">
+                  {MODOS.map((m) => (
+                    <button
+                      key={m.valor}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={modo === m.valor}
+                      className="modo-item"
+                      onClick={() => {
+                        onModoChange(m.valor);
+                        setModoMenuAbierto(false);
+                      }}
+                    >
+                      <span className="modo-item-texto">
+                        <span className="modo-item-nombre">{m.etiqueta}</span>
+                        <span className="modo-item-ayuda">{m.ayuda}</span>
+                      </span>
+                      {modo === m.valor && (
+                        <span className="modo-item-check" aria-hidden="true">
+                          <IconCheck size={14} />
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {isStreaming ? (
+              <button
+                type="button"
+                className="send-btn send-stop"
+                onClick={onStop}
+                title="Detener la generación"
+                aria-label="Detener la generación"
+              >
+                <IconStop />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className={`send-btn ${canSend ? 'send-ready' : ''}`}
+                disabled={!canSend}
+                title="Enviar mensaje"
+                aria-label="Enviar mensaje"
+              >
+                <IconArrowUp />
+              </button>
+            )}
+          </div>
         </form>
         {!showWelcome && (
           <div className="composer-meta">
