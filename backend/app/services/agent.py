@@ -60,8 +60,9 @@ cambiar de tema por completo: trátala como independiente salvo que contenga una
 referencia explícita a lo anterior ("ese estudio", "y en la otra cohorte", "el \
 segundo"). Nunca reduzcas el alcance de una pregunta general al tema de la \
 conversación, y no respondas desde tus turnos anteriores: consulta de nuevo.
-12. Nunca repitas una llamada con parámetros idénticos. Usa el número limitado de \
-búsquedas para cubrir todas las partes relevantes de la pregunta.
+12. Busca tantas veces como haga falta: no hay premio por responder con pocas \
+búsquedas y sí lo hay por cubrir la pregunta entera. Lo único prohibido es \
+repetir una llamada con parámetros idénticos, que no aporta nada.
 
 Responde siempre en español, de forma clara, estructurada y concisa. Nunca uses \
 el guion largo (em dash, U+2014) en tus respuestas: separa las ideas con comas, puntos o dos puntos.\
@@ -118,7 +119,7 @@ _DOCUMENT_SEARCH_TOOL = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Máximo de fragmentos relevantes, entre 1 y 20.",
+                    "description": "Máximo de fragmentos relevantes, entre 1 y 50.",
                 },
             },
         },
@@ -168,7 +169,7 @@ async def _execute_document_search(args: dict) -> tuple[list[Chunk], str]:
         document_type=str(args["document_type"]).strip() if args.get("document_type") else None,
         language=str(args["language"]).strip() if args.get("language") else None,
     )
-    limit = max(1, min(int(args.get("limit") or settings.rerank_top_k), 20))
+    limit = max(1, min(int(args.get("limit") or settings.rerank_top_k), 50))
 
     candidatos = await hybrid_search(query, filters, settings.search_top_k)
 
@@ -296,9 +297,49 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
     # El content final persistido se construye de aquí, para que lo streameado
     # y lo guardado en la BD sean idénticos.
     emitted_parts: list[str] = []
+    # Búsquedas seguidas que no trajeron ni un fragmento nuevo. Es el freno que
+    # importa: dar más vueltas sobre lo mismo no acerca a la respuesta.
+    hops_sin_avance = 0
+    inicio = time.perf_counter()
+
+    def _motivo_de_parada() -> str | None:
+        """Por qué hay que responder ya, o None si aún puede seguir buscando.
+
+        No hay un tope arbitrario de búsquedas: se para cuando el modelo deja
+        de avanzar o cuando se acaba el tiempo de la petición. El límite de
+        tiempo no es un capricho, es que la función serverless muere a los
+        300 s y sin este corte la respuesta no se acorta, se pierde entera.
+        """
+        if settings.max_hops and hop_count >= settings.max_hops:
+            return f"tope de {settings.max_hops} búsquedas"
+        if (
+            settings.agent_max_hops_sin_avance
+            and hops_sin_avance >= settings.agent_max_hops_sin_avance
+        ):
+            return (
+                f"{hops_sin_avance} búsquedas seguidas sin encontrar nada nuevo"
+            )
+        if settings.agent_budget_s:
+            transcurrido = time.perf_counter() - inicio
+            if transcurrido >= settings.agent_budget_s:
+                return f"tiempo agotado ({transcurrido:.0f} s)"
+        return None
 
     while True:
-        force_final = hop_count >= settings.max_hops
+        motivo_parada = _motivo_de_parada()
+        force_final = motivo_parada is not None
+        if force_final and hop_count:
+            # El modelo tiene que saber que se acabó el presupuesto, para que
+            # responda con lo que tiene y diga qué le falta, en vez de creer
+            # que decidió parar él.
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"Se acabó el presupuesto de búsquedas ({motivo_parada}). "
+                    f"Responde ya con la evidencia que tienes y di explícitamente "
+                    f"qué parte de la pregunta te quedó sin cubrir."
+                ),
+            })
         kwargs: dict = {
             "model": settings.openai_model,
             "messages": messages,
@@ -389,7 +430,7 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             "agente", round_model, round_usage,
             ms=(time.perf_counter() - round_t0) * 1000.0,
             finish_reason=finish_reason,
-            note=("final forzado" if force_final else
+            note=(f"final forzado: {motivo_parada}" if force_final else
                   f"tool_calls={len(tool_calls)}"),
         )
         if round_usage is None:
@@ -473,9 +514,13 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 hop_info["resultados"] = len(chunks)
                 hop_info["chars"] = len(result_text)
 
+                nuevos = 0
                 for ch in chunks:
                     if ch.id not in accumulated:
                         accumulated[ch.id] = ch
+                        nuevos += 1
+                hop_info["nuevos"] = nuevos
+                hops_sin_avance = 0 if nuevos else hops_sin_avance + 1
 
                 messages.append(
                     {

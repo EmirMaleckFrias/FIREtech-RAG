@@ -19,12 +19,62 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
 import httpx
 
 BASE = "http://localhost:8000"
+
+# Raíz del repositorio, para leer frontend/.env sin depender del cwd.
+RAIZ = Path(__file__).resolve().parent.parent
+
+
+def _leer_env(ruta: Path) -> dict[str, str]:
+    valores: dict[str, str] = {}
+    if not ruta.is_file():
+        return valores
+    for linea in io.open(ruta, encoding="utf-8", errors="replace"):
+        linea = linea.strip()
+        if "=" in linea and not linea.startswith("#"):
+            clave, valor = linea.split("=", 1)
+            valores[clave.strip()] = valor.strip().strip('"').strip("'")
+    return valores
+
+
+def obtener_token(correo: str, password: str) -> str:
+    """Access token de Supabase para hablar con una API con autenticación.
+
+    Usa el mismo camino que el navegador (grant de contraseña con la anon key,
+    que es pública por diseño), así que no hace falta la service key ni ningún
+    permiso especial: basta una cuenta de verdad.
+    """
+    env = _leer_env(RAIZ / "frontend" / ".env")
+    url = os.environ.get("SUPABASE_URL") or env.get("VITE_SUPABASE_URL", "")
+    anon = os.environ.get("SUPABASE_ANON_KEY") or env.get("VITE_SUPABASE_ANON_KEY", "")
+    if not url or not anon:
+        raise SystemExit(
+            "Falta la URL o la anon key de Supabase. Rellena frontend/.env "
+            "(VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY) o exporta "
+            "SUPABASE_URL y SUPABASE_ANON_KEY."
+        )
+    resp = httpx.post(
+        f"{url.rstrip('/')}/auth/v1/token",
+        params={"grant_type": "password"},
+        headers={"apikey": anon, "Content-Type": "application/json"},
+        json={"email": correo, "password": password},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise SystemExit(
+            f"No se pudo iniciar sesión como {correo}: {resp.status_code} "
+            f"{resp.text[:200]}"
+        )
+    token = resp.json().get("access_token")
+    if not token:
+        raise SystemExit("Supabase no devolvió access_token.")
+    return token
 
 
 def ask(question: str, base: str, token: str | None) -> dict:
@@ -131,6 +181,11 @@ def main() -> int:
         help="access token de Supabase si el backend tiene autenticación activa",
     )
     parser.add_argument(
+        "--login", metavar="CORREO", default=None,
+        help="inicia sesión en Supabase y usa ese token (pide la contraseña por "
+             "la variable RAG_PASSWORD, para no dejarla en el historial)",
+    )
+    parser.add_argument(
         "--json", type=Path, default=None, metavar="RUTA",
         help="guarda todo el detalle en un JSON",
     )
@@ -139,6 +194,17 @@ def main() -> int:
         help="detiene la corrida cuando el coste acumulado supera el tope",
     )
     args = parser.parse_args()
+
+    token = args.token
+    if args.login:
+        password = os.environ.get("RAG_PASSWORD")
+        if not password:
+            raise SystemExit(
+                "Define la contraseña en la variable RAG_PASSWORD antes de usar "
+                "--login, para que no quede escrita en el historial de la consola."
+            )
+        token = obtener_token(args.login, password)
+        print(f"Sesión iniciada como {args.login}.")
 
     if args.archivo:
         preguntas = cargar_preguntas(args.archivo)
@@ -157,7 +223,7 @@ def main() -> int:
             )
             break
         try:
-            resultado = ask(pregunta, args.base, args.token)
+            resultado = ask(pregunta, args.base, token)
         except httpx.HTTPError as exc:
             print(f"  FALLO de red o del servidor: {exc}")
             resultados.append({"pregunta": pregunta, "error": str(exc)})

@@ -184,7 +184,14 @@ async def test_max_hops_fuerza_el_final(settings_override, fake_openai, catalogo
     assert tel.counters.get("hops") == 1
     rondas = [r for r in tel.rounds if r.component == "agente"]
     assert len(rondas) == 2
-    assert rondas[1].note == "final forzado"
+    # La nota dice POR QUE se paro, que es lo que hace falta para diagnosticar.
+    assert rondas[1].note == "final forzado: tope de 1 búsquedas"
+
+    # Y el modelo se entera de que se acabo el presupuesto, para que responda
+    # con lo que tiene en vez de creer que decidio parar el.
+    aviso = segunda["messages"][-1]
+    assert aviso["role"] == "system"
+    assert "presupuesto de búsquedas" in aviso["content"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -245,3 +252,79 @@ async def test_fallo_a_mitad_del_stream_queda_en_telemetria(settings_override, f
     # La plaza del semáforo se liberó: una segunda corrida arranca sin bloquear.
     fake_openai.queue(make_text_stream("ok", usage=make_usage(10, 1)))
     assert _tipos(await _correr("otra")) == ["sources", "token", "final"]
+
+
+async def test_sin_tope_de_hops_el_modelo_busca_lo_que_quiera(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """MAX_HOPS=0 significa sin limite de cuenta: 12 busquedas son 12."""
+    monkeypatch.setenv("MAX_HOPS", "0")
+    monkeypatch.setenv("AGENT_MAX_HOPS_SIN_AVANCE", "0")
+    get_settings.cache_clear()
+    assert get_settings().max_hops == 0
+
+    # Cada busqueda con argumentos distintos, para que no la frene el dedup.
+    for i in range(12):
+        fake_openai.queue(
+            make_tool_call_stream(TOOL, {"semantico": f"consulta {i}"}, usage=make_usage(80, 8))
+        )
+    fake_openai.queue(make_text_stream("Respuesta final.", usage=make_usage(90, 9)))
+
+    eventos = await _correr("una pregunta larga")
+
+    assert _tipos(eventos).count("hop") == 12
+    assert len(catalogo_falso) == 12
+    assert eventos[-1].type == "final"
+
+
+async def test_se_para_cuando_deja_de_encontrar_cosas_nuevas(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """El freno que sustituye al tope arbitrario: buscar mas de lo mismo no
+    acerca a la respuesta, asi que tras N busquedas sin nada nuevo se responde.
+
+    El stub no devuelve chunks nunca, o sea cero fragmentos nuevos siempre.
+    """
+    monkeypatch.setenv("MAX_HOPS", "0")
+    monkeypatch.setenv("AGENT_MAX_HOPS_SIN_AVANCE", "2")
+    get_settings.cache_clear()
+
+    for i in range(6):
+        fake_openai.queue(
+            make_tool_call_stream(TOOL, {"semantico": f"otra {i}"}, usage=make_usage(80, 8))
+        )
+    fake_openai.queue(make_text_stream("Lo que tengo.", usage=make_usage(90, 9)))
+    tel = telemetry.start()
+
+    eventos = await _correr("algo que no esta")
+
+    assert _tipos(eventos).count("hop") == 2
+    assert eventos[-1].type == "final"
+    rondas = [r for r in tel.rounds if r.component == "agente"]
+    assert "sin encontrar nada nuevo" in rondas[-1].note
+
+
+async def test_el_reloj_corta_antes_de_que_muera_la_funcion(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """El corte por tiempo evita perder la respuesta entera cuando Vercel mata
+    la funcion a los 300 s. La PRIMERA ronda siempre ocurre: el presupuesto
+    limita cuanto se busca, no si se responde.
+    """
+    monkeypatch.setenv("MAX_HOPS", "0")
+    monkeypatch.setenv("AGENT_BUDGET_S", "0.0001")
+    get_settings.cache_clear()
+
+    fake_openai.queue(
+        make_tool_call_stream(TOOL, {"semantico": "algo"}, usage=make_usage(80, 8)),
+        make_text_stream("Respondo con lo que alcance.", usage=make_usage(90, 9)),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("cualquier cosa")
+
+    assert _tipos(eventos).count("hop") == 1
+    assert fake_openai.calls[0]["tool_choice"] == "auto"
+    assert fake_openai.calls[1]["tool_choice"] == "none"
+    rondas = [r for r in tel.rounds if r.component == "agente"]
+    assert "tiempo agotado" in rondas[-1].note

@@ -120,7 +120,7 @@ async def test_el_limite_se_acota_al_rango_permitido(
     await agent._execute_document_search({"semantico": "x", "limit": 0})
     await agent._execute_document_search({"semantico": "x"})
 
-    assert vistos[0] == 20  # techo
+    assert vistos[0] == 50  # techo
     # limit 0 es falsy: cae al default de settings, igual que si no viniera
     assert vistos[1] == settings_override.rerank_top_k
     assert vistos[2] == settings_override.rerank_top_k

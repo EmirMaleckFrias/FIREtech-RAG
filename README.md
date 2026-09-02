@@ -36,9 +36,15 @@ arrancarlo.
   distinción, la herramienta devuelve siempre los ocho fragmentos más parecidos aunque hablen
   de otra cosa, y el modelo no tiene forma de saber si eso es "lo que hay" o "lo más parecido
   que hay".
-- **Agente multi-hop** (tool calling, hasta `MAX_HOPS` llamadas por pregunta) con **una sola
-  herramienta, `buscar_documentos`**: consulta en lenguaje natural más filtros opcionales por
-  proyecto, documento, tipo de archivo e idioma.
+- **Agente multi-hop sin tope arbitrario de búsquedas**, con **una sola herramienta,
+  `buscar_documentos`**: consulta en lenguaje natural más filtros opcionales por proyecto,
+  documento, tipo de archivo e idioma. `MAX_HOPS=0` deja que busque tantas veces como
+  necesite; lo que lo detiene no es una cuenta sino dos señales honestas: que **deje de
+  encontrar fragmentos nuevos** (buscar más de lo mismo no acerca a la respuesta) o que se
+  **acabe el tiempo** de la petición. Ese segundo corte existe porque la función de Vercel
+  muere a los 300 segundos: sin él la respuesta no se acorta, se pierde entera. Cuando se
+  fuerza el final, el modelo recibe un aviso para que responda con lo que tiene y diga qué
+  quedó sin cubrir.
 - **Citas honestas por formato.** No todo documento tiene páginas: un `.docx` las calcula el
   visor al renderizar y un `.txt` no tiene ninguna. El localizador de cada cita es lo que de
   verdad existe en ese archivo: `pág. 12` en un PDF, `sección: Métodos` en un Word con
@@ -135,8 +141,9 @@ copy .env.example .env
 | `QDRANT_URL` / `QDRANT_API_KEY` | `http://localhost:6333` y clave vacía en local. |
 | `QDRANT_COLLECTION` | `documentos`. |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | **Obligatorias para autenticación real.** Son las que sostienen el login, los roles y toda la persistencia. La service key vive solo en el backend. |
-| `MAX_HOPS` | Tope de llamadas a la herramienta por pregunta (el código trae 4). |
-| `RERANK_TOP_K` / `SEARCH_TOP_K` | 8 y 30. |
+| `MAX_HOPS` | Tope de búsquedas por pregunta; `0` = sin límite (default 20). |
+| `AGENT_BUDGET_S` / `AGENT_MAX_HOPS_SIN_AVANCE` | Los frenos que de verdad paran el bucle: 240 s de reloj y 3 búsquedas sin nada nuevo. |
+| `RERANK_TOP_K` / `SEARCH_TOP_K` | 12 y 60. |
 | `ENVIRONMENT` | `local` o `production`. Los dos entornos comparten la tabla `documents` pero tienen **Qdrants distintos**, así que el registro se filtra y se escribe por entorno. `ingest.py` lo exige en toda ingesta real. |
 | `CORS_ORIGINS` | `http://localhost:5173` en desarrollo. |
 

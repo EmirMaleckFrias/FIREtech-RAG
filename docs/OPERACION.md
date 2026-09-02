@@ -47,15 +47,17 @@ variables del proyecto en Vercel en producción.
 | `OPENAI_TIMEOUT_S` | `120` | local `.env` y Vercel | Timeout por request del cliente OpenAI único |
 | `OPENAI_MAX_RETRIES` | `2` | local `.env` y Vercel | Reintentos del SDK ante 429 o 5xx |
 | `OPENAI_CONCURRENCY` | `3` | local `.env` y Vercel | Semáforo de llamadas concurrentes a OpenAI por proceso |
-| `PROMPT_VERSION` | `v1` | local `.env` y Vercel | Etiqueta del prompt del agente; viaja en health, stats y telemetría |
+| `PROMPT_VERSION` | `v2` | local `.env` y Vercel | Etiqueta del prompt del agente; viaja en health, stats y telemetría |
 | `QDRANT_URL` | `http://localhost:6333` | local `.env` y Vercel | En Vercel apunta al cluster de Qdrant Cloud |
 | `QDRANT_API_KEY` | vacío | Vercel (local vacío) | Clave del cluster |
 | `QDRANT_COLLECTION` | `documentos` | local `.env` y Vercel | La colección `productos` del proyecto anterior sigue en su Qdrant y este backend ya no la mira |
 | `SUPABASE_URL` | vacío | local `.env` y Vercel | Vacía en local = modo dev sin autenticación, persistencia en memoria |
 | `SUPABASE_SERVICE_KEY` | vacío | local `.env` y Vercel | Solo en el backend, jamás en el frontend |
-| `MAX_HOPS` | `4` | local `.env` y Vercel | Tope de llamadas a la herramienta por pregunta. Comprobar el valor real en `/api/health`: en Vercel quedó en 8 del proyecto anterior |
-| `RERANK_TOP_K` | `8` | local `.env` y Vercel | Fragmentos que llegan al agente tras el rerank |
-| `SEARCH_TOP_K` | `30` | local `.env` y Vercel | Candidatos que salen de Qdrant antes del rerank |
+| `MAX_HOPS` | `20` | local `.env` y Vercel | Tope de búsquedas por pregunta. **0 = sin límite**: si el modelo necesita 12 búsquedas, las hace. El freno de verdad son las dos variables siguientes |
+| `AGENT_BUDGET_S` | `240` | local `.env` y Vercel | Segundos de reloj antes de forzar la respuesta final. No es un capricho: la función de Vercel muere a los 300 s y sin este corte la respuesta no se acorta, se pierde entera. 0 = sin límite, solo sensato fuera de serverless |
+| `AGENT_MAX_HOPS_SIN_AVANCE` | `3` | local `.env` y Vercel | Búsquedas seguidas sin traer ni un fragmento nuevo antes de responder con lo que hay. Buscar más de lo mismo no acerca a la respuesta. 0 = desactivado |
+| `RERANK_TOP_K` | `12` | local `.env` y Vercel | Fragmentos que llegan al agente tras el rerank |
+| `SEARCH_TOP_K` | `60` | local `.env` y Vercel | Candidatos que salen de Qdrant antes del rerank |
 | `ENVIRONMENT` | `local` | local `.env` (`local`) y Vercel (`production`) | Separa el registro de `documents` por entorno; también lo exige `ingest.py` |
 | `CORS_ORIGINS` | `http://localhost:5173` | local `.env` | En Vercel no hace falta: frontend y API comparten dominio |
 | `VITE_SUPABASE_URL` | | `frontend/.env` y Vercel (build) | Frontend |

@@ -49,9 +49,22 @@ class Settings(BaseSettings):
     # entorno (columna `environment`, migración 003).
     environment: str = "local"
 
-    max_hops: int = 4
-    rerank_top_k: int = 8
-    search_top_k: int = 30
+    # Tope de búsquedas por pregunta. 0 = sin límite: si el modelo necesita 12
+    # búsquedas para armar una respuesta, que las haga. El freno de verdad no
+    # es un número de llamadas sino los dos de abajo, que paran cuando ya no se
+    # avanza o cuando se acaba el tiempo.
+    max_hops: int = 20
+    # Segundos de reloj para el bucle completo antes de forzar la respuesta
+    # final. Existe porque la función de Vercel muere a los 300 s: sin esto,
+    # una pregunta larga no se corta, se pierde entera. 0 = sin límite.
+    agent_budget_s: float = 240.0
+    # Búsquedas seguidas sin traer ni un fragmento nuevo antes de rendirse.
+    # Buscar más de lo mismo no acerca a la respuesta, solo gasta.
+    agent_max_hops_sin_avance: int = 3
+    # Fragmentos que llegan al modelo por búsqueda, y candidatos que salen de
+    # Qdrant antes de reordenar.
+    rerank_top_k: int = 12
+    search_top_k: int = 60
     cors_origins: str = "http://localhost:5173"
 
     @property
