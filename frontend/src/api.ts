@@ -622,8 +622,8 @@ function normalizeStringArray(raw: unknown, max: number): string[] {
 
 /**
  * Normaliza el campo `sources` (jsonb: puede venir null o con campos
- * faltantes). Los campos enriquecidos (skus, product_names, category,
- * chunk_type) no existen en mensajes antiguos: defaults [] / "".
+ * faltantes). Los campos documentales y enriquecidos no existen en mensajes
+ * antiguos: reciben valores neutros.
  */
 export function normalizeSources(raw: unknown): Source[] {
   if (!Array.isArray(raw)) return [];
@@ -637,6 +637,12 @@ export function normalizeSources(raw: unknown): Source[] {
       brand: typeof s.brand === 'string' && s.brand ? s.brand : null,
       snippet: typeof s.snippet === 'string' ? s.snippet : '',
       score: typeof s.score === 'number' ? s.score : null,
+      project_id: typeof s.project_id === 'string' ? s.project_id : null,
+      document_id: typeof s.document_id === 'string' ? s.document_id : null,
+      section: typeof s.section === 'string' ? s.section.trim() : '',
+      language: typeof s.language === 'string' ? s.language.trim() : '',
+      document_type: typeof s.document_type === 'string' ? s.document_type.trim() : '',
+      source_pages: normalizeNumberArray(s.source_pages),
       skus: normalizeStringArray(s.skus, 8),
       product_names: normalizeStringArray(s.product_names, 2),
       category: typeof s.category === 'string' ? s.category.trim() : '',
@@ -644,6 +650,11 @@ export function normalizeSources(raw: unknown): Source[] {
     });
   }
   return out;
+}
+
+function normalizeNumberArray(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is number => typeof value === 'number' && Number.isInteger(value));
 }
 
 export interface ChatStreamHandlers {

@@ -22,7 +22,7 @@ const MAX_TEXTAREA_HEIGHT = 204;
 
 /** Aviso de precios: mismo texto bajo las píldoras y bajo el composer. */
 const PRICE_NOTE =
-  'Las respuestas provienen de los catálogos indexados y pueden contener errores. Verifica precios antes de cotizar.';
+  'Las respuestas se basan en los documentos indexados. Verifica la evidencia antes de tomar decisiones.';
 
 export function Chat({
   messages,
@@ -227,7 +227,7 @@ export function Chat({
             ref={textareaRef}
             value={draft}
             rows={1}
-            placeholder="Pregunta sobre los catálogos…"
+            placeholder="Pregunta sobre tus documentos…"
             aria-label="Escribe tu pregunta"
             onChange={(e) => {
               setDraft(e.target.value);

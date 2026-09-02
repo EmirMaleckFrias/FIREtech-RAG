@@ -57,7 +57,7 @@ export function MessageItem({
             {msg.streaming ? (
               <div className="reasoning-head">
                 <IconSpinner size={13} />
-                <span className="shimmer-text">Buscando en los catálogos…</span>
+                <span className="shimmer-text">Buscando en los documentos…</span>
               </div>
             ) : (
               <button

@@ -48,10 +48,10 @@ export interface UserAccount {
 /** Estado del sistema para el panel de ajustes (GET /api/stats, solo admin). */
 export interface AdminStats {
   index: {
-    products: number;
+    products?: number;
     chunks: number;
     files: number;
-    suppliers: string[];
+    suppliers?: string[];
   };
   activity: {
     questions_total: number;
@@ -80,6 +80,12 @@ export interface Source {
   brand: string | null;
   snippet: string;
   score: number | null;
+  project_id?: string | null;
+  document_id?: string | null;
+  section?: string;
+  language?: string;
+  document_type?: string;
+  source_pages?: number[];
   /* --- campos enriquecidos del backend (2026-08) ---
      Mensajes ANTIGUOS persistidos en Supabase no los traen: son opcionales
      y normalizeSources (api.ts) les da defaults ([] / ""), de modo que la

@@ -138,7 +138,7 @@ export function SessionSidebar({
           {loaded && !loadError && sessions.length === 0 && (
             <div className="sidebar-empty">
               <p className="sidebar-empty-title">Aún no hay conversaciones</p>
-              <p>Escribe tu primera pregunta sobre los catálogos para empezar.</p>
+              <p>Escribe tu primera pregunta sobre los documentos para empezar.</p>
             </div>
           )}
 

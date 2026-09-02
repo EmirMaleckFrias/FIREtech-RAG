@@ -19,22 +19,20 @@ interface SuggestionsProps {
 /** Etiqueta corta visible en la píldora; `question` es lo que se escribe. */
 const SUGGESTIONS: { label: string; question: string }[] = [
   {
-    label: 'Rociadores Reliable',
-    question:
-      '¿Qué modelos de rociadores Reliable de respuesta rápida hay y qué factor K tienen?',
+    label: 'Buscar evidencia',
+    question: '¿Qué evidencia existe sobre los mecanismos de inflamación en Alzheimer?',
   },
   {
-    label: 'Paneles Notifier',
-    question:
-      '¿Qué paneles de detección de incendios Notifier aparecen en los catálogos y cuántas zonas soportan?',
+    label: 'Resumir un tema',
+    question: 'Resume los hallazgos principales sobre biomarcadores de Alzheimer.',
   },
   {
-    label: 'Más barato por suplidor',
-    question: 'Dame los productos más baratos de cada suplidor',
+    label: 'Comparar fuentes',
+    question: 'Compara las conclusiones de las fuentes sobre tratamientos actuales.',
   },
   {
-    label: 'Gabinetes Croker',
-    question: '¿Qué gabinetes Croker existen y en qué medidas se ofrecen?',
+    label: 'Detectar diferencias',
+    question: '¿Qué diferencias importantes hay entre los estudios indexados?',
   },
 ];
 
@@ -50,7 +48,7 @@ export function WelcomeIntro() {
           tech
         </span>
       </div>
-      <h1 className="welcome-title">¿Qué buscamos hoy en los catálogos?</h1>
+      <h1 className="welcome-title">¿Qué investigamos hoy?</h1>
     </div>
   );
 }

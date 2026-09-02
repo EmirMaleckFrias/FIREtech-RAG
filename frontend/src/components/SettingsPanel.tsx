@@ -839,22 +839,9 @@ function SystemTab({ open }: { open: boolean }) {
       <section className="stats-block">
         <h3 className="stats-title">Índice</h3>
         <div className="stats-grid">
-          <StatTile value={num(index.products)} label="Productos" />
           <StatTile value={num(index.chunks)} label="Fragmentos" />
           <StatTile value={num(index.files)} label="Archivos" />
         </div>
-        {index.suppliers.length > 0 && (
-          <div className="stats-suppliers">
-            <span className="stats-sub">Proveedores</span>
-            <span className="stats-chips">
-              {index.suppliers.map((s) => (
-                <span key={s} className="stats-chip">
-                  {s}
-                </span>
-              ))}
-            </span>
-          </div>
-        )}
       </section>
 
       <section className="stats-block">

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import { citationFileKey, citationPages, extractCitations } from '../lib/markdown';
 import type { ChatMessage, Source, SourceFocus } from '../types';
-import { IconCheck, IconChevronDown, IconCopy, IconDocument } from './icons';
+import { IconChevronDown, IconDocument } from './icons';
 
 interface SourcesPanelProps {
   open: boolean;
@@ -61,7 +61,7 @@ function isCited(s: Source, entry: CitedEntry | undefined): boolean {
 }
 
 /**
- * Dedupe fuerte por (archivo, página, primer SKU: o snippet si no hay SKUs)
+ * Dedupe fuerte por archivo, página y fragmento
  * y agrupación por archivo. Citadas primero: dentro de cada grupo y los
  * grupos con citadas por delante (orden estable en ambas particiones).
  */
@@ -72,8 +72,7 @@ function buildGroups(sources: Source[], citedMap: Map<string, CitedEntry>): Sour
 
   for (const s of sources) {
     const fileKey = citationFileKey(s.source_file);
-    const firstSku = (s.skus ?? [])[0] ?? '';
-    const identity = firstSku !== '' ? `s:${firstSku}` : `t:${s.snippet.trim().slice(0, 80)}`;
+    const identity = `t:${s.snippet.trim().slice(0, 80)}`;
     const key = `${fileKey}|${s.page ?? 'x'}|${identity}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -103,18 +102,13 @@ function scorePercent(score: number | null): number | null {
   return Math.round(clamped * 100);
 }
 
-/** Título de la tarjeta: producto → categoría → nombre de archivo. */
+/** Título de la tarjeta documental. */
 function cardTitle(s: Source): string {
-  const product = (s.product_names ?? [])[0];
-  if (product) return product;
-  const category = s.category ?? '';
-  if (category !== '') return category;
   return s.source_file;
 }
 
 /** Badge del tipo de chunk (solo los que aportan contexto). */
 function chunkBadge(chunkType: string | undefined): string | null {
-  if (chunkType === 'family_summary') return 'Serie completa';
   if (chunkType === 'doc_text' || chunkType === 'doc_row') return 'Documento subido';
   return null;
 }
@@ -124,104 +118,6 @@ function prefersReducedMotion(): boolean {
     typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  );
-}
-
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // clipboard API bloqueada (http, permisos): cae al fallback
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    ta.remove();
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
-/* ------------------------------ SKU chips --------------------------------- */
-
-const COPIED_FEEDBACK_MS = 1300;
-const SKU_VISIBLE_MAX = 3;
-
-function SkuChip({ sku }: { sku: string }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(
-    () => () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    },
-    [],
-  );
-
-  const handleCopy = async () => {
-    const ok = await copyToClipboard(sku);
-    if (!ok) return;
-    setCopied(true);
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
-  };
-
-  return (
-    <button
-      type="button"
-      className={`sku-chip ${copied ? 'sku-copied' : ''}`}
-      title={`Copiar ${sku}`}
-      aria-label={`Copiar SKU ${sku} al portapapeles`}
-      aria-live="polite"
-      onClick={() => void handleCopy()}
-    >
-      {copied ? (
-        <>
-          <IconCheck size={10} />
-          <span>Copiado</span>
-        </>
-      ) : (
-        <>
-          <IconCopy size={10} />
-          <span>{sku}</span>
-        </>
-      )}
-    </button>
-  );
-}
-
-function SkuList({ skus }: { skus: string[] }) {
-  const [showAll, setShowAll] = useState(false);
-  const visible = showAll ? skus : skus.slice(0, SKU_VISIBLE_MAX);
-  const hiddenCount = skus.length - visible.length;
-
-  return (
-    <div className="source-skus">
-      {visible.map((sku) => (
-        <SkuChip key={sku} sku={sku} />
-      ))}
-      {hiddenCount > 0 && (
-        <button
-          type="button"
-          className="sku-chip sku-more"
-          title={skus.slice(SKU_VISIBLE_MAX).join(', ')}
-          aria-label={`Mostrar ${hiddenCount} SKUs más`}
-          onClick={() => setShowAll(true)}
-        >
-          +{hiddenCount}
-        </button>
-      )}
-    </div>
   );
 }
 
@@ -324,7 +220,6 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
 
   const renderCard = (item: SourceItem) => {
     const s = item.source;
-    const skus = s.skus ?? [];
     const title = cardTitle(s);
     const titleIsFile = title === s.source_file;
     const badge = chunkBadge(s.chunk_type);
@@ -332,13 +227,14 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
     const dimmed = citedCount > 0 && !item.cited;
     const pct = scorePercent(s.score);
 
-    // Subtítulo archivo · pág. X · marca (sin repetir el archivo si ya es el título).
+    // Subtítulo archivo, páginas y contexto documental.
     const metaParts: { text: string; className?: string; title?: string }[] = [];
     if (!titleIsFile) {
       metaParts.push({ text: s.source_file, className: 'source-meta-file', title: s.source_file });
     }
     if (s.page !== null) metaParts.push({ text: `pág. ${s.page}` });
-    if (s.brand !== null && s.brand !== '') metaParts.push({ text: s.brand });
+    if (s.document_type) metaParts.push({ text: s.document_type });
+    if (s.language) metaParts.push({ text: s.language });
 
     return (
       <div
@@ -379,8 +275,6 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
           </span>
           <IconChevronDown size={13} className="source-chevron" />
         </button>
-
-        {skus.length > 0 && <SkuList skus={skus} />}
 
         {isOpen && (
           <div className="source-snippet">{s.snippet || 'Sin fragmento disponible.'}</div>
@@ -423,7 +317,7 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
             </span>
             <p>
               {message?.streaming
-                ? 'Buscando en los catálogos…'
+                ? 'Buscando en los documentos…'
                 : 'Las fuentes de la respuesta aparecerán aquí. Haz clic en una cita dentro de la respuesta para resaltar su fuente.'}
             </p>
           </div>

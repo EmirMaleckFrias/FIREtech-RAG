@@ -114,7 +114,7 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
           <span className="brand-badge">RAG</span>
         </div>
 
-        <p className="auth-lead">Asistente de catálogos. Acceso solo para el equipo.</p>
+        <p className="auth-lead">Asistente documental para el equipo.</p>
 
         {supabaseConfigError !== null && (
           <p className="auth-error" role="alert">
