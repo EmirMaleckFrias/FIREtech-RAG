@@ -52,7 +52,8 @@ NORMAL = Modo(
     fragmentos=8,
     esfuerzo=None,
     instruccion=(
-        "MODO: pensamiento normal. Ve al grano. Con una búsqueda bien formulada "
+        "MODO ACTIVO: pensamiento normal, el que eligió quien pregunta. Ve al "
+        "grano. Con una búsqueda bien formulada "
         "suele bastar, y tienes dos como máximo, así que úsalas para cubrir la "
         "pregunta y no para explorar. Si la pregunta resulta ser más compleja de "
         "lo que cabe en dos búsquedas, responde con lo que tengas y dile al "
@@ -70,7 +71,8 @@ EXTENDIDO = Modo(
     fragmentos=12,
     esfuerzo="high",
     instruccion=(
-        "MODO: pensamiento extendido. Tómate el trabajo en serio. Descompón la "
+        "MODO ACTIVO: pensamiento extendido, el que eligió quien pregunta. "
+        "Tómate el trabajo en serio. Descompón la "
         "pregunta en las partes que la componen y busca cada una por separado, "
         "con sus propios términos; no hay tope de búsquedas y no gana nada quien "
         "responde con pocas. Cuando la pregunta admite comparación, reúne "

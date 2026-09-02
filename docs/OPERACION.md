@@ -47,7 +47,7 @@ variables del proyecto en Vercel en producción.
 | `OPENAI_TIMEOUT_S` | `120` | local `.env` y Vercel | Timeout por request del cliente OpenAI único |
 | `OPENAI_MAX_RETRIES` | `2` | local `.env` y Vercel | Reintentos del SDK ante 429 o 5xx |
 | `OPENAI_CONCURRENCY` | `3` | local `.env` y Vercel | Semáforo de llamadas concurrentes a OpenAI por proceso |
-| `PROMPT_VERSION` | `v2` | local `.env` y Vercel | Etiqueta del prompt del agente; viaja en health, stats y telemetría |
+| `PROMPT_VERSION` | `v3` | local `.env` y Vercel | Etiqueta del prompt del agente; viaja en health, stats y telemetría |
 | `QDRANT_URL` | `http://localhost:6333` | local `.env` y Vercel | En Vercel apunta al cluster de Qdrant Cloud |
 | `QDRANT_API_KEY` | vacío | Vercel (local vacío) | Clave del cluster |
 | `QDRANT_COLLECTION` | `documentos` | local `.env` y Vercel | La colección `productos` del proyecto anterior sigue en su Qdrant y este backend ya no la mira |

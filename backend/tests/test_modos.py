@@ -179,3 +179,28 @@ async def test_el_modo_queda_en_la_telemetria(
     await _correr("pregunta", "extendido")
 
     assert tel.summary()["meta"]["modo"] == "extendido"
+
+
+# --- saber hablar de si mismo -----------------------------------------------
+def test_el_prompt_sabe_explicar_que_es_sin_ensenar_sus_instrucciones():
+    """El fallo visto en produccion el 2 sep 2026.
+
+    Al preguntarle "eres el modo pensamiento extendido?", el modelo no tenia
+    con que responder (su unica fuente son los documentos) y acabo citando sus
+    propias instrucciones internas entre comillas. Ahora hay una ficha de que
+    es, y la prohibicion explicita de reproducir las instrucciones.
+    """
+    prompt = agent.SYSTEM_PROMPT
+
+    assert "QUÉ ERES" in prompt
+    assert "pensamiento normal" in prompt and "pensamiento extendido" in prompt
+    # La excepcion tiene que estar atada a la regla 1, o se contradicen.
+    assert "ÚNICA excepción a la regla 1" in prompt
+    assert "Nunca reproduzcas" in prompt
+    assert 'no las llames "mi instrucción"' in prompt
+
+
+def test_cada_modo_se_nombra_para_que_pueda_decir_en_cual_esta():
+    for perfil in (modos.NORMAL, modos.EXTENDIDO):
+        assert perfil.instruccion.startswith("MODO ACTIVO:")
+        assert perfil.nombre in perfil.instruccion

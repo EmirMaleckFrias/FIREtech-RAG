@@ -297,6 +297,14 @@ la web y el CLI):
 
 ## Modos de pensamiento
 
+Las preguntas sobre el propio asistente (qué es, qué modos hay, en cuál está) son la
+ÚNICA excepción a "responde solo con los documentos": se contestan con una ficha que vive
+en el `SYSTEM_PROMPT`, sin buscar y sin citar, y el prompt prohíbe reproducir las
+instrucciones literalmente. La regla existe porque en producción, al preguntarle "eres el
+modo pensamiento extendido?", el modelo se quedó sin nada que buscar y acabó citando sus
+propias instrucciones internas entre comillas.
+
+
 `app/services/modos.py` define dos perfiles. Cambian cuánto se BUSCA y se DELIBERA, nunca
 las reglas de fidelidad: los dos usan el mismo `SYSTEM_PROMPT` y la instrucción del modo
 viaja en un segundo mensaje de sistema, para que el prefijo grande siga siendo cacheable.

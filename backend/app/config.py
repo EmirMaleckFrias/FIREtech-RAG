@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # Versión del prompt del agente. Viaja en /api/health, /api/stats, en la
     # telemetría de cada respuesta y en los resultados de evals para que dos
     # mediciones solo se comparen si usaron el mismo prompt.
-    prompt_version: str = "v2"
+    prompt_version: str = "v3"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
