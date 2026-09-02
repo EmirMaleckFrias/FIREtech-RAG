@@ -12,7 +12,9 @@ de Postgres sobre `auth.users`, así que un registro con otro dominio falla incl
 la API de Supabase directamente.
 
 El contrato completo (endpoints, payload de Qdrant, reglas de negocio) vive en
-[SPEC.md](SPEC.md). Este README es solo para entender el sistema y arrancarlo.
+[SPEC.md](SPEC.md); la guía de operación (credenciales, variables, ingesta, verificación del
+índice, evals, despliegue, tests) en [docs/OPERACION.md](docs/OPERACION.md). Este README es
+solo para entender el sistema y arrancarlo.
 
 ---
 
@@ -26,13 +28,15 @@ El contrato completo (endpoints, payload de Qdrant, reglas de negocio) vive en
   `config` de `GET /api/stats`, para que la degradación sea visible y no folclore.
 - **Reranking listwise con LLM**: top-30 de Qdrant, una sola llamada JSON, corte a top-8.
   Si el JSON falla, se conserva el orden de Qdrant.
-- **Agente multi-hop** (tool calling, hasta `MAX_HOPS` búsquedas por pregunta) con 3 herramientas:
-  - `buscar_productos`: híbrida (o dense-only) + rerank.
-  - `buscar_por_precio`: ordena por el **precio real del payload**, no por lo que parece decir el
-    texto. Existe porque un superlativo de precio respondido "a ojo" cotizaba 13,615 USD cuando
-    el catálogo tenía el mismo tipo de detector a 3,088.89 USD.
-  - `inventario_del_indice`: totales, archivos, suplidores y marcas calculados **en vivo** con
-    facets/counts de Qdrant, sin nada hardcodeado.
+- **Agente multi-hop** (tool calling, hasta `MAX_HOPS` llamadas por pregunta) con **una sola
+  herramienta general, `consultar_catalogo`**, cuyos parámetros se componen según la pregunta:
+  búsqueda semántica (híbrida o dense-only + rerank), filtros por suplidor, marca y rango de
+  precio, orden por el **precio real del payload**, agrupación por suplidor, marca o archivo, y
+  límite. El enrutamiento vive en el motor, no en reglas del prompt por tipo de pregunta: "el
+  más barato de cada suplidor" es una llamada con `ordenar` + `agrupar_por`, y "cuántas marcas
+  hay" es un conteo real por facets de Qdrant, sin nada hardcodeado.
+  El orden por payload existe porque un superlativo de precio respondido "a ojo" cotizaba
+  13,615 USD cuando el catálogo tenía el mismo tipo de detector a 3,088.89 USD.
 - **Autenticación multiusuario (Supabase Auth) con roles** `admin` y `vendedor`. Un admin puede
   promover, degradar, **bloquear** (revoca acceso sin borrar nada) o **eliminar** cuentas.
   Nadie puede cambiarse, bloquearse ni borrarse a sí mismo.
@@ -111,20 +115,25 @@ copy .env.example .env
 | `OPENAI_API_KEY` | **Obligatoria.** Embeddings, agente, reranker. |
 | `OPENAI_MODEL` | Modelo del agente (default `gpt-5.4`). |
 | `EMBEDDING_MODEL` | `text-embedding-3-large` (3072 dims). Cambiarlo obliga a reindexar. |
-| `RERANK_MODEL` | Vacío = usa `OPENAI_MODEL`. |
+| `RERANK_MODEL` | Reranker y filtro de relevancia. Default `gpt-5.4-mini`; vacío = hereda `OPENAI_MODEL` (más caro). |
+| `OPENAI_TIMEOUT_S` / `OPENAI_MAX_RETRIES` / `OPENAI_CONCURRENCY` | Cliente OpenAI único: 120 s, 2 reintentos, 3 llamadas concurrentes. |
+| `PROMPT_VERSION` | Etiqueta del prompt del agente (`v1`); viaja en health, stats, telemetría y evals. |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `http://localhost:6333` y clave vacía en local. |
 | `QDRANT_COLLECTION` | `productos`. |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | **Obligatorias para autenticación real.** Son las que sostienen el login, los roles y toda la persistencia. La service key vive solo en el backend. |
-| `MAX_HOPS` | Tope de búsquedas por pregunta. El código trae 4; el entorno actual usa **8** (el agente necesita inventario + una búsqueda de precio por marca). |
+| `MAX_HOPS` | Tope de llamadas a la herramienta por pregunta. El código trae 4; Vercel tiene **8**, heredado del flujo de tres herramientas. Con `consultar_catalogo` las agregaciones resuelven en 1 llamada: revisar el valor (ver `docs/OPERACION.md`). |
 | `RERANK_TOP_K` / `SEARCH_TOP_K` | 8 y 30. |
 | `CORS_ORIGINS` | `http://localhost:5173` en desarrollo. |
 
-Dos variables que `config.py` lee pero **no** están en `.env.example`:
+Dos variables más, ya en `.env.example`:
 
 - `ENVIRONMENT` (`local` por defecto, `production` en Vercel): producción y local comparten la
   tabla `documents` pero tienen **Qdrants distintos**, así que el registro se filtra y se escribe
-  por entorno.
+  por entorno. `ingest.py` lo exige como flag en toda ingesta real.
 - `SKU_FASTPATH` (`true`): match exacto de SKUs detectados en la consulta.
+
+La tabla completa, con defaults y dónde vive cada variable (local o Vercel), está en
+[docs/OPERACION.md](docs/OPERACION.md).
 
 **Modo dev sin Supabase.** Si `SUPABASE_URL` y `SUPABASE_SERVICE_KEY` quedan vacías, el backend
 arranca igual: no hay autenticación real y todo corre con un usuario ficticio
@@ -149,16 +158,21 @@ El primer usuario `emir.malek@airobotix.net` nace `admin`; el resto nace `vended
 ### 5. Ingesta de los catálogos
 
 ```powershell
-.venv\Scripts\python ingest.py                 # fuente auto-detectada
-.venv\Scripts\python ingest.py --dry-run       # parse + chunk + validaciones, sin OpenAI/Qdrant
-.venv\Scripts\python ingest.py --reset         # borra y recrea la colección
-.venv\Scripts\python ingest.py --only Catalogo_Croker__2.xlsx
-.venv\Scripts\python ingest.py --source xlsx   # o pdf, para forzar la fuente
+.venv\Scripts\python ingest.py --dry-run                    # parse + chunk + validaciones, sin OpenAI/Qdrant
+.venv\Scripts\python ingest.py --environment local          # ingesta real al Qdrant local
+.venv\Scripts\python ingest.py --environment production     # QDRANT_URL/API_KEY al cluster de Qdrant Cloud
+.venv\Scripts\python ingest.py --environment local --reset --yes   # borra y recrea la colección
+.venv\Scripts\python ingest.py --environment local --only Catalogo_Croker__2.xlsx
+.venv\Scripts\python ingest.py --environment local --source xlsx   # o pdf, para forzar la fuente
 ```
 
-La fuente por defecto es `xlsx` si `data/raw_xlsx` está completa, y `pdf` si no. Las páginas de
-las citas salen siempre del PDF, cruzadas fila a fila. `--dry-run` incluye el gate que verifica
-que ningún costo interno se haya colado en el texto embebido.
+`--environment` es obligatorio en toda ingesta real (no en `--dry-run`); antes de embeber, el
+preflight imprime el host de Qdrant, la colección, sus puntos y las filas de `documents` del
+entorno. `--reset` exige `--yes` y se niega si hay documentos subidos por usuarios en la
+colección, salvo `--include-uploads`. La fuente por defecto es `xlsx` si `data/raw_xlsx` está
+completa, y `pdf` si no. Las páginas de las citas salen siempre del PDF, cruzadas fila a fila.
+Las validaciones (incluido el gate de costos internos) corren siempre, también en `--dry-run`.
+Para comprobar el índice después, `check_index.py` (ver `docs/OPERACION.md`).
 
 ### 6. API y frontend
 
@@ -176,6 +190,17 @@ npm run dev                 # http://localhost:5173, con proxy /api -> :8000
 La anon key del frontend es pública por diseño: quien protege los datos es el backend, que
 valida el token, más las policies de Supabase. La service key **nunca** sale del backend.
 
+### 7. Tests
+
+```powershell
+pip install -r backend/requirements-dev.txt
+cd backend
+python -m pytest -q
+```
+
+Los tests no llaman a OpenAI ni a Qdrant (usan el cliente falso de `openai_client`); el detalle
+operativo está en [docs/OPERACION.md](docs/OPERACION.md).
+
 ## 4. Calidad: qué se midió y qué salió
 
 - **Retrieval** ([docs/EVAL_RETRIEVAL.md](docs/EVAL_RETRIEVAL.md)): gold set congelado de 60
@@ -185,7 +210,7 @@ valida el token, más las policies de Supabase. La service key **nunca** sale de
 - **Respuestas** ([docs/EVAL_RESPUESTAS.md](docs/EVAL_RESPUESTAS.md)): juez LLM sobre 25 casos
   (7 regresiones de fallos reales de producción + 18 muestreados) con 5 criterios pass/fail:
   exactitud factual, citas, advertencias de precio, honestidad y completitud. PASS global 84%
-  en esa corrida, ~0.39 USD. Los 2 fallos que el informe deja abiertos se cerraron después
+  en esa corrida, ~0.39 USD (estimado, tarifas asumidas). Los 2 fallos que el informe deja abiertos se cerraron después
   (camino de precios determinista, commit `4db0807`). Se corre con `evals\judge_answers.py`.
 - **Fidelidad de la fuente** ([docs/DIFF_XLSX_VS_PDF.md](docs/DIFF_XLSX_VS_PDF.md)): los 6 PDFs
   son renders de Excel; se compararon **39,716 celdas** campo a campo entre ambas rutas con
@@ -194,7 +219,8 @@ valida el token, más las policies de Supabase. La service key **nunca** sale de
 - **Bugs**: cacería adversarial previa al primer commit con **16 bugs confirmados y corregidos**,
   más la auditoría de conversaciones reales de producción
   ([docs/audit_conversaciones_jefes.md](docs/audit_conversaciones_jefes.md)), de donde salieron
-  las herramientas de precio y de inventario.
+  el orden por precio real del payload y los conteos en vivo, hoy parámetros de
+  `consultar_catalogo`.
 
 Contexto de los catálogos y la estrategia de chunking:
 [docs/ANALISIS_CATALOGOS.md](docs/ANALISIS_CATALOGOS.md).
@@ -208,13 +234,18 @@ Contexto de los catálogos y la estrategia de chunking:
   la app ASGI de FastAPI, streaming SSE incluido (`maxDuration` 300 s, 1024 MB).
 - Rewrites: `/api/*` a la función y todo lo demás a `index.html` (SPA).
 - `api/requirements.txt` es el de backend **sin `uvicorn`** (el runtime sirve la app ASGI) y
-  **sin `fastembed`** (no cabe en la función; de ahí el dense-only).
+  **sin `fastembed`** (no cabe en la función; de ahí el dense-only). Los pins exactos están
+  pendientes de confirmar con un deploy de preview.
+- `.python-version` en la raíz fija el runtime de la función en **3.12**; el venv local sigue
+  en 3.14.
 - `.vercelignore` mantiene el bundle pequeño y evita que datos o secretos suban.
 
 Variables de entorno en Vercel: `OPENAI_API_KEY`, `OPENAI_MODEL`, `EMBEDDING_MODEL`,
-`RERANK_MODEL`, `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`, `SUPABASE_URL`,
-`SUPABASE_SERVICE_KEY`, `MAX_HOPS`, `ENVIRONMENT=production`, y para el build del frontend
-`VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`.
+`RERANK_MODEL` (recomendado `gpt-5.4-mini`), `OPENAI_TIMEOUT_S`, `OPENAI_MAX_RETRIES`,
+`OPENAI_CONCURRENCY`, `PROMPT_VERSION`, `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`,
+`SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `MAX_HOPS`, `ENVIRONMENT=production`, y para el build
+del frontend `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`. Tras cambiar una, redeploy; el
+valor vigente se comprueba en `GET /api/health`.
 
 **Qdrant Cloud** guarda el índice de producción. Se puebla ejecutando `ingest.py` desde una
 máquina local con `QDRANT_URL` y `QDRANT_API_KEY` apuntando al cluster; en la función serverless
@@ -240,7 +271,10 @@ de Qdrant más el registro en Supabase.
 - **Precio neto y precio de lista no son comparables** sin etiquetar: Aleum y Reliable dan
   net/net, Croker y Notifier dan lista. Las respuestas indican cuál es cuál.
 - **Costos internos nunca se exponen**, a ningún rol. Viven en el payload marcados como internos
-  y hay un test de ingesta que lo garantiza.
+  y `_point_to_chunk` no los saca por la API. Lo que garantiza que no entren al texto embebido
+  es una validación de la ingesta (`find_cost_leaks`, dentro de `pipeline.validate`) que aborta
+  la ingesta y el `--dry-run` si un costo interno aparece en cualquier texto. No hay un test
+  automatizado de esto todavía.
 - **Datos sucios del origen** manejados con flags, no ocultados: SKUs duplicados contradictorios
   en Aleum, 102 part numbers repetidos en Notifier (fusionados a la fila más completa), typos y
   unidades mal escritas, marcas mal etiquetadas (hay VESDA marcados como Fire-Lite, razón por la

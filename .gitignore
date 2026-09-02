@@ -2,6 +2,7 @@
 backend/.venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Node
 frontend/node_modules/
@@ -19,6 +20,9 @@ backend/.app_access_key.txt
 # Datos del negocio: catálogos con costos internos confidenciales.
 # No se versionan; la ingesta los espera en data/raw (PDF) y data/raw_xlsx (Excel).
 data/
+
+# Resultados de evals (results.json + report.md por corrida); los docs/EVAL_*.md sí se versionan.
+backend/evals/results/
 
 # Vercel
 .vercel

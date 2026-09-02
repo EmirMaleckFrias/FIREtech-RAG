@@ -5,6 +5,7 @@ import asyncio
 import functools
 import json
 import logging
+import sys
 import uuid
 from typing import Literal
 
@@ -15,14 +16,16 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.config import get_settings
 from app.models import SearchFilters
-from app.services import supabase_db
+from app.services import supabase_db, telemetry
 from app.services.agent import run_agent
 from app.services.auth import AuthUser, current_user, require_admin
 from app.services.qdrant import (
+    bm25_backend,
     collection_count,
     hybrid_search,
     index_inventory,
     retrieval_mode,
+    server_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,26 @@ _HISTORY_MAX_MESSAGES = 8
 
 def _json(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
+
+
+def _runtime_config() -> dict:
+    """Configuración efectiva del proceso, la misma en /health y /stats.
+
+    Sirve para comparar local y producción de un vistazo: modo de retrieval
+    real (no el deseado), modelos resueltos, versión del prompt y del
+    intérprete. Ningún valor aquí es secreto ni depende del usuario.
+    """
+    settings = get_settings()
+    return {
+        "retrieval": retrieval_mode(),
+        "bm25_backend": bm25_backend(),
+        "model": settings.openai_model,
+        "rerank_model": settings.rerank_model_resolved,
+        "max_hops": settings.max_hops,
+        "prompt_version": settings.prompt_version,
+        "python": sys.version.split()[0],
+        "environment": settings.environment,
+    }
 
 
 def _save_partial_message(
@@ -56,6 +79,30 @@ def _save_partial_message(
         logger.exception(
             "No se pudo guardar la respuesta parcial (session %s)", session_id
         )
+
+
+def _log_metrics(session_id: str | None, metrics: dict) -> None:
+    """Una línea por pregunta con lo que costó responderla.
+
+    El coste en USD es una estimación con tarifas asumidas y se etiqueta
+    siempre como tal (telemetry.PRICING_LABEL). No incluye texto de nadie.
+    """
+    tokens = metrics.get("tokens") or {}
+    logger.info(
+        "Métricas /api/chat (session %s): rondas=%d (agente=%d) tokens "
+        "prompt=%d cached=%d completion=%d reasoning=%d coste=%.6f USD (%s) "
+        "ms=%.0f",
+        session_id,
+        metrics.get("rounds_total", 0),
+        metrics.get("agent_rounds", 0),
+        tokens.get("prompt", 0),
+        tokens.get("cached", 0),
+        tokens.get("completion", 0),
+        tokens.get("reasoning", 0),
+        metrics.get("cost_usd", 0.0),
+        metrics.get("cost_label", telemetry.PRICING_LABEL),
+        metrics.get("ms_total", 0.0),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -88,12 +135,14 @@ async def health() -> dict:
     from app.api.documents import UPLOAD_LIMIT_MB
 
     count = await run_in_threadpool(collection_count)
+    version = await run_in_threadpool(server_version)
     return {
         "status": "ok",
         "qdrant": count is not None,
+        "qdrant_version": version,
         "collection_points": count if count is not None else 0,
         "upload_limit_mb": UPLOAD_LIMIT_MB,
-        "retrieval": retrieval_mode(),
+        **_runtime_config(),
     }
 
 
@@ -139,15 +188,18 @@ async def stats(admin: AuthUser = Depends(require_admin)) -> dict:
         index = {"products": 0, "chunks": 0, "files": 0, "suppliers": []}
 
     activity = await run_in_threadpool(supabase_db.activity_stats)
+    version = await run_in_threadpool(server_version)
     return {
         "index": index,
         "activity": activity,
         "config": {
-            "model": settings.openai_model,
+            **_runtime_config(),
             "embedding_model": settings.embedding_model,
-            "max_hops": settings.max_hops,
+            "search_top_k": settings.search_top_k,
+            "rerank_top_k": settings.rerank_top_k,
+            "openai_concurrency": settings.openai_concurrency,
             "upload_limit_mb": UPLOAD_LIMIT_MB,
-            "retrieval": retrieval_mode(),
+            "qdrant_version": version,
         },
     }
 
@@ -221,7 +273,13 @@ async def chat(
 ) -> EventSourceResponse:
     """Chat con el agente multi-hop. Respuesta SSE (text/event-stream).
 
-    Eventos: session → (hop | sources | token)* → done, o error ante excepción.
+    Eventos: session → (hop | sources | token)* → metrics → done, o
+    (metrics)? → error ante excepción.
+
+    `metrics` es aditivo: el frontend ignora los eventos que no conoce
+    (rama `default` del switch en api.ts), así que añadirlo no rompe
+    clientes viejos. La persistencia en `chat_messages.metrics` llega con
+    la migración 009; hasta entonces solo viaja por SSE y al log.
     """
     # La pertenencia de la sesión se verifica ANTES de abrir el stream: así un
     # session_id ajeno devuelve un 404 JSON normal en vez de un 200 con un
@@ -238,6 +296,16 @@ async def chat(
             raise HTTPException(status_code=404, detail=_SESSION_404)
 
     async def event_generator():
+        # Telemetría de ESTA pregunta: se fija una vez aquí, en la corrutina
+        # raíz, y la leen agente/reranker/embeddings por ContextVar. En meta
+        # solo va configuración (nunca user_id, email ni el texto de la
+        # pregunta): el resumen sale por SSE y al log.
+        settings = get_settings()
+        tel = telemetry.start(
+            prompt_version=settings.prompt_version,
+            environment=settings.environment,
+            retrieval=retrieval_mode(),
+        )
         # Acumulador de la respuesta parcial: si el cliente aborta a mitad de
         # stream, se persiste lo emitido hasta el momento para que el user
         # message no quede huérfano en el historial (dos "user" seguidos
@@ -303,7 +371,13 @@ async def chat(
             if final is None:
                 raise RuntimeError("El agente terminó sin producir respuesta final")
 
-            # 5. Guardar mensaje assistant (con sources y hops) y emitir done.
+            # 5. Métricas de la pregunta, antes de persistir y de `done`: es el
+            # mismo resumen que la migración 009 guardará junto al mensaje.
+            metrics = tel.summary()
+            yield {"event": "metrics", "data": _json(metrics)}
+            _log_metrics(session_id, metrics)
+
+            # 6. Guardar mensaje assistant (con sources y hops) y emitir done.
             # En su propio try/except: si el guardado falla tras streamear la
             # respuesta completa, NO se emite error (el usuario ya la vio);
             # se emite done con message_id vacío.
@@ -368,6 +442,17 @@ async def chat(
                     "Ocurrió un error procesando tu solicitud. "
                     "Inténtalo de nuevo."
                 )
+            # Lo gastado hasta el fallo también cuenta: se emite `metrics`
+            # antes de `error`, pero nunca a costa del propio evento de error.
+            metrics_json: str | None = None
+            try:
+                metrics = tel.summary()
+                metrics_json = _json(metrics)
+                _log_metrics(session_id, metrics)
+            except Exception:
+                logger.exception("No se pudo resumir la telemetría tras el error")
+            if metrics_json is not None:
+                yield {"event": "metrics", "data": metrics_json}
             yield {"event": "error", "data": _json({"detail": detail})}
 
     return EventSourceResponse(event_generator())

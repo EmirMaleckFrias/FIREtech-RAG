@@ -41,6 +41,27 @@ except Exception:  # ImportError u otros fallos de carga del paquete
 
 _UPSERT_BATCH = 64
 
+# Índices de payload que la colección necesita. `price_usd` (float) lo exige
+# `scan_by_price` para el order_by y el rango de precio; `price_status`
+# (keyword) lo facetea check_index.py. Misma lista que
+# check_index.EXPECTED_INDEXES (ese script no importa este módulo a propósito,
+# para no arrastrar embeddings/fastembed): si cambia una, cambiar la otra.
+PAYLOAD_INDEXES: tuple[tuple[str, models.PayloadSchemaType], ...] = (
+    ("project_id", models.PayloadSchemaType.KEYWORD),
+    ("document_id", models.PayloadSchemaType.KEYWORD),
+    ("document_type", models.PayloadSchemaType.KEYWORD),
+    ("language", models.PayloadSchemaType.KEYWORD),
+    ("brand", models.PayloadSchemaType.KEYWORD),
+    ("category", models.PayloadSchemaType.KEYWORD),
+    ("source_file", models.PayloadSchemaType.KEYWORD),
+    ("has_price", models.PayloadSchemaType.BOOL),
+    ("skus", models.PayloadSchemaType.KEYWORD),
+    ("supplier", models.PayloadSchemaType.KEYWORD),
+    ("chunk_type", models.PayloadSchemaType.KEYWORD),
+    ("price_usd", models.PayloadSchemaType.FLOAT),
+    ("price_status", models.PayloadSchemaType.KEYWORD),
+)
+
 # Singletons módulo-level, inicializados de forma lazy para que importar este
 # módulo no requiera Qdrant corriendo ni descargar el modelo BM25.
 _client: QdrantClient | None = None
@@ -110,15 +131,7 @@ def ensure_collection() -> None:
     )
     logger.info("Colección '%s' creada.", name)
 
-    for field, schema in (
-        ("brand", models.PayloadSchemaType.KEYWORD),
-        ("category", models.PayloadSchemaType.KEYWORD),
-        ("source_file", models.PayloadSchemaType.KEYWORD),
-        ("has_price", models.PayloadSchemaType.BOOL),
-        ("skus", models.PayloadSchemaType.KEYWORD),
-        ("supplier", models.PayloadSchemaType.KEYWORD),
-        ("chunk_type", models.PayloadSchemaType.KEYWORD),
-    ):
+    for field, schema in PAYLOAD_INDEXES:
         try:
             client.create_payload_index(
                 collection_name=name, field_name=field, field_schema=schema
@@ -134,8 +147,40 @@ def retrieval_mode() -> str:
     En producción serverless fastembed no cabe en la función, así que las
     consultas son dense-only aunque los vectores sparse existan en el índice.
     Exponerlo en /api/health y /api/stats hace visible la degradación.
+
+    Fuerza la carga perezosa del modelo (`_get_bm25()`), así que la primera
+    llamada puede tardar lo que tarde fastembed en inicializarse; a cambio
+    refleja exactamente lo que decidirá `hybrid_search` (antes bastaba con
+    tener fastembed instalado para decir 'hybrid', aunque la carga fallara
+    después). Sin fastembed (`_make_bm25 is None`) no cuesta nada.
     """
-    return "hybrid" if _make_bm25 is not None else "dense-only"
+    return "hybrid" if _get_bm25() is not None else "dense-only"
+
+
+def bm25_backend() -> str:
+    """Implementación del codificador sparse en uso: 'fastembed' o 'none'.
+
+    Separado de `retrieval_mode()` para que /health distinga "no hay BM25"
+    de "hay BM25 pero con otro backend" (la Fase 4 añadirá 'pure').
+    """
+    return "fastembed" if retrieval_mode() == "hybrid" else "none"
+
+
+_server_version: str | None = None
+
+
+def server_version() -> str | None:
+    """Versión del servidor Qdrant (`GET /` via `client.info()`), o None si
+    no responde. Se cachea en un global tras la primera respuesta válida:
+    la versión no cambia mientras vive el proceso. Nunca lanza."""
+    global _server_version
+    if _server_version is None:
+        try:
+            _server_version = get_client().info().version or None
+        except Exception as exc:
+            logger.debug("Qdrant no responde a info(): %s", exc)
+            return None
+    return _server_version
 
 
 def collection_count() -> int | None:
@@ -173,6 +218,13 @@ _PAYLOAD_KEYS = (
     "text",
     "source_file",
     "page",
+    "project_id",
+    "document_id",
+    "section",
+    "language",
+    "document_type",
+    "source_pages",
+    "metadata",
     "brand",
     "category",
     "skus",
@@ -205,6 +257,21 @@ _PAYLOAD_KEYS = (
 )
 
 
+def _price_usd(chunk: dict) -> float | None:
+    """Precio unificado del payload: el neto si existe, si no el de lista.
+
+    Es el campo `price_usd` por el que ordena y filtra `scan_by_price` (índice
+    float). Se deriva aquí, en el upsert, para que una ingesta desde cero
+    produzca lo mismo que el backfill que lo creó en las colecciones actuales;
+    los productos sin precio numérico (call, discontinued, missing) y los
+    chunks que no son producto quedan en None y fuera del orden.
+    """
+    net = chunk.get("price_net_usd")
+    if net is not None:
+        return net
+    return chunk.get("price_list_usd")
+
+
 def upsert_chunks(chunks: list[dict]) -> int:
     """Upserta chunks (con vector denso precalculado en `chunk["dense"]`).
 
@@ -224,6 +291,7 @@ def upsert_chunks(chunks: list[dict]) -> int:
         if sv is not None and len(sv.indices) > 0:
             vector["bm25"] = sv
         payload = {key: chunk.get(key) for key in _PAYLOAD_KEYS}
+        payload["price_usd"] = _price_usd(chunk)
         points.append(
             models.PointStruct(id=chunk["id"], vector=vector, payload=payload)
         )
@@ -258,6 +326,30 @@ def delete_by_file(source_file: str) -> None:
 
 def _build_filter(filters: SearchFilters) -> models.Filter | None:
     must: list[models.FieldCondition] = []
+    if filters.project_id:
+        must.append(
+            models.FieldCondition(
+                key="project_id", match=models.MatchValue(value=filters.project_id)
+            )
+        )
+    if filters.document_id:
+        must.append(
+            models.FieldCondition(
+                key="document_id", match=models.MatchValue(value=filters.document_id)
+            )
+        )
+    if filters.document_type:
+        must.append(
+            models.FieldCondition(
+                key="document_type", match=models.MatchValue(value=filters.document_type)
+            )
+        )
+    if filters.language:
+        must.append(
+            models.FieldCondition(
+                key="language", match=models.MatchValue(value=filters.language)
+            )
+        )
     if filters.brand:
         must.append(
             models.FieldCondition(
@@ -566,6 +658,13 @@ def _point_to_chunk(point: Any) -> Chunk:
         text=payload.get("text") or "",
         source_file=payload.get("source_file") or "",
         page=int(payload.get("page") or 0),
+        project_id=payload.get("project_id"),
+        document_id=payload.get("document_id"),
+        section=payload.get("section") or "",
+        language=payload.get("language") or "",
+        document_type=payload.get("document_type") or "",
+        source_pages=payload.get("source_pages") or [],
+        metadata=payload.get("metadata") or {},
         brand=payload.get("brand") or "",
         category=payload.get("category") or "",
         skus=payload.get("skus") or [],

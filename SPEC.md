@@ -1,4 +1,4 @@
-# SPEC — RAG de Productos (Protección Contra Incendios)
+# SPEC: RAG de Productos (Protección Contra Incendios)
 
 Contrato de arquitectura. Cualquier código del proyecto debe respetar estas interfaces.
 
@@ -6,7 +6,8 @@ Contrato de arquitectura. Cualquier código del proyecto debe respetar estas int
 - **Vector DB**: Qdrant (local vía Docker Compose, o Qdrant Cloud vía env)
 - **Embeddings**: OpenAI `text-embedding-3-large` (3072 dims)
 - **LLM agente**: OpenAI, modelo configurable vía `OPENAI_MODEL` (default `gpt-5.4`)
-- **Backend**: Python 3.14 + FastAPI (puerto 8000)
+- **Backend**: Python + FastAPI (puerto 8000). Venv local en 3.14; en Vercel el runtime lo
+  fija `.python-version` (3.12) en la raíz del repo. El código debe correr en ambos.
 - **Frontend**: React + Vite + TypeScript (puerto 5173)
 - **DB relacional**: Supabase (sesiones de chat, mensajes, registro de ingesta, feedback)
 
@@ -17,7 +18,9 @@ Rag - Productos/
 ├── backend/
 │   ├── requirements.txt
 │   ├── .env.example
-│   ├── ingest.py              # CLI: python ingest.py [--reset]
+│   ├── ingest.py              # CLI: python ingest.py --environment local|production
+│   │                          #      [--dry-run] [--reset --yes [--include-uploads]] [--only ...] [--source ...]
+│   ├── check_index.py         # solo lectura: estado real del índice (ver docs/OPERACION.md)
 │   └── app/
 │       ├── main.py            # FastAPI app + CORS
 │       ├── config.py          # pydantic-settings, lee .env
@@ -59,16 +62,34 @@ Rag - Productos/
     "skus": ["RA1414", "..."],
     "product_names": ["..."],
     "has_price": true,
-    "chunk_type": "product_row | family_section | page"
+    "supplier": "RELIABLE",
+    "price_usd": 123.45,
+    "price_status": "numeric | call | discontinued | missing",
+    "chunk_type": "product | family_summary | doc_text | doc_row"
   }
   ```
-- Índices de payload: `brand`, `category`, `source_file`, `has_price` (keyword/bool).
+  `product` y `family_summary` salen de los 6 catálogos; `doc_text` y `doc_row` de los
+  documentos subidos por la API (ver "Parseo genérico"). El payload completo (campos ricos del
+  esquema canónico, costo interno incluido) es `_PAYLOAD_KEYS` en `app/services/qdrant.py`
+  más `price_usd`, que `upsert_chunks` deriva al indexar (`price_net_usd` si existe, si no
+  `price_list_usd`; None sin precio numérico); `_point_to_chunk` no expone los internos.
+- Índices de payload (9): `brand`, `category`, `source_file`, `has_price` (bool), `skus`,
+  `supplier`, `chunk_type` (keyword), `price_usd` (float, lo usa el orden por precio) y
+  `price_status` (keyword). La lista vive en `qdrant.PAYLOAD_INDEXES` (los crea
+  `ensure_collection` con la colección) y, duplicada a propósito, en
+  `check_index.EXPECTED_INDEXES`; `check_index.py` compara los existentes con ella y
+  `--apply-indexes` crea los que falten en una colección ya existente.
 
 ## API Backend (contrato para el frontend)
 Base: `http://localhost:8000`
 
 ### `GET /api/health`
-→ `{ "status": "ok", "qdrant": true, "collection_points": 1234 }`
+→ `{ "status": "ok", "qdrant": true, "collection_points": 1234, "upload_limit_mb": 4,
+     "retrieval": "hybrid" | "dense-only", "bm25_backend": str, "qdrant_version": str,
+     "model": str, "rerank_model": str, "max_hops": int, "prompt_version": str,
+     "python": str, "environment": "local" | "production" }`
+`retrieval` es honesto: `hybrid` solo si el codificador BM25 está cargado en ese proceso; si no,
+`dense-only` (el estado permanente de producción).
 
 ### `POST /api/search`
 Body: `{ "query": str, "top_k": int = 8, "brand": str|null, "category": str|null }`
@@ -78,9 +99,20 @@ Body: `{ "query": str, "top_k": int = 8, "brand": str|null, "category": str|null
 Body: `{ "session_id": str|null, "message": str }`
 Respuesta: `text/event-stream`, eventos:
 - `event: session` → `data: {"session_id": "uuid"}` (primero, siempre)
-- `event: hop` → `data: {"n": 1, "query": "consulta reformulada del agente"}` (cada búsqueda del agente)
-- `event: sources` → `data: {"sources": [{"source_file", "page", "brand", "snippet", "score"}]}` (antes de los tokens; puede re-emitirse durante el stream — el frontend usa el ÚLTIMO evento recibido)
+- `event: hop` → `data: {"n": 1, "query": "resumen legible de la llamada a consultar_catalogo"}`
+  (una por llamada a la herramienta). El mismo dict, ya persistido en `chat_messages.hops`,
+  lleva además `ms` (duración), `resultados` (chunks devueltos) y `chars` (tamaño del texto
+  que volvió al modelo): el agente lo muta in place tras ejecutar la llamada.
+- `event: sources` → `data: {"sources": [{"source_file", "page", "brand", "snippet", "score"}]}` (antes de los tokens; puede re-emitirse durante el stream: el frontend usa el ÚLTIMO evento recibido)
 - `event: token` → `data: {"text": "..."}` (delta de texto de la respuesta)
+- `event: metrics` → `data: telemetry.summary()` (aditivo, justo antes de `done`; el frontend
+  lo ignora hoy). Payload: `ms_total`, `rounds_total`, `agent_rounds`,
+  `tokens {prompt, cached, completion, reasoning}` (medidos, del `usage` real),
+  `cached_ratio`, `by_component` (`agente`, `reranker`, `embeddings`), `by_model`,
+  `cost_usd` (estimado), `cost_label` (siempre "estimado, tarifas asumidas"),
+  `unknown_models`, `counters` (`hops`, `hops_con_error`, `llamadas_repetidas`,
+  `forced_final`, `rounds_sin_usage`), `marks`, `meta` (modelo, `prompt_version`,
+  `retrieval`...) y `rounds` (una entrada por llamada al LLM).
 - `event: done` → `data: {"message_id": "uuid"}`
 - `event: error` → `data: {"detail": "..."}`
 
@@ -140,8 +172,13 @@ Slide-over (bottom sheet en móvil) que se abre desde el pie del sidebar, con pe
 ```json
 { "index": {"products", "chunks", "files", "suppliers": []},
   "activity": {"questions_total", "questions_7d", "active_users_7d", "feedback_up", "feedback_down"},
-  "config": {"model", "embedding_model", "max_hops", "upload_limit_mb"} }
+  "config": {"model", "rerank_model", "embedding_model", "max_hops", "prompt_version",
+             "search_top_k", "rerank_top_k", "openai_concurrency",
+             "upload_limit_mb", "retrieval", "bm25_backend", "qdrant_version",
+             "python", "environment"} }
 ```
+`retrieval` sigue la misma regla que en `/api/health`: `hybrid` solo si BM25 funciona en ese
+proceso, si no `dense-only`.
 
 **Gestión de usuarios (solo admin)**
 - `GET /api/users` → `{ "users": [{ "id", "email", "role", "created_at", "last_sign_in_at",
@@ -224,7 +261,8 @@ pueden borrar por esta vía (403). → `{ "ok": true }`
      limite?, por_grupo? }`
   - Solo `semantico` → híbrida/dense + fast-path de SKU + reranker (top 8).
   - `ordenar` sin `semantico` → scroll de Qdrant ordenado por el payload `price_usd`
-    (neto si existe, si no lista; backfill sin re-embeber), EXACTO y sin LLM.
+    (neto si existe, si no lista; lo escribe `upsert_chunks` en cada ingesta y en las
+    colecciones actuales llegó por backfill sin re-embeber), EXACTO y sin LLM.
   - `ordenar` + `semantico` → pool híbrido + clasificación binaria de relevancia +
     orden por precio real.
   - `agrupar_por` con `ordenar` → un scroll exacto por grupo ("el más barato de cada
@@ -236,6 +274,11 @@ pueden borrar por esta vía (403). → `{ "ok": true }`
 - Guard de deduplicación: una llamada idéntica repetida no se re-ejecuta ni consume
   presupuesto. Máximo `MAX_HOPS` llamadas por pregunta (con la tool compuesta, las
   preguntas de agregación resuelven en 1).
+- Cliente OpenAI único por loop (`app/services/openai_client.py`) con semáforo
+  (`OPENAI_CONCURRENCY`), timeout y reintentos de settings. Cada ronda se pide con
+  `stream_options: {include_usage: true}` y se registra en `app/services/telemetry.py`
+  (componente `agente`); el reranker y los embeddings registran los suyos. El resumen sale
+  como evento SSE `metrics`.
 - **Fidelidad**: system prompt exige responder SOLO con lo recuperado, citar `[archivo, pág. X]`
   en cada afirmación factual, y decir explícitamente cuando algo no está en los catálogos.
   Precios siempre con moneda y con la advertencia de que provienen del catálogo (pueden estar desactualizados).
@@ -243,7 +286,8 @@ pueden borrar por esta vía (403). → `{ "ok": true }`
 
 ## Reranker
 - Listwise LLM: un solo request con query + candidatos numerados → JSON `{"ranking": [idx...], "scores": {...}}`.
-- Modelo: `RERANK_MODEL` (default = `OPENAI_MODEL`). Corta a `RERANK_TOP_K=8`.
+- Modelo: `RERANK_MODEL` (default `gpt-5.4-mini`; vacío = hereda `OPENAI_MODEL`). Corta a
+  `RERANK_TOP_K=8`. También lo usa el filtro binario de relevancia del camino de precios.
 - Fallback: si el JSON falla, mantener orden de Qdrant.
 
 ## Supabase (tablas)
@@ -259,7 +303,11 @@ pueden borrar por esta vía (403). → `{ "ok": true }`
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-5.4
 EMBEDDING_MODEL=text-embedding-3-large
-RERANK_MODEL=            # vacío = usa OPENAI_MODEL
+RERANK_MODEL=gpt-5.4-mini   # default en código; vacío = hereda OPENAI_MODEL
+OPENAI_TIMEOUT_S=120        # timeout por request del cliente único
+OPENAI_MAX_RETRIES=2        # reintentos del SDK
+OPENAI_CONCURRENCY=3        # semáforo de llamadas concurrentes a OpenAI
+PROMPT_VERSION=v1           # etiqueta del prompt; viaja en health, stats, metrics y evals
 QDRANT_URL=http://localhost:6333
 QDRANT_API_KEY=          # vacío para local
 QDRANT_COLLECTION=productos
@@ -268,12 +316,15 @@ SUPABASE_SERVICE_KEY=
 MAX_HOPS=4
 RERANK_TOP_K=8
 SEARCH_TOP_K=30
+SKU_FASTPATH=true
+ENVIRONMENT=local        # 'production' en Vercel
 CORS_ORIGINS=http://localhost:5173
 ```
-Si `SUPABASE_URL` está vacío, el backend funciona igual (persistencia en memoria, con warning) —
-para poder probar el RAG sin esperar credenciales.
+Si `SUPABASE_URL` está vacío, el backend funciona igual (persistencia en memoria, con warning),
+para poder probar el RAG sin esperar credenciales. Dónde vive cada variable (local o Vercel) y
+las recomendaciones de valores: [docs/OPERACION.md](docs/OPERACION.md).
 
-## Interfaces internas del backend (firmas exactas — los módulos se implementan en paralelo)
+## Interfaces internas del backend (firmas exactas: los módulos se implementan en paralelo)
 
 Tipos compartidos: `app/models.py` (ya existe: `Chunk`, `SearchFilters`, `SourceRef`).
 Config: `from app.config import get_settings` (ya existe). Embeddings: `app/services/embeddings.py` (ya existe:
@@ -304,10 +355,25 @@ async def rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]
 async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEvent]
     # history: [{"role": "user"|"assistant", "content": str}, ...] (mensajes previos de la sesión)
     # AgentEvent = dataclass(type: Literal["hop","sources","token","final"], data: dict)
-    #   hop: {"n": int, "query": str} | sources: {"sources": [SourceRef.model_dump()]}
+    #   hop: {"n": int, "query": str} (+ "ms", "resultados", "chars" tras ejecutarse)
+    #   sources: {"sources": [SourceRef.model_dump()]}
     #   token: {"text": str} | final: {"content": str, "sources": [...], "hops": [...]}
-    # Internamente: loop de tool-calling (máx MAX_HOPS), tool buscar_productos →
-    # hybrid_search(top SEARCH_TOP_K) → rerank(→ RERANK_TOP_K); respuesta final en streaming.
+    # Internamente: loop de tool-calling (máx MAX_HOPS) con UNA sola tool,
+    # consultar_catalogo (_CATALOG_TOOL), parámetros: semantico, suplidor, marca,
+    # precio_min, precio_max, ordenar (precio_asc|precio_desc),
+    # agrupar_por (suplidor|marca|archivo), limite (default 8, máx 20),
+    # por_grupo (default 3, máx 5). Cada llamada la resuelve _execute_catalog_query:
+    #   - agrupar_por sin ordenar ni semantico → conteos reales por facets;
+    #   - agrupar_por + ordenar → scan_by_price por grupo (scroll ordenado por price_usd);
+    #   - ordenar solo → scan_by_price sobre el payload, exacto y sin LLM;
+    #   - ordenar + semantico → _execute_price_search: pool híbrido (120) filtrado por
+    #     suplidor en Qdrant o por marca como post-filtro, orden por price_usd del payload
+    #     y filtro binario de relevancia (filter_relevant) que preserva el orden;
+    #   - semantico solo → _execute_search: hybrid_search(top SEARCH_TOP_K) + fast-path
+    #     de SKU + rerank(→ RERANK_TOP_K).
+    # Una llamada con parámetros idénticos a una ya ejecutada no se repite. Cada ronda
+    # del LLM va con stream_options include_usage y se registra en telemetry; la
+    # respuesta final se emite en streaming.
 ```
 
 `app/services/supabase_db.py` (todas síncronas, se llaman con run_in_threadpool desde routes, o async si el SDK lo permite):

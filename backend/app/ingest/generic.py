@@ -86,6 +86,8 @@ def _base_chunk(
         "text": text,
         "source_file": file_name,
         "page": page,
+        "document_type": Path(file_name).suffix.lower().lstrip(".") or "unknown",
+        "source_pages": source_pages,
         "brand": "",
         "category": "",
         "skus": _extract_sku_candidates(text),
@@ -110,7 +112,6 @@ def _base_chunk(
         "visibility": "public",
         "data_quality_flags": [],
         "source_row": source_row,
-        "source_pages": source_pages,
     }
 
 

@@ -1,20 +1,33 @@
-"""Orquestación de la ingesta: parse → chunk → validaciones → embed → upsert.
+"""Orquestación de la ingesta: parse → chunk → validaciones → preflight →
+embed → upsert.
 
 - Dry-run: parse + chunk + validaciones SIN llamadas a OpenAI ni Qdrant ni
   Supabase (imports de servicios diferidos); imprime stats por archivo y
   devuelve exit code 1 si alguna validación falla.
-- Ingesta real: embed_texts (batch) → ensure_collection + delete_by_file +
-  upsert_chunks → registro en Supabase (start_run/register_document/finish_run).
+- Ingesta real: preflight (entorno, Qdrant y Supabase, sin gastar nada) →
+  embed_texts (batch) → ensure_collection + delete_by_file + upsert_chunks →
+  registro en Supabase (start_run/register_document/finish_run).
+
+Preflight (solo ingesta real, antes de embeber el primer chunk): imprime el
+entorno (`environment`, el que etiqueta las filas de `documents`), el host de
+Qdrant sin credenciales, si la colección existe y cuántos puntos tiene, y
+cuántas filas de `documents` hay para ese entorno. Con `reset`, la colección
+se borra SOLO tras pasar la guarda de uploads: si contiene chunks de
+documentos subidos por usuarios (chunk_type doc_text/doc_row) aborta con
+exit 2 salvo `include_uploads`, porque esos documentos se perderían.
 
 Fuentes (`source`):
 - 'xlsx' (default si data/raw_xlsx está completa): los VALORES salen de los
   .xlsx originales (fuente de verdad, cero riesgo de parseo PDF) y las
   páginas de cita (page/source_pages) se cruzan por número de fila con el
-  parseo del PDF — los humanos abren el PDF. Filas sin correlato en el PDF
+  parseo del PDF (los humanos abren el PDF). Filas sin correlato en el PDF
   quedan con page=0 y source_pages=[].
 - 'pdf': ruta original, parsea los renders PDF de data/raw.
 Las validaciones (conteos exactos, SKU en cada chunk, gate de costos
 confidenciales) aplican a ambas rutas; la de mojibake U+FFFD solo a la PDF.
+
+Exit codes de `run_ingest`: 0 ok, 1 fallo (validación o error en la ingesta),
+2 abortado por una guarda del preflight (nada se tocó).
 """
 from __future__ import annotations
 
@@ -22,6 +35,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.config import DATA_RAW_DIR
 from app.ingest.chunk import SUPPLIERS, build_chunks, find_cost_leaks
@@ -45,6 +59,17 @@ CANONICAL_FILES = [
     "Catalogo_Croker__2.pdf",
     "Notifier_.pdf",
 ]
+
+# chunk_type de los documentos subidos por usuarios (contrato de
+# app/ingest/generic.py: "doc_text" para PDF/TXT/MD, "doc_row" para XLSX/CSV).
+# Los catálogos canónicos usan "product" y "family_summary" (app/ingest/chunk.py).
+# Un --reset borra la colección entera, así que estos son los puntos que NO
+# se pueden regenerar desde data/raw: la guarda de uploads cuenta exactamente
+# estos tipos.
+UPLOAD_CHUNK_TYPES = ("doc_text", "doc_row")
+
+# Exit code de las guardas del preflight (nada se tocó).
+EXIT_ABORTED = 2
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +190,166 @@ def _resolve_files(only: str | None, source: str) -> list[tuple[str, Path, Path 
     return files
 
 
-def run_ingest(only: str | None = None, dry_run: bool = False,
-               reset: bool = False, source: str | None = None) -> int:
-    """Devuelve el exit code del proceso (0 ok, 1 fallo).
+# ---------------------------------------------------------------------------
+# Preflight de la ingesta real (sin gastar nada: ni OpenAI ni escrituras)
+# ---------------------------------------------------------------------------
+def _qdrant_host_label(url: str) -> str:
+    """Host[:puerto] de la URL de Qdrant, sin credenciales ni query string."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or url
+        return f"{host}:{parts.port}" if parts.port else host
+    except Exception:
+        return "(url no parseable)"
 
-    source: 'xlsx' | 'pdf' | None (auto: xlsx si data/raw_xlsx está completa)."""
+
+def _count_upload_chunks(client, collection: str) -> int:
+    """Puntos de la colección cuyo chunk_type es de documento subido."""
+    from qdrant_client import models
+
+    return client.count(
+        collection_name=collection,
+        exact=True,
+        count_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="chunk_type",
+                    match=models.MatchAny(any=list(UPLOAD_CHUNK_TYPES)),
+                )
+            ]
+        ),
+    ).count
+
+
+def _preflight(settings, environment: str | None, reset: bool,
+               include_uploads: bool) -> int | None:
+    """Imprime el estado de Qdrant y Supabase para el entorno y aplica las
+    guardas. Devuelve un exit code para abortar o None para continuar.
+
+    Corre tras las validaciones y ANTES de embeber el primer chunk, así una
+    colección equivocada o un entorno mal etiquetado se ven sin gastar tokens.
+    No escribe nada: solo lecturas (collection_exists/count/select).
+    """
+    from app.services import supabase_db
+    from app.services.qdrant import get_client
+
+    print("\n--- Preflight (solo lecturas, nada se ha tocado todavía) ---")
+
+    # (c) Entorno: el que etiqueta las filas de `documents`. Si lo pidió el
+    # CLI, debe coincidir con lo que cargó la configuración; si no coincide
+    # es que ENVIRONMENT no llegó a la config (uso programático) y las filas
+    # quedarían mal etiquetadas.
+    effective_env = settings.environment
+    if environment is not None and environment != effective_env:
+        print(
+            f"ABORTADO: se pidió environment={environment!r} pero la "
+            f"configuración cargó {effective_env!r} (ENVIRONMENT). Fija la "
+            f"variable ENVIRONMENT antes de importar la app (ingest.py lo hace "
+            f"con --environment)."
+        )
+        return EXIT_ABORTED
+    print(f"Entorno: {effective_env}")
+
+    # (a) Qdrant: host sin credenciales, versión del servidor, colección.
+    client = get_client()
+    collection = settings.qdrant_collection
+    host = _qdrant_host_label(settings.qdrant_url)
+    api_key_label = "api key configurada" if settings.qdrant_api_key else "sin api key"
+    try:
+        version = client.info().version
+    except Exception:
+        version = "desconocida"
+    try:
+        exists = client.collection_exists(collection)
+    except Exception as exc:
+        print(f"Qdrant: {host} ({api_key_label}) NO responde: {exc}")
+        print("ABORTADO: sin Qdrant no hay dónde upsertear; nada se embebió.")
+        return 1
+    print(f"Qdrant: {host} ({api_key_label}), versión {version}")
+    upload_points = 0
+    if exists:
+        try:
+            points = client.count(collection_name=collection, exact=True).count
+        except Exception:
+            try:
+                points = getattr(client.get_collection(collection), "points_count", None)
+            except Exception as exc:
+                logger.warning("No se pudo leer la colección: %s", exc)
+                points = "desconocidos"
+        try:
+            upload_points = _count_upload_chunks(client, collection)
+        except Exception as exc:
+            logger.warning("No se pudieron contar los chunks de uploads: %s", exc)
+            upload_points = -1
+        uploads_label = (
+            f"{upload_points} de documentos subidos" if upload_points >= 0
+            else "chunks de documentos subidos: no se pudieron contar"
+        )
+        print(f"  colección '{collection}': existe, {points} puntos "
+              f"({uploads_label}).")
+    else:
+        print(f"  colección '{collection}': NO existe (se creará).")
+
+    # (b) Supabase: filas de `documents` para este entorno.
+    if not supabase_db.db_available():
+        print("Supabase: no configurado; el registro de documentos y del run "
+              "irá a memoria y se perderá al terminar el proceso.")
+    else:
+        try:
+            rows = supabase_db.list_documents()
+            canonical = sum(1 for r in rows if r.get("file_name") in CANONICAL_FILES)
+            print(f"Supabase: {len(rows)} filas en documents para "
+                  f"'{effective_env}' ({canonical} canónicas, "
+                  f"{len(rows) - canonical} subidas).")
+        except Exception as exc:
+            print(f"Supabase: no se pudo leer documents ({exc}); se continúa.")
+
+    # Guarda de --reset: la colección solo se borra si no arrastra documentos
+    # subidos, o si el operador aceptó perderlos explícitamente.
+    if reset and exists:
+        if upload_points < 0:
+            print(
+                "ABORTADO: --reset no puede verificar si la colección contiene "
+                "documentos subidos (falló el conteo). Revisa Qdrant y repite."
+            )
+            return EXIT_ABORTED
+        if upload_points > 0 and not include_uploads:
+            print(
+                f"ABORTADO: --reset borraría la colección '{collection}' "
+                f"completa y contiene {upload_points} chunks de documentos "
+                f"subidos por usuarios (chunk_type "
+                f"{'/'.join(UPLOAD_CHUNK_TYPES)}). Esos documentos no están "
+                f"en data/raw y se perderían: habría que volver a subirlos "
+                f"desde la app. Si eso es lo que quieres, repite con "
+                f"--include-uploads."
+            )
+            return EXIT_ABORTED
+        if upload_points > 0:
+            print(
+                f"AVISO (--include-uploads): se perderán {upload_points} chunks "
+                f"de documentos subidos; sus filas en documents quedarán sin "
+                f"puntos hasta que se borren o se resuban desde la app."
+            )
+        print(f"--reset confirmado: la colección '{collection}' se borrará y "
+              f"recreará.")
+    elif reset:
+        print("--reset: la colección no existe, no hay nada que borrar.")
+    return None
+
+
+def run_ingest(only: str | None = None, dry_run: bool = False,
+               reset: bool = False, source: str | None = None,
+               environment: str | None = None,
+               include_uploads: bool = False) -> int:
+    """Devuelve el exit code del proceso (0 ok, 1 fallo, 2 abortado por guarda).
+
+    source: 'xlsx' | 'pdf' | None (auto: xlsx si data/raw_xlsx está completa).
+    environment: entorno pedido por el CLI ('local' | 'production'); debe
+        coincidir con get_settings().environment (ingest.py fija ENVIRONMENT
+        antes de importar este módulo). None = no se verifica, se usa el de
+        la configuración.
+    include_uploads: con reset, acepta borrar los chunks de documentos subidos
+        (sin él, el preflight aborta con exit 2 si los hay)."""
     t0 = time.time()
 
     if source not in (None, "pdf", "xlsx"):
@@ -238,13 +418,24 @@ def run_ingest(only: str | None = None, dry_run: bool = False,
     )
 
     settings = get_settings()
+
+    # Preflight: estado de Qdrant/Supabase para el entorno + guardas. Va
+    # ANTES de start_run y de embeber nada: si aborta, no queda ni un run
+    # "running" huérfano ni un token gastado.
+    aborted = _preflight(settings, environment, reset, include_uploads)
+    if aborted is not None:
+        return aborted
+
     run_id = supabase_db.start_run()
     run_stats: dict = {
         "source": source,
+        "environment": settings.environment,
         "files": {name: dict(data["stats"]) for name, data in per_file.items()},
     }
     try:
         if reset:
+            # La guarda de uploads ya pasó en el preflight (o se aceptó con
+            # include_uploads): aquí solo se ejecuta el borrado.
             client = get_client()
             if client.collection_exists(settings.qdrant_collection):
                 client.delete_collection(settings.qdrant_collection)

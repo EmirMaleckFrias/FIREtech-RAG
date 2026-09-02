@@ -17,7 +17,22 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.4"
     embedding_model: str = "text-embedding-3-large"
     embedding_dims: int = 3072
-    rerank_model: str = ""  # vacío = usa openai_model
+    # Modelo del reranker y del filtro de relevancia. Default explícito al
+    # modelo pequeño: antes heredaba openai_model y un despliegue sin
+    # RERANK_MODEL rerankeaba con gpt-5.4 (unas 5 veces más caro por token).
+    # Vacío = usa openai_model (comportamiento antiguo, hay que pedirlo).
+    rerank_model: str = "gpt-5.4-mini"
+
+    # Cliente OpenAI único (app/services/openai_client.py): timeout por
+    # request, reintentos del SDK y llamadas concurrentes máximas al API.
+    openai_timeout_s: float = 120.0
+    openai_max_retries: int = 2
+    openai_concurrency: int = 3
+
+    # Versión del prompt del agente. Viaja en /api/health, /api/stats, en la
+    # telemetría de cada respuesta y en los resultados de evals para que dos
+    # mediciones solo se comparen si usaron el mismo prompt.
+    prompt_version: str = "v1"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""

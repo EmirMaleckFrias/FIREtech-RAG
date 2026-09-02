@@ -7,13 +7,50 @@ from __future__ import annotations
 
 import json
 import logging
-
-from openai import AsyncOpenAI
+import time
 
 from app.config import get_settings
 from app.models import Chunk
+from app.services import telemetry
+from app.services.openai_client import get_async_client, openai_slot
 
 logger = logging.getLogger(__name__)
+
+
+async def _json_completion(messages: list[dict], note: str) -> dict:
+    """Una llamada JSON al modelo de rerank, bajo el semáforo y con usage
+    registrado en la telemetría del request (componente `reranker`)."""
+    settings = get_settings()
+    model = settings.rerank_model_resolved
+    tel = telemetry.current()
+    t0 = time.perf_counter()
+    try:
+        async with openai_slot():
+            resp = await get_async_client().chat.completions.create(
+                model=model,
+                response_format={"type": "json_object"},
+                messages=messages,
+            )
+    except Exception as exc:
+        tel.record(
+            "reranker", model, None, ms=(time.perf_counter() - t0) * 1000.0,
+            ok=False, note=f"{note}: {str(exc)[:120]}",
+        )
+        raise
+    choice = resp.choices[0] if resp.choices else None
+    content = getattr(getattr(choice, "message", None), "content", None)
+    tel.record(
+        "reranker", getattr(resp, "model", None) or model, getattr(resp, "usage", None),
+        ms=(time.perf_counter() - t0) * 1000.0, ok=bool(content),
+        finish_reason=getattr(choice, "finish_reason", None),
+        note=note if content else f"{note}: respuesta sin contenido",
+    )
+    if not content:
+        # Sin choices o content None (refusal, content_filter): antes devolvía
+        # {} en silencio y el caller creía que el modelo había respondido.
+        # Al lanzar, rerank/filter_relevant caen a su fallback con log.
+        raise ValueError("respuesta sin contenido")
+    return json.loads(content)
 
 _TRUNCATE_CHARS = 600
 
@@ -52,24 +89,20 @@ async def filter_relevant(query: str, chunks: list[Chunk]) -> list[Chunk]:
     """
     if len(chunks) <= 1:
         return chunks
-    settings = get_settings()
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
     numbered = "\n".join(
         f"[{i}] {c.text[:_FILTER_TRUNCATE_CHARS]}" for i, c in enumerate(chunks)
     )
     try:
-        resp = await client.chat.completions.create(
-            model=settings.rerank_model_resolved,
-            response_format={"type": "json_object"},
-            messages=[
+        data = await _json_completion(
+            [
                 {"role": "system", "content": _FILTER_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": f"Consulta: {query}\n\nProductos:\n{numbered}",
                 },
             ],
+            note=f"filter_relevant n={len(chunks)}",
         )
-        data = json.loads(resp.choices[0].message.content or "{}")
         raw = data.get("relevantes")
         if not isinstance(raw, list):
             raise ValueError("respuesta sin lista 'relevantes'")
@@ -121,9 +154,6 @@ async def rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]:
         return chunks
 
     try:
-        settings = get_settings()
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
-
         numbered = "\n\n".join(
             f"[{i}] {chunk.text[:_TRUNCATE_CHARS]}"
             for i, chunk in enumerate(chunks)
@@ -135,15 +165,13 @@ async def rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]:
             "relevancia descendente]}."
         )
 
-        response = await client.chat.completions.create(
-            model=settings.rerank_model_resolved,
-            response_format={"type": "json_object"},
-            messages=[
+        data = await _json_completion(
+            [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
+            note=f"rerank n={len(chunks)} top_k={top_k}",
         )
-        data = json.loads(response.choices[0].message.content or "")
         reordered = _apply_ranking(data.get("ranking"), chunks)
         return reordered[:top_k]
     except Exception as exc:

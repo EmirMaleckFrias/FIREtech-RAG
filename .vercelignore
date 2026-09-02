@@ -26,3 +26,8 @@ __pycache__/
 backend/.env
 backend/.supabase_db_password.txt
 .env
+
+# Tests (no viajan al bundle)
+backend/tests/
+backend/requirements-dev.txt
+backend/pytest.ini

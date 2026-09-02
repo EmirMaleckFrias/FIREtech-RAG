@@ -1,12 +1,13 @@
 """FastAPI app: CORS + router /api + setup de Qdrant al arrancar.
 
 La autenticación ya no es un middleware global: cada endpoint declara
-`Depends(current_user)` (o `require_admin`) — ver app/services/auth.py.
+`Depends(current_user)` (o `require_admin`): ver app/services/auth.py.
 `GET /api/health` es el único endpoint público.
 """
 from __future__ import annotations
 
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -25,7 +26,12 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    from app.services.qdrant import ensure_collection
+    from app.services.qdrant import (
+        bm25_backend,
+        ensure_collection,
+        retrieval_mode,
+        server_version,
+    )
 
     try:
         await run_in_threadpool(ensure_collection)
@@ -35,6 +41,23 @@ async def lifespan(_app: FastAPI):
             "la búsqueda fallará hasta que Qdrant esté accesible.",
             exc,
         )
+    # La configuración EFECTIVA, no la deseada: el mismo dato que devuelven
+    # /api/health y /api/stats, para comparar local y producción desde el log.
+    # retrieval_mode() fuerza la carga de BM25 (puede tardar): fuera del loop.
+    settings = get_settings()
+    retrieval = await run_in_threadpool(retrieval_mode)
+    logger.info(
+        "Arranque: retrieval=%s bm25_backend=%s qdrant=%s modelo=%s "
+        "rerank=%s prompt_version=%s python=%s environment=%s",
+        retrieval,
+        bm25_backend(),
+        await run_in_threadpool(server_version) or "no disponible",
+        settings.openai_model,
+        settings.rerank_model_resolved,
+        settings.prompt_version,
+        sys.version.split()[0],
+        settings.environment,
+    )
     yield
 
 

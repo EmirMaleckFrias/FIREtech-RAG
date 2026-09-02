@@ -6,8 +6,26 @@ factual, citas, advertencias de precio, honestidad y completitud, juzgadas por
 `gpt-5.4-mini` en JSON mode contra una referencia factual verificada.
 
 Uso (desde backend/ como cwd):
-    .venv\\Scripts\\python.exe -X utf8 evals\\judge_answers.py [--n 18] [--all] [--solo-real-world]
-    .venv\\Scripts\\python.exe -X utf8 evals\\judge_answers.py --agregacion
+    .venv\\Scripts\\python.exe -X utf8 evals\\judge_answers.py [--n 18]
+        : 7 real-world + muestra de 18 del gold set, retrieval híbrido; deja
+          results.json + report.md en evals/results/<fecha>-answers/.
+    ... judge_answers.py --all
+        : los 67 casos (60 del gold set + 7 real-world).
+    ... judge_answers.py --solo-real-world
+        : solo los 7 de regresión.
+    ... judge_answers.py --agregacion
+        : EN EXCLUSIVA los 10 casos de evals/gold_agregacion.json.
+    ... judge_answers.py --retrieval dense
+        : fuerza búsqueda densa (sin BM25) en el agente.
+    ... judge_answers.py --repeat 2
+        : repite el conjunto 2 veces; reporta PASS medio y varianza por caso.
+    ... judge_answers.py --write-docs
+        : además del results dir, sobreescribe docs/EVAL_RESPUESTAS.md (o
+          docs/EVAL_AGREGACION.md con --agregacion) validando que no haya
+          guión largo. Solo con una corrida completa: si aborta se ignora.
+    ... judge_answers.py --max-cost 1.50 --min-pass 0.8 --results-dir DIR
+        : al superar el tope se corta ENTRE casos, se guardan los parciales y
+          se sale con exit 2.
 
 Selección de casos:
   - Los 7 casos de regresión de evals/gold_real_world.json SIEMPRE se corren
@@ -16,14 +34,23 @@ Selección de casos:
     gold set de retrieval (evals/gold_set.json). Para éstas la referencia
     factual es el TEXTO del chunk gold recuperado de Qdrant vía
     accept_ids/accept_skus.
-  - `--all` usa las 60 del gold set; `--solo-real-world` omite la muestra.
+  - `--all` usa las 60 del gold set (67 casos en total); `--solo-real-world`
+    omite la muestra.
   - `--agregacion` corre EN EXCLUSIVA los 10 casos de evals/gold_agregacion.json
-    (orden/conteos/agrupaciones exactos); no toca los 7+18 del flujo normal y
-    escribe su propio informe en docs/EVAL_AGREGACION.md.
+    (orden/conteos/agrupaciones exactos); no toca los 7+18 del flujo normal.
 
 Los casos se ejecutan SECUENCIALMENTE (cada uno es una corrida real del agente
-con el modelo de producción); errores 429/transitorios se reintentan con
-backoff. Escribe docs/EVAL_RESPUESTAS.md y un JSON de resultados en el tempdir.
+con el modelo de producción). Cada caso arranca su propia telemetría
+(`telemetry.start`) antes de `run_agent`: agente, reranker, embeddings y juez
+quedan medidos por componente con el `usage` real del API, y el coste (USD,
+estimado con tarifas asumidas) se acumula para `--max-cost`. Los errores
+transitorios (429 puntuales, red) se reintentan con backoff; al primer error
+de cuota/facturación se corta sin reintentar, se guardan los parciales y se
+sale con exit 2.
+
+Exit codes: 0 todos PASS o sin umbral; 1 PASS rate < --min-pass (default 0.0,
+informativo); 2 error de infraestructura, cuota o corrida abortada por
+--max-cost; 3 documento con guión largo.
 """
 from __future__ import annotations
 
@@ -32,21 +59,39 @@ import asyncio
 import json
 import random
 import sys
-import tempfile
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = BACKEND_DIR.parent
 sys.path.insert(0, str(BACKEND_DIR))
 
+from app.services import telemetry  # noqa: E402
+from app.services.telemetry import PRICING_LABEL, cost_estimate  # noqa: E402
+from evals.common import (  # noqa: E402
+    EXIT_ERROR,
+    EXIT_FAIL,
+    EXIT_OK,
+    RETRIEVAL_MODES,
+    GoldItem,
+    fingerprint_index,
+    force_retrieval_mode,
+    is_quota_error,
+    load_gold,
+    mean_std,
+    now_iso,
+    results_dir,
+    run_metadata,
+    sanitize,
+    write_doc,
+    write_json,
+)
+
 GOLD_RETRIEVAL = BACKEND_DIR / "evals" / "gold_set.json"
 GOLD_REAL_WORLD = BACKEND_DIR / "evals" / "gold_real_world.json"
 GOLD_AGREGACION = BACKEND_DIR / "evals" / "gold_agregacion.json"
 DEFAULT_REPORT = PROJECT_DIR / "docs" / "EVAL_RESPUESTAS.md"
 AGREGACION_REPORT = PROJECT_DIR / "docs" / "EVAL_AGREGACION.md"
-RESULTS_DIR = Path(tempfile.gettempdir()) / "rag_eval_answers"
 
 # Etiquetas de grupo: (sigla para la tabla por caso, nombre para los agregados).
 GROUP_LABELS = {
@@ -62,123 +107,25 @@ CRITERIA = ("exactitud_factual", "citas", "advertencias", "honestidad", "complet
 CRIT_SHORT = {"exactitud_factual": "a", "citas": "b", "advertencias": "c",
               "honestidad": "d", "completitud": "e"}
 
-# Tarifas ASUMIDAS (USD por 1M tokens, input/output) solo para estimar costo.
-# No hay tarifa oficial en el repo: ajustar si se conoce la real.
-ASSUMED_PRICES = {
-    "gpt-5.4": (1.25, 10.00),
-    "gpt-5.4-mini": (0.25, 2.00),
-}
-
-# --- Captura de uso de tokens (parche sobre el cliente OpenAI) ----------------
-# run_agent crea su propio AsyncOpenAI y streamea sin usage; parcheamos
-# AsyncCompletions.create para (1) pedir usage en streams y (2) acumular el
-# usage de TODAS las llamadas chat (agente, reranker y juez), por modelo.
-
-class _UsageBook:
-    def __init__(self) -> None:
-        self.by_model: dict[str, dict[str, int]] = {}
-        self._active: str | None = None  # componente actual ("agente"/"juez")
-        self.by_component: dict[str, dict[str, float]] = {}
-
-    def set_component(self, name: str | None) -> None:
-        self._active = name
-
-    def add(self, model: str, usage) -> None:
-        row = self.by_model.setdefault(
-            model, {"calls": 0, "prompt": 0, "completion": 0, "cached": 0}
-        )
-        row["calls"] += 1
-        row["prompt"] += getattr(usage, "prompt_tokens", 0) or 0
-        row["completion"] += getattr(usage, "completion_tokens", 0) or 0
-        details = getattr(usage, "prompt_tokens_details", None)
-        row["cached"] += getattr(details, "cached_tokens", 0) or 0
-        if self._active:
-            comp = self.by_component.setdefault(
-                self._active, {"prompt": 0, "completion": 0, "calls": 0}
-            )
-            comp["calls"] += 1
-            comp["prompt"] += getattr(usage, "prompt_tokens", 0) or 0
-            comp["completion"] += getattr(usage, "completion_tokens", 0) or 0
-
-    def cost_estimate(self) -> tuple[float, list[str]]:
-        total = 0.0
-        detail: list[str] = []
-        for model, row in sorted(self.by_model.items()):
-            rate = ASSUMED_PRICES.get(model)
-            if rate is None:
-                base = model.split(":")[0]
-                rate = next(
-                    (v for k, v in ASSUMED_PRICES.items() if base.startswith(k)),
-                    (1.25, 10.0),
-                )
-            cost = row["prompt"] / 1e6 * rate[0] + row["completion"] / 1e6 * rate[1]
-            total += cost
-            detail.append(
-                f"{model}: {row['calls']} llamadas, {row['prompt']:,} in "
-                f"({row['cached']:,} cacheados) + {row['completion']:,} out "
-                f"~= {cost:.2f} USD (a {rate[0]}/{rate[1]} USD/M asumidos)"
-            )
-        return total, detail
+TOKEN_KEYS = ("prompt", "cached", "completion", "reasoning")
 
 
-USAGE = _UsageBook()
-
-
-class _CapturingStream:
-    """Envuelve un AsyncStream de chat para capturar el chunk final de usage."""
-
-    def __init__(self, inner, model: str) -> None:
-        self._inner = inner
-        self._model = model
-
-    def __aiter__(self):
-        return self._gen()
-
-    async def _gen(self):
-        async for chunk in self._inner:
-            usage = getattr(chunk, "usage", None)
-            if usage is not None:
-                USAGE.add(self._model, usage)
-            yield chunk
-
-
-def install_usage_capture() -> None:
-    try:
-        from openai.resources.chat.completions import AsyncCompletions
-    except ImportError:  # layouts nuevos del SDK
-        from openai.resources.chat.completions.completions import AsyncCompletions
-
-    orig = AsyncCompletions.create
-
-    async def patched(self, *args, **kwargs):
-        model = str(kwargs.get("model") or "?")
-        is_stream = bool(kwargs.get("stream"))
-        if is_stream and "stream_options" not in kwargs:
-            kwargs["stream_options"] = {"include_usage": True}
-        try:
-            result = await orig(self, *args, **kwargs)
-        except Exception as exc:
-            if "stream_options" in str(exc):
-                kwargs.pop("stream_options", None)
-                result = await orig(self, *args, **kwargs)
-            else:
-                raise
-        if is_stream:
-            return _CapturingStream(result, model)
-        if getattr(result, "usage", None) is not None:
-            USAGE.add(model, result.usage)
-        return result
-
-    AsyncCompletions.create = patched
+class QuotaAbort(RuntimeError):
+    """Error de cuota/facturación de OpenAI: se corta la corrida sin reintentar."""
 
 
 # --- Reintentos de errores transitorios ---------------------------------------
 
 async def _with_retries(fn, attempts: int = 4, what: str = ""):
+    """Reintenta transitorios con backoff; la cuota sube como QuotaAbort."""
     for attempt in range(attempts):
         try:
             return await fn()
+        except QuotaAbort:
+            raise
         except Exception as exc:
+            if is_quota_error(exc):
+                raise QuotaAbort(str(exc)) from exc
             msg = str(exc).lower()
             transient = any(
                 s in msg
@@ -233,10 +180,13 @@ REF_HEADER_ENGINE = (
 )
 
 
-def build_reference_real_world(case: dict, header: str = REF_HEADER_AUDIT) -> str:
+def build_reference_real_world(item: GoldItem, header: str = REF_HEADER_AUDIT) -> str:
+    """Referencia de los casos con `expected` (real-world y agregación): hechos
+    congelados + texto real de los `ref_skus` + inventario vivo si se pide."""
     from app.services.qdrant import find_by_skus, index_inventory
 
-    parts = [header, case["expected"]]
+    case = item.raw
+    parts = [header, item.expected or ""]
     if case.get("augment_with_live_inventory"):
         inv = index_inventory()
         arch = ", ".join(a["valor"] for a in inv["archivos"])
@@ -261,17 +211,19 @@ def build_reference_real_world(case: dict, header: str = REF_HEADER_AUDIT) -> st
     return "\n\n".join(parts)
 
 
-def build_reference_gold(case: dict) -> str:
+def build_reference_gold(item: GoldItem) -> str:
+    """Referencia de los casos del gold de retrieval: el texto del chunk gold."""
     from app.services.qdrant import find_by_skus
 
-    chunks = _chunks_by_ids(case.get("accept_ids") or [])
-    if not chunks and case.get("accept_skus"):
-        chunks = find_by_skus(list(case["accept_skus"]), _MAX_REF_CHUNKS)
+    case = item.raw
+    chunks = _chunks_by_ids(item.accept_ids)
+    if not chunks and item.accept_skus:
+        chunks = find_by_skus(list(item.accept_skus), _MAX_REF_CHUNKS)
     header = (
         "PRODUCTO GOLD (el retrieval correcto para esta pregunta):\n"
         f"- Producto: {case.get('ref_product')}\n"
         f"- SKU de referencia: {case.get('ref_sku')} "
-        f"(también aceptables: {', '.join(case.get('accept_skus') or [])})\n"
+        f"(también aceptables: {', '.join(item.accept_skus)})\n"
         f"- Fuente correcta: [{case.get('source_file')}, pág. {case.get('ref_page')}]\n"
         "Nota: si la respuesta presenta una variante hermana real de la misma "
         "familia (mismo catálogo) con datos correctos y citados, no es un dato "
@@ -283,14 +235,24 @@ def build_reference_gold(case: dict) -> str:
     return header + "\n\n" + body
 
 
+def build_reference(group: str, item: GoldItem) -> str:
+    if group == "real_world":
+        return build_reference_real_world(item)
+    if group == "agregacion":
+        # Mismo mecanismo (hechos congelados + chunks reales + inventario
+        # vivo), pero el encabezado dice que los hechos vienen del motor.
+        return build_reference_real_world(item, header=REF_HEADER_ENGINE)
+    return build_reference_gold(item)
+
+
 # --- Corrida del agente ---------------------------------------------------------
 
-async def run_agent_case(question: str) -> dict:
+async def run_agent_case(question: str, history: list[dict]) -> dict:
     from app.services.agent import run_agent
 
     async def _run() -> dict:
         final = None
-        async for ev in run_agent(question, []):
+        async for ev in run_agent(question, history):
             if ev.type == "final":
                 final = ev.data
         if final is None:
@@ -356,7 +318,13 @@ Devuelve EXACTAMENTE este JSON (sin texto extra):
 "veredicto_global" es "PASS" si (a), (b) y (d) pasan y como máximo UNO de (c)/(e) falla; si no, "FAIL"."""
 
 
-async def judge_case(client, question: str, answer: str, reference: str) -> dict:
+async def judge_case(question: str, answer: str, reference: str) -> dict:
+    """Una llamada al juez. Usa el cliente compartido bajo el semáforo y anota
+    su `usage` en la telemetría del caso (componente "juez"), así el coste del
+    caso incluye al juez separado del agente."""
+    from app.services.openai_client import get_async_client, openai_slot
+
+    tel = telemetry.current()
     user = (
         f"PREGUNTA DEL USUARIO:\n{question}\n\n"
         f"RESPUESTA DEL AGENTE:\n{answer or '(respuesta vacía)'}\n\n"
@@ -365,18 +333,37 @@ async def judge_case(client, question: str, answer: str, reference: str) -> dict
     )
 
     async def _call() -> dict:
-        resp = await client.chat.completions.create(
-            model=JUDGE_MODEL,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": JUDGE_SYSTEM},
-                {"role": "user", "content": user},
-            ],
+        t_call = time.perf_counter()
+        try:
+            async with openai_slot():
+                resp = await get_async_client().chat.completions.create(
+                    model=JUDGE_MODEL,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": JUDGE_SYSTEM},
+                        {"role": "user", "content": user},
+                    ],
+                )
+        except Exception as exc:
+            tel.record("juez", JUDGE_MODEL, None, (time.perf_counter() - t_call) * 1000.0,
+                       ok=False, note=type(exc).__name__)
+            raise
+        choice = resp.choices[0] if resp.choices else None
+        content = getattr(getattr(choice, "message", None), "content", None)
+        tel.record(
+            "juez", JUDGE_MODEL, resp.usage, (time.perf_counter() - t_call) * 1000.0,
+            ok=bool(content), finish_reason=getattr(choice, "finish_reason", None),
+            note="" if content else "respuesta sin contenido",
         )
-        return json.loads(resp.choices[0].message.content)
+        if not content:
+            # content None (refusal, content_filter, length sin texto) haría
+            # que json.loads lanzara TypeError y saltara el reintento de abajo.
+            raise json.JSONDecodeError("respuesta sin contenido", "", 0)
+        return json.loads(content)
 
     t0 = time.time()
     last_exc: Exception | None = None
+    data = None
     for _ in range(2):  # el JSON roto se reintenta una vez además de los 429
         try:
             data = await _with_retries(_call, what="juez")
@@ -409,13 +396,13 @@ async def judge_case(client, question: str, answer: str, reference: str) -> dict
 
 # --- Selección de casos ---------------------------------------------------------
 
-def stratified_sample(questions: list[dict], n: int, seed: int) -> list[dict]:
-    if n >= len(questions):
-        return list(questions)
-    by_type: dict[str, list[dict]] = {}
-    for q in questions:
-        by_type.setdefault(q["type"], []).append(q)
-    total = len(questions)
+def stratified_sample(items: list[GoldItem], n: int, seed: int) -> list[GoldItem]:
+    if n >= len(items):
+        return list(items)
+    by_type: dict[str, list[GoldItem]] = {}
+    for q in items:
+        by_type.setdefault(q.type, []).append(q)
+    total = len(items)
     quotas: dict[str, int] = {}
     fracs: list[tuple[float, str]] = []
     for t, qs in sorted(by_type.items()):
@@ -428,17 +415,118 @@ def stratified_sample(questions: list[dict], n: int, seed: int) -> list[dict]:
         quotas[fracs[i % len(fracs)][1]] += 1
         i += 1
     rng = random.Random(seed)
-    out: list[dict] = []
+    out: list[GoldItem] = []
     for t, qs in sorted(by_type.items()):
         out.extend(rng.sample(qs, min(quotas[t], len(qs))))
-    out.sort(key=lambda q: q["qid"])
+    out.sort(key=lambda q: q.id)
     return out
 
 
-# --- Reporte ---------------------------------------------------------------------
+def select_cases(args) -> list[tuple[str, GoldItem]]:
+    """(grupo, caso) en el orden de ejecución."""
+    if args.agregacion:
+        # Modo EXCLUSIVO: solo la categoría de agregación. Los 7+18 del flujo
+        # normal ni se cargan.
+        return [("agregacion", it) for it in load_gold(GOLD_AGREGACION)]
+    cases = [("real_world", it) for it in load_gold(GOLD_REAL_WORLD)]
+    if not args.solo_real_world:
+        gold = load_gold(GOLD_RETRIEVAL)
+        sample = gold if args.all else stratified_sample(gold, args.n, args.seed)
+        cases += [("muestra_retrieval", it) for it in sample]
+    return cases
+
+
+# --- Un caso completo (agente + juez) con su telemetría -------------------------
+
+def _tokens_of(summary: dict) -> dict:
+    return {k: int(summary.get("tokens", {}).get(k, 0)) for k in TOKEN_KEYS}
+
+
+def _error_case(group: str, item: GoldItem, rep: int, stage: str, exc: BaseException,
+                tel: telemetry.Telemetry, agent_s: float = 0.0) -> dict:
+    summary = tel.summary()
+    return {
+        "qid": item.id, "group": group, "type": item.type, "repetition": rep,
+        "origen": item.raw.get("origen", ""), "question": item.question,
+        "error": f"{stage}: {type(exc).__name__}: {str(exc)[:300]}",
+        "verdict": "ERROR",
+        "criteria": {c: {"pass": False, "nota": f"no evaluado: falló el {stage}"}
+                     for c in CRITERIA},
+        "judge_verdict_raw": "", "n_hops": 0, "hops": [], "agent_s": agent_s,
+        "judge_s": 0.0, "answer": "", "answer_head": "", "reference_head": "",
+        "telemetry": summary,
+        "tokens": _tokens_of(summary),
+        "cost_usd": summary["cost_usd"],
+    }
+
+
+async def run_case(group: str, item: GoldItem, rep: int, retrieval: str, settings) -> dict:
+    """Ejecuta un caso dentro de SU tarea: la telemetría se fija aquí (el
+    ContextVar queda aislado por tarea) antes de run_agent, y el juez anota en
+    la misma. Un error de cuota sube como QuotaAbort para cortar la corrida."""
+    tel = telemetry.start(
+        case_id=item.id, group=group, repetition=rep, retrieval=retrieval,
+        prompt_version=settings.prompt_version,
+    )
+    try:
+        reference = await asyncio.to_thread(build_reference, group, item)
+    except Exception as exc:
+        if is_quota_error(exc):
+            raise QuotaAbort(str(exc)) from exc
+        return _error_case(group, item, rep, "armado de la referencia", exc, tel)
+
+    try:
+        run = await run_agent_case(item.question, item.history)
+    except QuotaAbort:
+        raise
+    except Exception as exc:
+        return _error_case(group, item, rep, "agente", exc, tel)
+    tel.mark("agente_fin")
+
+    try:
+        verdictdata = await judge_case(item.question, run["content"], reference)
+    except QuotaAbort:
+        raise
+    except Exception as exc:
+        return _error_case(group, item, rep, "juez", exc, tel, agent_s=run["agent_s"])
+    tel.mark("juez_fin")
+
+    summary = tel.summary()
+    return {
+        "qid": item.id,
+        "group": group,
+        "type": item.type,
+        "repetition": rep,
+        "origen": item.raw.get("origen", ""),
+        "question": item.question,
+        "reference": item.reference(),
+        "answer": run["content"],
+        "answer_head": run["content"][:220].replace("\n", " "),
+        "n_hops": len(run["hops"]),
+        "hops": run["hops"],
+        "agent_s": run["agent_s"],
+        "reference_head": reference[:400],
+        "telemetry": summary,
+        "tokens": _tokens_of(summary),
+        "cost_usd": summary["cost_usd"],
+        **verdictdata,
+    }
+
+
+# --- Agregados y reporte -----------------------------------------------------------
 
 def _pct(x: float) -> str:
     return f"{100 * x:.1f}%"
+
+
+def _usd(x: float) -> str:
+    return f"{x:.4f} USD"
+
+
+def _verdict_cell(c: dict) -> str:
+    if c["verdict"] == "PASS":
+        return "PASS"
+    return f"**{c['verdict']}**"
 
 
 def _crit_flags(res: dict) -> str:
@@ -453,25 +541,99 @@ def _agg(cases: list[dict]) -> dict:
     out = {
         "n": len(cases),
         "pass": sum(c["verdict"] == "PASS" for c in cases) / n,
+        "errors": sum(c["verdict"] == "ERROR" for c in cases),
     }
     for crit in CRITERIA:
         out[crit] = sum(c["criteria"][crit]["pass"] for c in cases) / n
     return out
 
 
-def write_report(payload: dict, report_path: Path) -> None:
+def _sum_tokens(cases: list[dict]) -> dict:
+    tot = {k: 0 for k in TOKEN_KEYS}
+    for c in cases:
+        for k in TOKEN_KEYS:
+            tot[k] += int(c.get("tokens", {}).get(k, 0))
+    return tot
+
+
+def _component_rollup(cases: list[dict]) -> dict[str, dict]:
+    """Tokens, rondas, ms y coste (estimado) por componente, sumando las rondas
+    de la telemetría de cada caso; el coste sale de tarifa(modelo) por ronda."""
+    out: dict[str, dict] = {}
+    for c in cases:
+        for r in c.get("telemetry", {}).get("rounds", []):
+            agg = out.setdefault(r["component"], {
+                "rounds": 0, "errors": 0, "ms": 0.0, "cost_usd": 0.0,
+                **{k: 0 for k in TOKEN_KEYS},
+            })
+            agg["rounds"] += 1
+            agg["errors"] += 0 if r.get("ok", True) else 1
+            agg["ms"] = round(agg["ms"] + float(r.get("ms", 0.0)), 1)
+            for k in TOKEN_KEYS:
+                agg[k] += int(r.get(k, 0))
+            agg["cost_usd"] += cost_estimate({r["model"]: {
+                "prompt": r.get("prompt", 0), "cached": r.get("cached", 0),
+                "completion": r.get("completion", 0),
+            }})
+    for agg in out.values():
+        agg["cost_usd"] = round(agg["cost_usd"], 6)
+    return out
+
+
+def _model_rollup(cases: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for c in cases:
+        for model, t in c.get("telemetry", {}).get("by_model", {}).items():
+            agg = out.setdefault(model, {k: 0 for k in TOKEN_KEYS})
+            for k in TOKEN_KEYS:
+                agg[k] += int(t.get(k, 0))
+    for model, agg in out.items():
+        agg["cost_usd"] = round(cost_estimate({model: agg}), 6)
+    return out
+
+
+def _stability(repetitions: list[list[dict]]) -> dict:
+    """PASS medio y varianza por caso entre repeticiones, y PASS global
+    medio con desviación entre repeticiones."""
+    per_case: dict[str, list[int]] = {}
+    for cases in repetitions:
+        for c in cases:
+            per_case[c["qid"]] = per_case.get(c["qid"], []) + [1 if c["verdict"] == "PASS" else 0]
+    cases_stats = {}
+    for qid, vals in per_case.items():
+        mean, std = mean_std(vals)
+        cases_stats[qid] = {
+            "n": len(vals), "pass_rate": round(mean, 4), "variance": round(std * std, 4),
+            "verdicts": vals,
+        }
+    globals_ = [_agg(cases)["pass"] for cases in repetitions if cases]
+    g_mean, g_std = mean_std(globals_)
+    return {
+        "repeat": len(repetitions),
+        "pass_global": {"mean": round(g_mean, 4), "std": round(g_std, 4),
+                        "values": [round(v, 4) for v in globals_]},
+        "cases": cases_stats,
+        "unstable": sorted(q for q, s in cases_stats.items() if len(set(s["verdicts"])) > 1),
+    }
+
+
+def build_report(payload: dict) -> str:
     cases = payload["cases"]
     rw = [c for c in cases if c["group"] == "real_world"]
     sm = [c for c in cases if c["group"] == "muestra_retrieval"]
     ag = [c for c in cases if c["group"] == "agregacion"]
     solo_ag = bool(ag) and not rw and not sm
+    meta = payload.get("run_metadata") or {}
+    fp = payload.get("fingerprint") or {}
+    repeat = int(payload.get("repeat") or 1)
+    stability = payload.get("stability") or {}
     lines: list[str] = []
     add = lines.append
 
     if solo_ag:
-        add("# Evaluación de AGREGACIÓN (juez LLM) — RAG de catálogos")
+        add("# Evaluación de AGREGACIÓN (juez LLM): RAG de catálogos")
     else:
-        add("# Evaluación de respuestas (juez LLM) — RAG de catálogos")
+        add("# Evaluación de respuestas (juez LLM): RAG de catálogos")
     add("")
     if solo_ag:
         idx = payload.get("index_state") or {}
@@ -482,6 +644,7 @@ def write_report(payload: dict, report_path: Path) -> None:
             f"AGREGACIÓN (`evals/gold_agregacion.json`) · Índice: "
             f"{idx.get('total_chunks', '?')} chunks / {idx.get('archivos', '?')} archivos / "
             f"{idx.get('suplidores', '?')} suplidores / {idx.get('marcas', '?')} marcas · "
+            f"Retrieval: **{payload['retrieval']}** · "
             f"Duración total: {payload['elapsed_s']:.0f}s."
         )
     else:
@@ -490,18 +653,40 @@ def write_report(payload: dict, report_path: Path) -> None:
             f"(pipeline completo `run_agent`, {payload['max_hops']} hops máx.) · "
             f"Juez: `{JUDGE_MODEL}` (JSON mode) · Casos: {len(rw)} de regresión real-world "
             f"+ {len(sm)} muestreados del gold set de retrieval (semilla {payload['seed']}) · "
+            f"Retrieval: **{payload['retrieval']}** · "
             f"Duración total: {payload['elapsed_s']:.0f}s."
         )
     add("")
     if payload.get("aborted"):
         add(f"> **{payload['aborted']}** El informe cubre solo los casos ejecutados.")
         add("")
+    add("## Condiciones de la medición")
+    add("")
+    add(f"- Prompt del agente: `{meta.get('prompt_version', '?')}` · modelo: "
+        f"`{meta.get('openai_model', '?')}` · reranker: `{meta.get('rerank_model_resolved', '?')}` · "
+        f"embeddings: `{meta.get('embedding_model', '?')}` · max_hops={meta.get('max_hops', '?')} · "
+        f"search_top_k={meta.get('search_top_k', '?')} · rerank_top_k={meta.get('rerank_top_k', '?')} · "
+        f"Python {meta.get('python', '?')} · commit `{meta.get('git_commit') or 'n/d'}`.")
+    add(f"- Retrieval efectivo: **{payload['retrieval']}** (pedido: {payload.get('retrieval_requested', '?')}). "
+        f"Repeticiones del conjunto: {repeat}.")
+    if fp:
+        by_file = fp.get("by_source_file") or {}
+        add(f"- Índice Qdrant: colección `{fp.get('collection')}` en `{fp.get('qdrant_host')}` "
+            f"(Qdrant {fp.get('qdrant_version') or 'n/d'}): {fp.get('total_points')} puntos, "
+            f"{fp.get('products')} productos en {len(by_file)} archivos; huella tomada "
+            f"{fp.get('taken_at')}.")
+    else:
+        add("- Índice Qdrant: huella no disponible.")
+    add("- Dos corridas solo son comparables si coinciden prompt, modelos, modo de retrieval "
+        "y huella del índice.")
+    add("")
     add("## Metodología")
     add("")
     add("- **Qué mide**: la calidad de la RESPUESTA FINAL del agente (no del retrieval, "
-        "eso lo cubre `docs/EVAL_RETRIEVAL.md`). Cada caso ejecuta `run_agent(pregunta, [])` "
+        "eso lo cubre `docs/EVAL_RETRIEVAL.md`). Cada caso ejecuta `run_agent(pregunta, historial)` "
         "en proceso y acumula el evento `final` (content + sources + hops); los casos corren "
-        "secuencialmente y los errores transitorios (429...) se reintentan con backoff.")
+        "secuencialmente y los errores transitorios (429...) se reintentan con backoff. Un error "
+        "de cuota corta la corrida sin reintentar y se informa arriba.")
     if rw:
         add("- **Casos real-world** (`evals/gold_real_world.json`): 7 regresiones de los fallos "
             "reales de producción auditados en `docs/audit_conversaciones_jefes.md`; el `expected` "
@@ -514,7 +699,7 @@ def write_report(payload: dict, report_path: Path) -> None:
     if ag:
         add("- **Casos de agregación** (`evals/gold_agregacion.json`): preguntas de orden, "
             "conteo y agrupación, la familia que la tool general `consultar_catalogo` resuelve "
-            "de forma exacta (`_execute_catalog_query` → `scan_by_price`/`group_values`). Seis "
+            "de forma exacta (`_execute_catalog_query`, `scan_by_price`/`group_values`). Seis "
             "son preguntas TEXTUALES del uso real (con sus faltas de ortografía) y cuatro son "
             "composicionales nuevas. **La verdad de referencia NO sale de los PDFs ni de un LLM**: "
             "se calculó en proceso con ese mismo motor exacto sobre el índice vivo y se congeló "
@@ -530,12 +715,16 @@ def write_report(payload: dict, report_path: Path) -> None:
         "**(d) honestidad** (lo no encontrado se declara; sin superlativos injustificados), "
         "**(e) completitud** (todas las partes de la pregunta).")
     add("- **Veredicto global por caso** (calculado determinísticamente desde los criterios): "
-        "PASS si (a), (b) y (d) pasan y como máximo uno de (c)/(e) falla.")
+        "PASS si (a), (b) y (d) pasan y como máximo uno de (c)/(e) falla. `ERROR` = el caso no "
+        "pudo evaluarse (falló el agente o el juez) y cuenta como no-PASS.")
+    add("- **Telemetría**: cada caso arranca `telemetry.start()` antes de `run_agent`; agente, "
+        "reranker, embeddings y juez anotan el `usage` real del API por ronda. Los tokens son "
+        f"medidos; toda cifra en USD es {PRICING_LABEL}.")
     add("")
     add("## Resultados globales")
     add("")
-    add("| Grupo | n | PASS global | (a) exactitud | (b) citas | (c) advertencias | (d) honestidad | (e) completitud |")
-    add("|---|---|---|---|---|---|---|---|")
+    add("| Grupo | n | PASS global | errores | (a) exactitud | (b) citas | (c) advertencias | (d) honestidad | (e) completitud |")
+    add("|---|---|---|---|---|---|---|---|---|")
     groups_row = [("Regresión real-world", rw), ("Muestra retrieval", sm), ("Agregación", ag)]
     if not solo_ag:  # con un solo grupo la fila Total sería un duplicado
         groups_row.append(("**Total**", cases))
@@ -544,11 +733,32 @@ def write_report(payload: dict, report_path: Path) -> None:
             continue
         g = _agg(group)
         add(
-            f"| {label} | {g['n']} | {_pct(g['pass'])} | {_pct(g['exactitud_factual'])} | "
+            f"| {label} | {g['n']} | {_pct(g['pass'])} | {g['errors']} | {_pct(g['exactitud_factual'])} | "
             f"{_pct(g['citas'])} | {_pct(g['advertencias'])} | {_pct(g['honestidad'])} | "
             f"{_pct(g['completitud'])} |"
         )
+    if repeat > 1:
+        add("")
+        add("(Tabla de la repetición 1; las secciones de detalle también.)")
     add("")
+    if repeat > 1 and stability:
+        pg = stability["pass_global"]
+        add("## Estabilidad entre repeticiones")
+        add("")
+        add(f"El conjunto se corrió {stability['repeat']} veces. PASS global medio: "
+            f"**{_pct(pg['mean'])}** (desviación típica muestral {_pct(pg['std'])}; valores: "
+            + ", ".join(_pct(v) for v in pg["values"]) + ").")
+        add("")
+        add("| Caso | repeticiones | PASS medio | varianza | veredictos (1=PASS) |")
+        add("|---|---|---|---|---|")
+        for qid, s in sorted(stability["cases"].items()):
+            add(f"| {qid} | {s['n']} | {_pct(s['pass_rate'])} | {s['variance']:.3f} | "
+                f"{''.join(str(v) for v in s['verdicts'])} |")
+        add("")
+        unstable = stability.get("unstable") or []
+        add(f"Casos con veredicto inestable: **{len(unstable)}**"
+            + (": " + ", ".join(unstable) if unstable else "."))
+        add("")
     add("## Resultados por tipo")
     add("")
     add("| Tipo | n | PASS | (a) | (b) | (c) | (d) | (e) |")
@@ -573,32 +783,30 @@ def write_report(payload: dict, report_path: Path) -> None:
         add("| Caso | Origen | Tipo | Pregunta | Criterios | Veredicto | Hops | s agente | s juez |")
         add("|---|---|---|---|---|---|---|---|---|")
         for c in cases:
-            verdict = c["verdict"] if c["verdict"] == "PASS" else "**FAIL**"
             add(
                 f"| {c['qid']} | {c.get('origen', '-')} | {c['type']} | "
-                f"{c['question']} | `{_crit_flags(c)}` | {verdict} | {c['n_hops']} | "
+                f"{c['question']} | `{_crit_flags(c)}` | {_verdict_cell(c)} | {c['n_hops']} | "
                 f"{c['agent_s']} | {c['judge_s']} |"
             )
     else:
         add("| Caso | Grupo | Tipo | Criterios | Veredicto | Hops | s agente | s juez |")
         add("|---|---|---|---|---|---|---|---|")
         for c in cases:
-            verdict = c["verdict"] if c["verdict"] == "PASS" else "**FAIL**"
             add(
                 f"| {c['qid']} | {GROUP_LABELS.get(c['group'], ('GS', ''))[0]} | {c['type']} | "
-                f"`{_crit_flags(c)}` | {verdict} | {c['n_hops']} | {c['agent_s']} | {c['judge_s']} |"
+                f"`{_crit_flags(c)}` | {_verdict_cell(c)} | {c['n_hops']} | {c['agent_s']} | {c['judge_s']} |"
             )
     add("")
 
     if rw:
         rw_fails = [c for c in rw if c["verdict"] != "PASS"]
-        add("## Estado de las 7 regresiones real-world")
+        add(f"## Estado de las {len(rw)} regresiones real-world")
         add("")
         if rw_fails:
-            add(f"**ATENCIÓN: {len(rw_fails)} de {len(rw)} casos de regresión FALLAN** "
+            add(f"**ATENCIÓN: {len(rw_fails)} de {len(rw)} casos de regresión no pasan** "
                 "(los fallos de producción auditados siguen, total o parcialmente, sin resolver):")
             for c in rw_fails:
-                add(f"- **{c['qid']} ({c['type']}) FALLA**: “{c['question']}”")
+                add(f"- **{c['qid']} ({c['type']}) {c['verdict']}**: \"{c['question']}\"")
         else:
             add(f"Los {len(rw)} casos de regresión pasan: los fallos de producción auditados "
                 "quedan cubiertos por el comportamiento actual del agente.")
@@ -616,15 +824,14 @@ def write_report(payload: dict, report_path: Path) -> None:
         add("| Caso | Pregunta del uso real | Veredicto |")
         add("|---|---|---|")
         for c in reales:
-            add(f"| {c['qid']} | {c['question']} | "
-                f"{c['verdict'] if c['verdict'] == 'PASS' else '**FAIL**'} |")
+            add(f"| {c['qid']} | {c['question']} | {_verdict_cell(c)} |")
         add("")
         r_fail = [c for c in reales if c["verdict"] != "PASS"]
         n_fail = [c for c in nuevas if c["verdict"] != "PASS"]
         add(f"- Preguntas reales: **{len(reales) - len(r_fail)}/{len(reales)} PASS**"
-            + (f" (fallan: {', '.join(c['qid'] for c in r_fail)})." if r_fail else "."))
+            + (f" (no pasan: {', '.join(c['qid'] for c in r_fail)})." if r_fail else "."))
         add(f"- Composicionales nuevas: **{len(nuevas) - len(n_fail)}/{len(nuevas)} PASS**"
-            + (f" (fallan: {', '.join(c['qid'] for c in n_fail)})." if n_fail else "."))
+            + (f" (no pasan: {', '.join(c['qid'] for c in n_fail)})." if n_fail else "."))
         add("")
 
     fails = [c for c in cases if c["verdict"] != "PASS"
@@ -642,15 +849,12 @@ def write_report(payload: dict, report_path: Path) -> None:
             tag = "muestra gold set"
         add(f"### {c['qid']} · {c['type']} · {tag} · veredicto: {c['verdict']}")
         add(f"- **Pregunta:** {c['question']}")
+        if c.get("error"):
+            add(f"- **Error:** {c['error']}")
         for crit in CRITERIA:
             entry = c["criteria"][crit]
             if not entry["pass"]:
                 add(f"- **({CRIT_SHORT[crit]}) {crit} FALLA:** {entry['nota']}")
-        passed_notes = [
-            f"({CRIT_SHORT[k]}) {c['criteria'][k]['nota']}"
-            for k in CRITERIA
-            if c["criteria"][k]["pass"] and c["criteria"][k]["nota"] and c["verdict"] != "PASS"
-        ]
         if c.get("answer_head"):
             add(f"- **Respuesta (inicio):** {c['answer_head']}")
         if c.get("judge_verdict_raw") and c["judge_verdict_raw"] != c["verdict"]:
@@ -658,145 +862,172 @@ def write_report(payload: dict, report_path: Path) -> None:
                 "aplica la regla determinista del enunciado.")
         add("")
 
-    add("## Costo y duración de la corrida")
+    # --- Coste y tokens: todo lo medido por la telemetría, USD siempre etiquetado.
+    all_cases = [c for rep_cases in payload.get("repetitions", [cases]) for c in rep_cases]
+    comp = _component_rollup(all_cases)
+    models = _model_rollup(all_cases)
+    tot = _sum_tokens(all_cases)
+    total_cost = float(payload.get("cost_estimate", 0.0))
+    agent_s = sum(c["agent_s"] for c in all_cases)
+    judge_s = sum(c["judge_s"] for c in all_cases)
+    n_all = max(len(all_cases), 1)
+    add("## Costo, tokens y duración de la corrida")
     add("")
-    agent_s = sum(c["agent_s"] for c in cases)
-    judge_s = sum(c["judge_s"] for c in cases)
+    add(f"Cubre las {len(all_cases)} ejecuciones de caso de la corrida"
+        + (f" ({repeat} repeticiones)" if repeat > 1 else "") + ". Los tokens son los "
+        f"`usage` reales del API (embeddings incluidos); **toda cifra en USD es {PRICING_LABEL}**.")
+    add("")
     add(f"- Duración total: **{payload['elapsed_s']:.0f}s** "
-        f"(agente: {agent_s:.0f}s, {agent_s / max(len(cases), 1):.0f}s/caso; "
-        f"juez: {judge_s:.0f}s, {judge_s / max(len(cases), 1):.0f}s/caso).")
-    add(f"- Hops del agente: {sum(c['n_hops'] for c in cases)} búsquedas en total "
-        f"({sum(c['n_hops'] for c in cases) / max(len(cases), 1):.1f}/caso).")
-    add("- Tokens medidos (chat completions; embeddings de búsqueda no incluidos, costo marginal):")
-    for line in payload["usage_detail"]:
-        add(f"  - {line}")
-    add(f"- **Costo total aproximado: ~{payload['cost_estimate']:.2f} USD** con las tarifas "
-        "asumidas indicadas (no hay tarifa oficial en el repo; los tokens medidos son exactos, "
-        "el costo en USD es estimación).")
+        f"(agente: {agent_s:.0f}s, {agent_s / n_all:.0f}s/caso; "
+        f"juez: {judge_s:.0f}s, {judge_s / n_all:.0f}s/caso).")
+    add(f"- Hops del agente: {sum(c['n_hops'] for c in all_cases)} búsquedas en total "
+        f"({sum(c['n_hops'] for c in all_cases) / n_all:.1f}/caso).")
+    add(f"- Tokens totales: prompt {tot['prompt']:,} (cacheados {tot['cached']:,}), "
+        f"completion {tot['completion']:,} (razonamiento {tot['reasoning']:,}).")
+    add(f"- **Costo total: {_usd(total_cost)} ({PRICING_LABEL})**; "
+        f"{_usd(total_cost / n_all)} por caso ({PRICING_LABEL}).")
+    add("")
+    add(f"### Por componente (USD: {PRICING_LABEL})")
+    add("")
+    add("| Componente | rondas | errores | prompt | cached | completion | reasoning | ms | USD |")
+    add("|---|---|---|---|---|---|---|---|---|")
+    for name, a in sorted(comp.items()):
+        add(f"| {name} | {a['rounds']} | {a['errors']} | {a['prompt']:,} | {a['cached']:,} | "
+            f"{a['completion']:,} | {a['reasoning']:,} | {a['ms']:.0f} | {_usd(a['cost_usd'])} |")
+    add("")
+    add(f"### Por modelo (USD: {PRICING_LABEL})")
+    add("")
+    add("| Modelo | prompt | cached | completion | reasoning | USD |")
+    add("|---|---|---|---|---|---|")
+    for model, a in sorted(models.items()):
+        add(f"| `{model}` | {a['prompt']:,} | {a['cached']:,} | {a['completion']:,} | "
+            f"{a['reasoning']:,} | {_usd(a['cost_usd'])} |")
+    unknown = sorted({m for c in all_cases for m in c.get("telemetry", {}).get("unknown_models", [])})
+    if unknown:
+        add("")
+        add(f"Modelos sin tarifa asumida (suman 0 USD): {', '.join(f'`{m}`' for m in unknown)}.")
+    add("")
+    add(f"### Por caso (USD: {PRICING_LABEL})")
+    add("")
+    add("| Caso | rep | veredicto | rondas agente | prompt | cached | completion | reasoning | ms | USD |")
+    add("|---|---|---|---|---|---|---|---|---|---|")
+    for c in all_cases:
+        t = c.get("tokens", {})
+        tel = c.get("telemetry", {})
+        add(f"| {c['qid']} | {c.get('repetition', 1)} | {c['verdict']} | {tel.get('agent_rounds', 0)} | "
+            f"{t.get('prompt', 0):,} | {t.get('cached', 0):,} | {t.get('completion', 0):,} | "
+            f"{t.get('reasoning', 0):,} | {tel.get('ms_total', 0):.0f} | {_usd(c.get('cost_usd', 0.0))} |")
+    add(f"| **Total** | | | | {tot['prompt']:,} | {tot['cached']:,} | {tot['completion']:,} | "
+        f"{tot['reasoning']:,} | | **{_usd(total_cost)}** |")
+    add("")
     add("- Comparación: la parte cara es la corrida del agente con el modelo grande "
         f"(`{payload['agent_model']}`); el juicio con `{JUDGE_MODEL}` añade una fracción menor "
         "del costo y de la duración por caso.")
     add("")
-
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"\nReporte escrito en {report_path}")
+    return "\n".join(lines)
 
 
 # --- Main -------------------------------------------------------------------------
 
-async def run_all(args) -> None:
-    from openai import AsyncOpenAI
+async def run_all(args) -> int:
     from app.config import get_settings
 
     settings = get_settings()
     if not settings.openai_api_key:
-        raise SystemExit("OPENAI_API_KEY no está configurada en backend/.env")
-    install_usage_capture()
-    judge_client = AsyncOpenAI(api_key=settings.openai_api_key)
+        print("OPENAI_API_KEY no está configurada en backend/.env", file=sys.stderr)
+        return EXIT_ERROR
 
-    real: list[dict] = []
+    retrieval = force_retrieval_mode(args.retrieval)
+    metadata = run_metadata()
+    label = "agregacion" if args.agregacion else "answers"
+    out_dir = results_dir(label, forced=args.results_dir)
+    print(f"Carpeta de resultados: {out_dir}", flush=True)
+
+    try:
+        cases_def = select_cases(args)
+    except Exception as exc:
+        print(f"ERROR cargando los gold sets: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    n_real = sum(1 for g, _ in cases_def if g == "real_world")
     if args.agregacion:
-        # Modo EXCLUSIVO: solo la categoría de agregación. Los 7+18 del flujo
-        # normal ni se cargan; el informe va a docs/EVAL_AGREGACION.md.
-        agg = json.loads(GOLD_AGREGACION.read_text(encoding="utf-8"))["questions"]
-        cases_def: list[tuple[str, dict]] = [("agregacion", c) for c in agg]
         print(
             f"== Eval de AGREGACIÓN: {len(cases_def)} casos "
             f"(evals/gold_agregacion.json) | agente={settings.openai_model} "
-            f"juez={JUDGE_MODEL} | secuencial"
-            + (f" | tope de costo {args.max_cost:.2f} USD" if args.max_cost else ""),
+            f"juez={JUDGE_MODEL} | retrieval={retrieval} | secuencial | repeat={args.repeat}"
+            + (f" | tope de costo {args.max_cost:.2f} USD ({PRICING_LABEL})" if args.max_cost else ""),
             flush=True,
         )
     else:
-        real = json.loads(GOLD_REAL_WORLD.read_text(encoding="utf-8"))["questions"]
-        cases_def = [("real_world", c) for c in real]
-
-        if not args.solo_real_world:
-            gold = json.loads(GOLD_RETRIEVAL.read_text(encoding="utf-8"))["questions"]
-            sample = gold if args.all else stratified_sample(gold, args.n, args.seed)
-            cases_def += [("muestra_retrieval", c) for c in sample]
-
         print(
             f"== Eval de respuestas: {len(cases_def)} casos "
-            f"({len(real)} real-world + {len(cases_def) - len(real)} gold set) | "
-            f"agente={settings.openai_model} juez={JUDGE_MODEL} | secuencial",
+            f"({n_real} real-world + {len(cases_def) - n_real} gold set) | "
+            f"agente={settings.openai_model} juez={JUDGE_MODEL} | retrieval={retrieval} | "
+            f"secuencial | repeat={args.repeat}"
+            + (f" | tope de costo {args.max_cost:.2f} USD ({PRICING_LABEL})" if args.max_cost else ""),
             flush=True,
         )
+
+    fingerprint: dict | None = None
+    try:
+        fingerprint = fingerprint_index()
+    except Exception as exc:
+        print(f"ERROR: no se pudo leer el índice Qdrant: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
     aborted = ""
-
+    exit_code = EXIT_OK
+    spent = 0.0
     t0 = time.time()
-    results: list[dict] = []
-    for i, (group, case) in enumerate(cases_def, start=1):
-        qid = case["qid"]
-        question = case["question"]
-        if group == "real_world":
-            reference = build_reference_real_world(case)
-        elif group == "agregacion":
-            # Mismo mecanismo (hechos congelados + chunks reales + inventario
-            # vivo), pero el encabezado dice que los hechos vienen del motor.
-            reference = build_reference_real_world(case, header=REF_HEADER_ENGINE)
-        else:
-            reference = build_reference_gold(case)
-        USAGE.set_component("agente")
-        try:
-            run = await run_agent_case(question)
-        except Exception as exc:
-            print(f"  [{i:>2}/{len(cases_def)}] ERROR agente {qid}: {exc}", flush=True)
-            results.append({
-                "qid": qid, "group": group, "type": case["type"],
-                "question": question, "error": f"agente: {exc}",
-                "verdict": "FAIL",
-                "criteria": {c: {"pass": False, "nota": f"el agente falló: {exc}"}
-                             for c in CRITERIA},
-                "judge_verdict_raw": "", "n_hops": 0, "agent_s": 0.0,
-                "judge_s": 0.0, "answer_head": "",
-                "origen": case.get("origen", ""),
-            })
-            continue
-        USAGE.set_component("juez")
-        verdictdata = await judge_case(judge_client, question, run["content"], reference)
-        USAGE.set_component(None)
-
-        res = {
-            "qid": qid,
-            "group": group,
-            "type": case["type"],
-            "origen": case.get("origen", ""),
-            "question": question,
-            "answer": run["content"],
-            "answer_head": run["content"][:220].replace("\n", " "),
-            "n_hops": len(run["hops"]),
-            "hops": run["hops"],
-            "agent_s": run["agent_s"],
-            "reference_head": reference[:400],
-            **verdictdata,
-        }
-        results.append(res)
-        status = "PASS" if res["verdict"] == "PASS" else "FAIL"
-        print(
-            f"  [{i:>2}/{len(cases_def)}] {status} {qid} "
-            f"{GROUP_LABELS.get(group, ('GS', ''))[0]} {case['type'][:16]:<16} "
-            f"[{_crit_flags(res)}] hops={res['n_hops']} "
-            f"agente={res['agent_s']}s juez={res['judge_s']}s",
-            flush=True,
-        )
-
-        # Guardia de presupuesto: corta ENTRE casos (nunca a mitad de uno), así
-        # el informe parcial sigue siendo válido y se ve qué quedó sin correr.
-        if args.max_cost:
-            spent = USAGE.cost_estimate()[0]
-            if spent > args.max_cost:
+    repetitions: list[list[dict]] = []
+    total = len(cases_def) * args.repeat
+    done = 0
+    for rep in range(1, args.repeat + 1):
+        results: list[dict] = []
+        repetitions.append(results)
+        if args.repeat > 1:
+            print(f"\n### Repetición {rep}/{args.repeat}", flush=True)
+        for group, item in cases_def:
+            done += 1
+            # Cada caso corre en su propia tarea: telemetry.start() dentro de
+            # ella fija un ContextVar aislado (asyncio copia el contexto).
+            try:
+                res = await asyncio.create_task(run_case(group, item, rep, retrieval, settings))
+            except QuotaAbort as exc:
                 aborted = (
-                    f"ABORTADO por tope de costo: {spent:.2f} USD estimados > "
-                    f"{args.max_cost:.2f} USD tras {len(results)} de "
-                    f"{len(cases_def)} casos."
+                    f"ABORTADO por cuota de OpenAI (sin reintentos) en {item.id}: "
+                    f"{str(exc)[:200]}. {done - 1} de {total} ejecuciones completadas."
                 )
                 print(f"\n!! {aborted}", flush=True)
+                exit_code = EXIT_ERROR
                 break
+            results.append(res)
+            spent += float(res.get("cost_usd", 0.0))
+            status = res["verdict"]
+            print(
+                f"  [{done:>2}/{total}] {status:<5} {item.id} "
+                f"{GROUP_LABELS.get(group, ('GS', ''))[0]} {item.type[:16]:<16} "
+                f"[{_crit_flags(res)}] hops={res['n_hops']} "
+                f"agente={res['agent_s']}s juez={res['judge_s']}s "
+                f"coste={res.get('cost_usd', 0.0):.4f} USD acumulado={spent:.4f} USD ({PRICING_LABEL})",
+                flush=True,
+            )
+            if res.get("error"):
+                print(f"      error: {res['error']}", flush=True)
 
-    cost, detail = USAGE.cost_estimate()
+            # Guardia de presupuesto: corta ENTRE casos (nunca a mitad de uno), así
+            # el informe parcial sigue siendo válido y se ve qué quedó sin correr.
+            if args.max_cost and spent > args.max_cost:
+                aborted = (
+                    f"ABORTADO por tope de costo: {spent:.4f} USD estimados ({PRICING_LABEL}) > "
+                    f"{args.max_cost:.2f} USD tras {done} de {total} ejecuciones."
+                )
+                print(f"\n!! {aborted}", flush=True)
+                exit_code = EXIT_ERROR
+                break
+        if aborted:
+            break
+
+    first = repetitions[0] if repetitions else []
     index_state: dict = {}
     if args.agregacion:
         try:
@@ -811,85 +1042,142 @@ async def run_all(args) -> None:
             }
         except Exception as exc:  # el informe no debe caerse por esto
             print(f"(aviso: no se pudo leer el inventario del índice: {exc})")
+    all_cases = [c for rep_cases in repetitions for c in rep_cases]
     payload = {
         "aborted": aborted,
         "index_state": index_state,
-        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "fingerprint": fingerprint,
+        "run_metadata": metadata,
+        "retrieval_requested": args.retrieval,
+        "retrieval": retrieval,
+        "repeat": args.repeat,
+        "min_pass": args.min_pass,
+        "max_cost": args.max_cost,
+        "started_at": metadata["started_at"],
+        "finished_at": now_iso(),
         "elapsed_s": round(time.time() - t0, 1),
         "agent_model": settings.openai_model,
         "judge_model": JUDGE_MODEL,
         "max_hops": settings.max_hops,
         "seed": args.seed,
         "n_sample": args.n,
-        "usage_by_model": USAGE.by_model,
-        "usage_by_component": USAGE.by_component,
-        "usage_detail": detail,
-        "cost_estimate": cost,
-        "cases": results,
+        "tokens_total": _sum_tokens(all_cases),
+        "usage_by_component": _component_rollup(all_cases),
+        "usage_by_model": _model_rollup(all_cases),
+        "cost_estimate": round(spent, 6),
+        "cost_label": PRICING_LABEL,
+        "stability": _stability(repetitions) if args.repeat > 1 else {},
+        "cases": first,
+        "repetitions": repetitions,
     }
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    raw_path = RESULTS_DIR / (
-        "results_agregacion.json" if args.agregacion else "results_answers.json"
-    )
-    raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"\nResultados crudos en {raw_path}")
+    write_json(out_dir / "results.json", payload)
+    print(f"\nResultados en {out_dir / 'results.json'}")
 
-    report_path = args.report or (
-        AGREGACION_REPORT if args.agregacion else DEFAULT_REPORT
-    )
-    write_report(payload, report_path)
+    if not first:
+        print("Ningún caso completado: no hay informe que escribir.", file=sys.stderr)
+        return EXIT_ERROR
 
-    g = _agg(results)
+    # Respuestas y notas del juez vienen de un LLM: se sanean antes de
+    # escribir; write_doc sigue vigilando el texto propio del informe.
+    report = sanitize(build_report(payload))
+    write_doc(out_dir / "report.md", report, force=True)
+    print(f"Informe escrito en {out_dir / 'report.md'}")
+    if args.write_docs:
+        doc_path = args.report or (AGREGACION_REPORT if args.agregacion else DEFAULT_REPORT)
+        if aborted:
+            # Un informe parcial no debe reemplazar el documento del repo.
+            print(f"--write-docs ignorado (corrida abortada): {doc_path} no se actualiza.",
+                  file=sys.stderr)
+        else:
+            write_doc(doc_path, report, force=True)
+            print(f"Documento actualizado: {doc_path}")
+
+    g = _agg(first)
     print(
-        f"\n== Global: PASS {_pct(g['pass'])} de {g['n']} casos | "
+        f"\n== Global (repetición 1): PASS {_pct(g['pass'])} de {g['n']} casos | "
         + " ".join(f"{CRIT_SHORT[c]}={_pct(g[c])}" for c in CRITERIA)
+        + (f" | errores={g['errors']}" if g["errors"] else "")
     )
+    if args.repeat > 1 and payload["stability"]:
+        pg = payload["stability"]["pass_global"]
+        print(f"== PASS medio en {args.repeat} repeticiones: {_pct(pg['mean'])} (std {_pct(pg['std'])}); "
+              f"casos inestables: {', '.join(payload['stability']['unstable']) or 'ninguno'}")
     if args.agregacion:
-        reales = [c for c in results if str(c.get("origen", "")).startswith("uso real")]
+        reales = [c for c in first if str(c.get("origen", "")).startswith("uso real")]
         r_fails = [c for c in reales if c["verdict"] != "PASS"]
         print(
             f"== Preguntas del uso real: {len(reales) - len(r_fails)}/{len(reales)} PASS"
-            + (f" | FALLAN: {', '.join(c['qid'] for c in r_fails)}" if r_fails else "")
+            + (f" | NO PASAN: {', '.join(c['qid'] for c in r_fails)}" if r_fails else "")
         )
-        fails = [c for c in results if c["verdict"] != "PASS"]
+        fails = [c for c in first if c["verdict"] != "PASS"]
         if fails:
-            print(f"== FALLAN en total: {', '.join(c['qid'] for c in fails)}")
+            print(f"== NO PASAN en total: {', '.join(c['qid'] for c in fails)}")
     else:
-        rw_res = [c for c in results if c["group"] == "real_world"]
+        rw_res = [c for c in first if c["group"] == "real_world"]
         rw_fails = [c for c in rw_res if c["verdict"] != "PASS"]
         print(
             f"== Regresiones real-world: {len(rw_res) - len(rw_fails)}/{len(rw_res)} PASS"
-            + (f" | FALLAN: {', '.join(c['qid'] for c in rw_fails)}" if rw_fails else "")
+            + (f" | NO PASAN: {', '.join(c['qid'] for c in rw_fails)}" if rw_fails else "")
         )
-    print(f"== Costo aproximado: ~{cost:.2f} USD (tarifas asumidas) | {payload['elapsed_s']:.0f}s")
+    print(f"== Costo: {spent:.4f} USD ({PRICING_LABEL}) | {payload['elapsed_s']:.0f}s")
     if aborted:
         print(f"== {aborted}")
 
+    if exit_code != EXIT_OK:
+        return exit_code
+    pass_rate = payload["stability"]["pass_global"]["mean"] if payload["stability"] else g["pass"]
+    if args.min_pass > 0.0 and pass_rate < args.min_pass:
+        print(f"FAIL: PASS rate {_pct(pass_rate)} < umbral {_pct(args.min_pass)}")
+        return EXIT_FAIL
+    return EXIT_OK
 
-def main() -> None:
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Evaluación a nivel de respuesta con juez LLM (gpt-5.4-mini)"
+        description="Evaluación a nivel de respuesta con juez LLM (gpt-5.4-mini)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Ejemplos:\n"
+            "  python -X utf8 evals/judge_answers.py\n"
+            "  python -X utf8 evals/judge_answers.py --all --retrieval dense\n"
+            "  python -X utf8 evals/judge_answers.py --agregacion --repeat 2\n"
+            "  python -X utf8 evals/judge_answers.py --solo-real-world --write-docs\n"
+            "Exit codes: 0 ok, 1 PASS rate bajo --min-pass, 2 error/cuota, 3 documento con guión largo."
+        ),
     )
     parser.add_argument("--n", type=int, default=18,
                         help="tamaño de la muestra estratificada del gold set (default 18)")
     parser.add_argument("--all", action="store_true",
-                        help="usa las 60 preguntas del gold set (ignora --n)")
+                        help="usa las 60 preguntas del gold set: 67 casos con los 7 real-world (ignora --n)")
     parser.add_argument("--solo-real-world", action="store_true",
                         help="solo los 7 casos de regresión real-world")
     parser.add_argument("--agregacion", action="store_true",
                         help="SOLO los casos de evals/gold_agregacion.json "
-                             "(orden/conteos/agrupaciones); informe en "
-                             "docs/EVAL_AGREGACION.md")
+                             "(orden/conteos/agrupaciones); documento docs/EVAL_AGREGACION.md")
+    parser.add_argument("--retrieval", choices=RETRIEVAL_MODES, default="hybrid",
+                        help="híbrido (dense+BM25, default) o denso puro en el agente")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="repite el conjunto N veces; PASS medio y varianza por caso (default 1)")
     parser.add_argument("--max-cost", type=float, default=None,
-                        help="tope de costo estimado en USD: aborta entre casos "
+                        help=f"tope de costo estimado en USD ({PRICING_LABEL}): aborta entre casos "
                              "si se supera (default: sin tope)")
+    parser.add_argument("--min-pass", type=float, default=0.0,
+                        help="PASS rate mínimo para exit 0 (default 0.0: solo informativo)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--results-dir", type=Path, default=None,
+                        help="carpeta de resultados fija (default evals/results/<fecha>-answers/)")
     parser.add_argument("--report", type=Path, default=None,
-                        help="ruta del informe (default: docs/EVAL_RESPUESTAS.md, "
-                             "o docs/EVAL_AGREGACION.md con --agregacion)")
+                        help="documento de docs/ a sobreescribir con --write-docs (default: "
+                             "docs/EVAL_RESPUESTAS.md, o docs/EVAL_AGREGACION.md con --agregacion)")
+    parser.add_argument("--write-docs", action="store_true",
+                        help="además de report.md en resultados, sobreescribe el documento de docs/")
     args = parser.parse_args()
-    asyncio.run(run_all(args))
+    if args.repeat < 1:
+        parser.error("--repeat debe ser >= 1")
+    if not 0.0 <= args.min_pass <= 1.0:
+        parser.error("--min-pass debe estar entre 0 y 1")
+    return asyncio.run(run_all(args))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -5,12 +5,19 @@ from pydantic import BaseModel, Field
 
 
 class Chunk(BaseModel):
-    """Un chunk indexado en Qdrant (payload + score de búsqueda)."""
+    """Fragmento indexado en Qdrant, con metadatos de documento opcionales."""
 
     id: str
     text: str
     source_file: str
     page: int
+    project_id: str | None = None
+    document_id: str | None = None
+    section: str = ""
+    language: str = ""
+    document_type: str = ""
+    source_pages: list[int] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
     brand: str = ""
     category: str = ""
     skus: list[str] = Field(default_factory=list)
@@ -34,6 +41,10 @@ class Chunk(BaseModel):
 
 
 class SearchFilters(BaseModel):
+    project_id: str | None = None
+    document_id: str | None = None
+    document_type: str | None = None
+    language: str | None = None
     brand: str | None = None
     category: str | None = None
     # Línea comercial (payload `supplier`): filtro exacto y confiable, viene
@@ -51,6 +62,12 @@ class SourceRef(BaseModel):
 
     source_file: str
     page: int
+    project_id: str | None = None
+    document_id: str | None = None
+    section: str = ""
+    language: str = ""
+    document_type: str = ""
+    source_pages: list[int] = Field(default_factory=list)
     brand: str = ""
     snippet: str = ""
     score: float = 0.0

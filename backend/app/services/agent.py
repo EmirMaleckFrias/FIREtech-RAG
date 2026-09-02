@@ -1,4 +1,4 @@
-"""Agente multi-hop con tool calling (buscar_productos) y respuesta final en streaming.
+"""Agente multi-hop con búsqueda de documentos y respuesta final en streaming.
 
 Contrato (SPEC.md):
     async def run_agent(message, history) -> AsyncIterator[AgentEvent]
@@ -10,13 +10,14 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Literal
 
-from openai import AsyncOpenAI
-
 from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
+from app.services import telemetry
+from app.services.openai_client import get_async_client, openai_semaphore
 from app.services.qdrant import (
     GROUP_FIELDS,
     _MAX_GROUPS,
@@ -35,68 +36,46 @@ logger = logging.getLogger(__name__)
 _SNIPPET_LEN = 240
 
 SYSTEM_PROMPT = """\
-Eres un asistente experto en catálogos de productos de protección contra incendios \
-(rociadores/sprinklers, válvulas, accesorios, etc.). Tu ÚNICA fuente de información \
-son los catálogos indexados, que consultas con la herramienta `buscar_productos`.
+Eres el asistente de investigación de la empresa. Tu ÚNICA fuente de información \
+son los documentos indexados, que consultas con la herramienta `buscar_documentos`.
 
 REGLAS ESTRICTAS DE FIDELIDAD:
 1. Responde SOLO con información que aparezca en los resultados de búsqueda de esta \
 conversación. Nada de conocimiento externo, suposiciones ni datos inventados.
-2. TODA afirmación factual (modelo, SKU, precio, dimensión, material, aprobación, \
-K-factor, temperatura, etc.) debe llevar su cita con el formato exacto \
+2. TODA afirmación factual debe llevar su cita con el formato exacto \
 [archivo, pág. X], tomando archivo y página del resultado del que proviene el dato.
 3. Si algo no aparece en los resultados, dilo explícitamente, por ejemplo: \
-"no encuentro X en los catálogos". Nunca rellenes huecos con estimaciones.
-4. Precios: indícalos SIEMPRE con su moneda tal como figura en el catálogo y añade \
-la advertencia de que son precios de catálogo y pueden variar o estar desactualizados.
-5. Copia las unidades y denominaciones textuales del catálogo (pulgadas, mm, GPM, \
-psi, bar, K-factor...). NO conviertas unidades.
-6. Si la pregunta compara productos o abarca varias marcas/catálogos, haz VARIAS \
-búsquedas con consultas distintas y específicas (una por producto, marca o aspecto) \
-antes de responder; no respondas una comparación con una sola búsqueda.
-7. Reformula la consulta con vocabulario del dominio; si una búsqueda no devuelve \
-resultados útiles, intenta otra formulación antes de rendirte.
-8. Tienes un número LIMITADO de búsquedas por pregunta: repártelas entre TODOS los \
-productos que pide el usuario. Nunca gastes todas las búsquedas en un solo producto \
-dejando otros sin buscar: es mejor una búsqueda por producto que cuatro variantes \
-del primero.
-9. Los catálogos cubren varias marcas complementarias (ALEUM, Reliable/RASCO, \
-Croker, AGF, Notifier, System Sensor, VESDA...). Si un producto no aparece bajo la \
-marca que el usuario supone, repite la búsqueda SIN mencionar marca: el equivalente \
-puede venir de otro fabricante del catálogo (y dilo en la respuesta).
+"no encuentro X en los documentos". Nunca rellenes huecos con estimaciones.
+4. Conserva las unidades, fechas, nombres y denominaciones tal como aparecen en la fuente.
+5. Para preguntas comparativas o complejas, divide el problema en búsquedas específicas \
+y reúne evidencia independiente antes de responder.
+6. Reformula la consulta si los resultados no son útiles y busca en más de un documento \
+cuando la pregunta lo requiera.
+7. Distingue claramente entre evidencia directa, interpretación y ausencia de evidencia.
+8. No inventes citas, no atribuyas una afirmación a una fuente que no la contiene y \
+señala contradicciones entre documentos.
 
 10. La conversación previa es SOLO contexto opcional. Cada pregunta nueva puede \
 cambiar de tema por completo: trátala como independiente salvo que contenga una \
 referencia explícita a lo anterior ("ese modelo", "y el precio de cada uno", "el \
 segundo"). Nunca reduzcas el alcance de una pregunta general al tema de la \
 conversación, y no respondas desde tus turnos anteriores: consulta de nuevo.
-11. Tu herramienta ejecuta orden, conteos y agrupaciones de forma EXACTA sobre \
-el catálogo completo: componla en UNA sola llamada cuando la pregunta lo permita \
-("de cada suplidor" = ordenar + agrupar_por='suplidor'; "cuántos hay" = \
-agrupar_por sin semantico; "el más barato" = ordenar='precio_asc'). Nunca \
-declares un superlativo de precio ni un conteo que no venga de la herramienta \
-con ordenar/agrupar_por, y nunca repitas una llamada con parámetros idénticos.
+11. Nunca repitas una llamada con parámetros idénticos. Usa el número limitado de \
+búsquedas para cubrir todas las partes relevantes de la pregunta.
 
 Responde siempre en español, de forma clara, estructurada y concisa. Nunca uses \
-el guion largo (—) en tus respuestas: separa las ideas con comas, puntos o dos puntos.\
+el guion largo (em dash, U+2014) en tus respuestas: separa las ideas con comas, puntos o dos puntos.\
 """
 
-_CATALOG_TOOL = {
+_DOCUMENT_SEARCH_TOOL = {
     "type": "function",
     "function": {
-        "name": "consultar_catalogo",
+        "name": "buscar_documentos",
         "description": (
-            "Consulta el catálogo combinando, según lo pida la pregunta: "
-            "búsqueda por significado (semantico), filtros exactos (suplidor, "
-            "marca, rango de precio), orden por el PRECIO REAL del catálogo y "
-            "agrupación. Ejemplos: 'el más barato de cada suplidor' = "
-            "ordenar='precio_asc' + agrupar_por='suplidor' en UNA llamada; "
-            "'¿cuántas marcas hay?' = agrupar_por='marca' sin nada más "
-            "(devuelve el conteo real); 'detector VESDA más barato' = "
-            "semantico='detector de humo por aspiración' + marca='VESDA' + "
-            "ordenar='precio_asc'; 'ficha del NFS-320' = semantico solo. "
-            "El orden y los conteos los ejecuta el motor de forma exacta, "
-            "no los estimes tú."
+            "Busca evidencia en los documentos indexados. Usa semantico para "
+            "la consulta en lenguaje natural y los filtros documentales cuando "
+            "estén disponibles. Puedes combinar varias búsquedas para responder "
+            "preguntas complejas y comparativas."
         ),
         "parameters": {
             "type": "object",
@@ -104,10 +83,25 @@ _CATALOG_TOOL = {
                 "semantico": {
                     "type": "string",
                     "description": (
-                        "Qué buscar por significado (tipo de producto, modelo, "
-                        "SKU, specs). Omitir si la pregunta es puramente de "
-                        "precios/conteos con filtros."
+                        "Qué evidencia buscar en los documentos. Formula una "
+                        "consulta concreta y autónoma."
                     ),
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Limita la búsqueda a un proyecto autorizado.",
+                },
+                "document_id": {
+                    "type": "string",
+                    "description": "Limita la búsqueda a un documento autorizado.",
+                },
+                "document_type": {
+                    "type": "string",
+                    "description": "Tipo de archivo o documento, por ejemplo pdf o research_paper.",
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Idioma del documento, por ejemplo es o en.",
                 },
                 "suplidor": {
                     "type": "string",
@@ -199,7 +193,7 @@ async def _execute_search(
 
     # Fast-path de SKU exacto: si la consulta trae códigos tipo SKU, se
     # recuperan por match exacto en el payload y se garantizan entre los
-    # candidatos — una consulta por SKU nunca debe fallar por semántica.
+    # candidatos: una consulta por SKU nunca debe fallar por semántica.
     sku_hits: list[Chunk] = []
     if settings.sku_fastpath:
         tokens = _extract_sku_candidates(query)
@@ -242,7 +236,7 @@ async def _execute_search(
 
 
 async def _execute_catalog_query(args: dict) -> tuple[list[Chunk], str]:
-    """Ejecuta el álgebra de consultar_catalogo. Devuelve (chunks, texto).
+    """Ejecuta la consulta de documentos. Devuelve (chunks, texto).
 
     El enrutamiento vive AQUÍ, en el motor, decidido por los parámetros de la
     consulta (no por reglas del prompt sobre tipos de pregunta): agrupar,
@@ -353,6 +347,24 @@ async def _execute_catalog_query(args: dict) -> tuple[list[Chunk], str]:
     )
 
 
+async def _execute_document_search(args: dict) -> tuple[list[Chunk], str]:
+    """Busca evidencia documental sin depender de campos de productos."""
+    query = str(args.get("semantico") or "").strip()
+    if not query:
+        return [], "Falta una consulta semántica para buscar en los documentos."
+
+    settings = get_settings()
+    filters = SearchFilters(
+        project_id=str(args["project_id"]).strip() if args.get("project_id") else None,
+        document_id=str(args["document_id"]).strip() if args.get("document_id") else None,
+        document_type=str(args["document_type"]).strip() if args.get("document_type") else None,
+        language=str(args["language"]).strip() if args.get("language") else None,
+    )
+    chunks = await hybrid_search(query, filters, settings.search_top_k)
+    ranked = await rerank(query, chunks, settings.rerank_top_k)
+    return ranked, _format_results(ranked)
+
+
 _PRICE_POOL = 120  # candidatos recuperados antes de ordenar por precio
 
 
@@ -416,6 +428,12 @@ def _sources_payload(accumulated: dict[str, Chunk]) -> list[dict]:
         SourceRef(
             source_file=ch.source_file,
             page=ch.page,
+            project_id=ch.project_id,
+            document_id=ch.document_id,
+            section=ch.section,
+            language=ch.language,
+            document_type=ch.document_type,
+            source_pages=ch.source_pages,
             brand=ch.brand,
             snippet=ch.text[:_SNIPPET_LEN],
             score=ch.score,
@@ -440,7 +458,9 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             "OPENAI_API_KEY no está configurada. Configura OPENAI_API_KEY en backend/.env"
         )
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = get_async_client()
+    tel = telemetry.current()
+    tel.set_meta(prompt_version=settings.prompt_version, model=settings.openai_model)
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend({"role": m["role"], "content": m["content"]} for m in history)
@@ -467,57 +487,99 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             "model": settings.openai_model,
             "messages": messages,
             "stream": True,
-            "tools": [_CATALOG_TOOL],
+            # El último chunk del stream trae el `usage` de la ronda (prompt,
+            # cacheados, salida, razonamiento) y no trae choices.
+            "stream_options": {"include_usage": True},
+            "tools": [_DOCUMENT_SEARCH_TOOL],
             # Tras MAX_HOPS tool calls se fuerza la respuesta final.
             "tool_choice": "none" if force_final else "auto",
         }
         if not force_final:
             kwargs["parallel_tool_calls"] = False
 
-        stream = await client.chat.completions.create(**kwargs)
-
+        round_t0 = time.perf_counter()
+        round_usage = None
+        round_model = settings.openai_model
+        finish_reason: str | None = None
         content_parts: list[str] = []
         round_emit_started = False
         tool_calls: dict[int, dict] = {}  # index -> {"id", "name", "arguments"}
 
-        async for event in stream:
-            if not event.choices:
-                continue
-            delta = event.choices[0].delta
-            if delta is None:
-                continue
+        # La plaza del semáforo se ocupa durante toda la ronda (request +
+        # stream): es lo que de verdad está en vuelo contra el API.
+        sem = openai_semaphore()
+        await sem.acquire()
+        try:
+            stream = await client.chat.completions.create(**kwargs)
 
-            for tcd in delta.tool_calls or []:
-                entry = tool_calls.setdefault(
-                    tcd.index, {"id": "", "name": "", "arguments": ""}
-                )
-                if tcd.id:
-                    entry["id"] = tcd.id
-                if tcd.function is not None:
-                    if tcd.function.name:
-                        entry["name"] = tcd.function.name
-                    if tcd.function.arguments:
-                        entry["arguments"] += tcd.function.arguments
+            async for event in stream:
+                if getattr(event, "usage", None) is not None:
+                    round_usage = event.usage
+                    round_model = getattr(event, "model", None) or round_model
+                if not event.choices:
+                    continue
+                choice = event.choices[0]
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
+                if delta is None:
+                    continue
 
-            if delta.content:
-                content_parts.append(delta.content)
-                # El contenido se emite en vivo aunque la ronda acabe en tool
-                # call (preámbulo): ese texto entra igualmente al content final,
-                # así lo streameado y lo persistido coinciden. Solo se suprime
-                # contenido que llegue DESPUÉS de deltas de tool_calls.
-                if not tool_calls:
-                    if not sources_emitted:
-                        yield AgentEvent(
-                            "sources", {"sources": _sources_payload(accumulated)}
-                        )
-                        sources_emitted = True
-                    if not round_emit_started and emitted_parts:
-                        # Separador entre el texto de rondas distintas.
-                        yield AgentEvent("token", {"text": "\n\n"})
-                        emitted_parts.append("\n\n")
-                    round_emit_started = True
-                    emitted_parts.append(delta.content)
-                    yield AgentEvent("token", {"text": delta.content})
+                for tcd in delta.tool_calls or []:
+                    entry = tool_calls.setdefault(
+                        tcd.index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if tcd.id:
+                        entry["id"] = tcd.id
+                    if tcd.function is not None:
+                        if tcd.function.name:
+                            entry["name"] = tcd.function.name
+                        if tcd.function.arguments:
+                            entry["arguments"] += tcd.function.arguments
+
+                if delta.content:
+                    content_parts.append(delta.content)
+                    # El contenido se emite en vivo aunque la ronda acabe en tool
+                    # call (preámbulo): ese texto entra igualmente al content final,
+                    # así lo streameado y lo persistido coinciden. Solo se suprime
+                    # contenido que llegue DESPUÉS de deltas de tool_calls.
+                    if not tool_calls:
+                        if not sources_emitted:
+                            yield AgentEvent(
+                                "sources", {"sources": _sources_payload(accumulated)}
+                            )
+                            sources_emitted = True
+                        if not round_emit_started and emitted_parts:
+                            # Separador entre el texto de rondas distintas.
+                            yield AgentEvent("token", {"text": "\n\n"})
+                            emitted_parts.append("\n\n")
+                        round_emit_started = True
+                        emitted_parts.append(delta.content)
+                        yield AgentEvent("token", {"text": delta.content})
+        except Exception as exc:
+            # Fallo en la petición o a MITAD del stream: la ronda queda medida
+            # igual (ok=False), con el usage que hubiera llegado antes del corte.
+            # CancelledError/GeneratorExit son BaseException: no entran aquí.
+            tel.record(
+                "agente", round_model, round_usage,
+                ms=(time.perf_counter() - round_t0) * 1000.0,
+                ok=False, note=str(exc)[:160],
+            )
+            raise
+        finally:
+            sem.release()
+
+        tel.record(
+            "agente", round_model, round_usage,
+            ms=(time.perf_counter() - round_t0) * 1000.0,
+            finish_reason=finish_reason,
+            note=("final forzado" if force_final else
+                  f"tool_calls={len(tool_calls)}"),
+        )
+        if round_usage is None:
+            tel.incr("rounds_sin_usage")
+        if force_final:
+            tel.incr("forced_final")
 
         if tool_calls and not force_final:
             ordered = [tool_calls[i] for i in sorted(tool_calls)]
@@ -549,6 +611,7 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 )
                 if call_key in executed_calls:
                     # Repetición exacta: ni se ejecuta ni cuenta como hop.
+                    tel.incr("llamadas_repetidas")
                     messages.append(
                         {
                             "role": "tool",
@@ -581,12 +644,18 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 hops.append(hop_info)
                 yield AgentEvent("hop", hop_info)
 
+                tel.incr("hops")
+                hop_t0 = time.perf_counter()
                 try:
-                    chunks, result_text = await _execute_catalog_query(args)
+                    chunks, result_text = await _execute_document_search(args)
                 except Exception as exc:  # la búsqueda no debe tumbar el stream
                     logger.warning("%s falló (hop %d): %s", tc["name"], hop_count, exc)
+                    tel.incr("hops_con_error")
                     chunks = []
                     result_text = f"Error al ejecutar la búsqueda: {exc}"
+                hop_info["ms"] = round((time.perf_counter() - hop_t0) * 1000.0, 1)
+                hop_info["resultados"] = len(chunks)
+                hop_info["chars"] = len(result_text)
 
                 for ch in chunks:
                     if ch.id not in accumulated:

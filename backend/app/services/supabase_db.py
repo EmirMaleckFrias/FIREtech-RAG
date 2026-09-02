@@ -520,8 +520,18 @@ def register_document(
 ) -> str | None:
     """Crea/actualiza el registro de un documento. Devuelve su id (o None).
 
+    La fila se identifica por (file_name, environment): desde la migración
+    006 esa es la clave única de `documents`, porque prod y local comparten
+    la tabla (cada entorno tiene su propio Qdrant). El `environment` sale de
+    `get_settings().environment` (env ENVIRONMENT; `ingest.py` la fija con
+    `--environment`). Reingestar el mismo archivo en el mismo entorno
+    actualiza su fila; en otro entorno crea una fila aparte.
+
     `uploaded_by` = id del admin que lo subió (migración 004); None para la
     ingesta por lotes (script `ingest.py`, sin usuario).
+
+    Fallback en memoria: el dict se indexa solo por file_name porque en ese
+    modo todas las filas pertenecen al entorno del proceso.
     """
     payload = {
         "file_name": file_name,
@@ -540,18 +550,26 @@ def register_document(
         try:
             resp = (
                 client.table("documents")
-                .upsert(payload, on_conflict="file_name")
+                .upsert(payload, on_conflict="file_name,environment")
                 .execute()
             )
         except Exception:
-            # Migraciones 002/003/004 (status/error/environment/uploaded_by)
-            # aún no aplicadas: registra sin esas columnas para no romper la
-            # ingesta existente.
+            # Migraciones 002/003/004/006 (status/error/environment/
+            # uploaded_by y la clave única compuesta) aún no aplicadas:
+            # registra sin esas columnas para no romper la ingesta existente.
+            # El on_conflict vuelve a "file_name" a propósito: la clave
+            # (file_name, environment) la crea la 006 y depende de la columna
+            # `environment` (003); si el primer upsert falló, o falta alguna
+            # de esas migraciones o falta la clave compuesta, y en ambos casos
+            # la única unique que existe con seguridad es la original sobre
+            # file_name. Además el payload reducido ya no lleva `environment`,
+            # así que PostgREST no podría resolver la clave compuesta.
             logger.warning(
                 "Upsert de documents con status/error/environment/uploaded_by "
-                "falló; reintento sin esas columnas (¿faltan aplicar "
+                "y clave (file_name, environment) falló; reintento sin esas "
+                "columnas y con clave file_name (¿faltan aplicar "
                 "002_document_status.sql / 003_document_environment.sql / "
-                "004_auth_multiusuario.sql?)."
+                "004_auth_multiusuario.sql / 006_documentos_por_entorno.sql?)."
             )
             payload.pop("status", None)
             payload.pop("error", None)
@@ -599,7 +617,7 @@ def upsert_document_status(
 
     NUNCA crea una fila nueva: si el registro no existe (p. ej. fue borrado
     por DELETE /documents mientras se procesaba), devuelve False sin crear
-    nada — recrearlo "resucitaría" un documento que el usuario borró.
+    nada: recrearlo "resucitaría" un documento que el usuario borró.
     Devuelve True solo si el update tocó una fila existente.
     """
     payload: dict[str, Any] = {"status": status, "error": error, **fields}
