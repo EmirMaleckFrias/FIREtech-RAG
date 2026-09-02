@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { CitationRef } from '../lib/markdown';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, ModoPensamiento } from '../types';
 import { IconArrowUp, IconStop } from './icons';
 import { MessageItem } from './MessageItem';
 import { WelcomeIntro, WelcomeSuggestions } from './Welcome';
@@ -12,11 +12,29 @@ interface ChatProps {
   isStreaming: boolean;
   panelTargetId: string | null;
   onSend: (text: string) => void;
+  modo: ModoPensamiento;
+  onModoChange: (modo: ModoPensamiento) => void;
   onStop: () => void;
   onFeedback: (msg: ChatMessage, rating: 1 | -1) => void;
   onCitation: (msgLocalId: string, ref: CitationRef) => void;
   onShowSources: (msgLocalId: string) => void;
 }
+
+/** Los dos modos, con la explicación que ve el usuario al pasar por encima. */
+const MODOS: { valor: ModoPensamiento; etiqueta: string; ayuda: string }[] = [
+  {
+    valor: 'normal',
+    etiqueta: 'Pensamiento normal',
+    ayuda: 'Una o dos búsquedas y respuesta. Para preguntas directas.',
+  },
+  {
+    valor: 'extendido',
+    etiqueta: 'Pensamiento extendido',
+    ayuda:
+      'Busca sin tope, descompone la pregunta y contrasta entre documentos. '
+      + 'Para preguntas complejas: tarda más y cuesta más.',
+  },
+];
 
 /** ~8 líneas de texto (15px · 1.5) + padding vertical del textarea. */
 const MAX_TEXTAREA_HEIGHT = 204;
@@ -32,6 +50,8 @@ export function Chat({
   isStreaming,
   panelTargetId,
   onSend,
+  modo,
+  onModoChange,
   onStop,
   onFeedback,
   onCitation,
@@ -224,6 +244,22 @@ export function Chat({
       </div>
 
       <div className="composer-area">
+        <div className="modo-switch" role="radiogroup" aria-label="Modo de pensamiento">
+          {MODOS.map((m) => (
+            <button
+              key={m.valor}
+              type="button"
+              role="radio"
+              aria-checked={modo === m.valor}
+              className={`modo-opcion ${modo === m.valor ? 'modo-activa' : ''}`}
+              title={m.ayuda}
+              onClick={() => onModoChange(m.valor)}
+              disabled={isStreaming}
+            >
+              {m.etiqueta}
+            </button>
+          ))}
+        </div>
         <form className="composer" onSubmit={handleSubmit}>
           <textarea
             ref={textareaRef}

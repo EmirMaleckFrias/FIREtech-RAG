@@ -16,7 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.config import get_settings
 from app.models import SearchFilters
-from app.services import supabase_db, telemetry
+from app.services import modos, supabase_db, telemetry
 from app.services.agent import run_agent
 from app.services.auth import AuthUser, current_user, require_admin
 from app.services.qdrant import (
@@ -55,7 +55,19 @@ def _runtime_config() -> dict:
         "bm25_backend": bm25_backend(),
         "model": settings.openai_model,
         "rerank_model": settings.rerank_model_resolved,
-        "max_hops": settings.max_hops,
+        # El presupuesto efectivo de cada modo, ya con el techo del despliegue
+        # aplicado: `max_hops` a secas no diria nada porque 0 significa "manda
+        # el modo", y cada modo tiene el suyo.
+        "modos": {
+            nombre: {
+                "max_hops": perfil.max_hops,
+                "budget_s": perfil.budget_s,
+                "fragmentos": perfil.fragmentos,
+            }
+            for nombre, perfil in (
+                (n, modos.resolver(n, settings)) for n in modos.MODOS
+            )
+        },
         "prompt_version": settings.prompt_version,
         "python": sys.version.split()[0],
         "environment": settings.environment,
@@ -120,6 +132,9 @@ class SearchRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str | None = None
     message: str
+    # "normal" (default) o "extendido". Un valor desconocido no es un error:
+    # se responde en normal, que es el modo que menos supone.
+    modo: str | None = None
 
 
 class FeedbackRequest(BaseModel):
@@ -310,10 +325,12 @@ async def chat(
         # solo va configuración (nunca user_id, email ni el texto de la
         # pregunta): el resumen sale por SSE y al log.
         settings = get_settings()
+        perfil = modos.resolver(body.modo)
         tel = telemetry.start(
             prompt_version=settings.prompt_version,
             environment=settings.environment,
             retrieval=retrieval_mode(),
+            modo=perfil.nombre,
         )
         # Acumulador de la respuesta parcial: si el cliente aborta a mitad de
         # stream, se persiste lo emitido hasta el momento para que el user
@@ -365,7 +382,7 @@ async def chat(
 
             # 4. Agente multi-hop con streaming.
             final: dict | None = None
-            async for ev in run_agent(body.message, history):
+            async for ev in run_agent(body.message, history, perfil.nombre):
                 if ev.type == "final":
                     final = ev.data
                 else:  # hop | sources | token → passthrough al contrato SSE

@@ -22,7 +22,7 @@ def catalogo_falso(monkeypatch):
     y no devuelve chunks."""
     llamadas: list[dict] = []
 
-    async def _stub(args: dict):
+    async def _stub(args: dict, fragmentos: int | None = None):
         llamadas.append(dict(args))
         return [], SIN_RESULTADOS
 
@@ -30,8 +30,12 @@ def catalogo_falso(monkeypatch):
     return llamadas
 
 
-async def _correr(mensaje: str, history: list[dict] | None = None) -> list[AgentEvent]:
-    return [ev async for ev in run_agent(mensaje, history or [])]
+async def _correr(
+    mensaje: str, history: list[dict] | None = None, modo: str | None = "extendido"
+) -> list[AgentEvent]:
+    """Corre el bucle. Por defecto en extendido: aqui se prueba la mecanica, y
+    el modo normal esta acotado a proposito (ver test_modos.py)."""
+    return [ev async for ev in run_agent(mensaje, history or [], modo)]
 
 
 def _tipos(eventos: list[AgentEvent]) -> list[str]:
@@ -214,9 +218,10 @@ async def test_el_historial_se_antepone_al_mensaje(settings_override, fake_opena
     eventos = await _correr("ahora", history)
     assert _tipos(eventos) == ["sources", "token", "final"]
     mensajes = fake_openai.calls[0]["messages"]
-    assert mensajes[0]["role"] == "system"
-    assert mensajes[1:3] == history
-    assert mensajes[3] == {"role": "user", "content": "ahora"}
+    # Dos de sistema: el prompt base y la instruccion del modo.
+    assert [m["role"] for m in mensajes[:2]] == ["system", "system"]
+    assert mensajes[2:4] == history
+    assert mensajes[4] == {"role": "user", "content": "ahora"}
     assert catalogo_falso == []
 
 
@@ -257,11 +262,29 @@ async def test_fallo_a_mitad_del_stream_queda_en_telemetria(settings_override, f
 async def test_sin_tope_de_hops_el_modelo_busca_lo_que_quiera(
     settings_override, fake_openai, catalogo_falso, monkeypatch
 ):
-    """MAX_HOPS=0 significa sin limite de cuenta: 12 busquedas son 12."""
+    """MAX_HOPS=0 significa sin limite de cuenta: 12 busquedas son 12.
+
+    Cada busqueda devuelve un fragmento NUEVO, o sea que hay avance: sin eso
+    cortaria el otro freno, que es exactamente lo que debe hacer.
+    """
     monkeypatch.setenv("MAX_HOPS", "0")
-    monkeypatch.setenv("AGENT_MAX_HOPS_SIN_AVANCE", "0")
     get_settings.cache_clear()
     assert get_settings().max_hops == 0
+
+    from app.models import Chunk
+
+    contador = {"n": 0}
+
+    async def _con_avance(args: dict, fragmentos: int | None = None):
+        contador["n"] += 1
+        nuevo = Chunk(
+            id=f"c{contador['n']}", text="algo nuevo", source_file="d.pdf",
+            page=contador["n"], document_type="pdf",
+        )
+        catalogo_falso.append(dict(args))
+        return [nuevo], "un fragmento"
+
+    monkeypatch.setattr(agent, "_execute_document_search", _con_avance)
 
     # Cada busqueda con argumentos distintos, para que no la frene el dedup.
     for i in range(12):
@@ -270,7 +293,7 @@ async def test_sin_tope_de_hops_el_modelo_busca_lo_que_quiera(
         )
     fake_openai.queue(make_text_stream("Respuesta final.", usage=make_usage(90, 9)))
 
-    eventos = await _correr("una pregunta larga")
+    eventos = await _correr("una pregunta larga", modo="extendido")
 
     assert _tipos(eventos).count("hop") == 12
     assert len(catalogo_falso) == 12
@@ -296,7 +319,7 @@ async def test_se_para_cuando_deja_de_encontrar_cosas_nuevas(
     fake_openai.queue(make_text_stream("Lo que tengo.", usage=make_usage(90, 9)))
     tel = telemetry.start()
 
-    eventos = await _correr("algo que no esta")
+    eventos = await _correr("algo que no esta", modo="extendido")
 
     assert _tipos(eventos).count("hop") == 2
     assert eventos[-1].type == "final"
@@ -321,7 +344,7 @@ async def test_el_reloj_corta_antes_de_que_muera_la_funcion(
     )
     tel = telemetry.start()
 
-    eventos = await _correr("cualquier cosa")
+    eventos = await _correr("cualquier cosa", modo="extendido")
 
     assert _tipos(eventos).count("hop") == 1
     assert fake_openai.calls[0]["tool_choice"] == "auto"

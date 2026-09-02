@@ -1491,6 +1491,43 @@ textarea {
   padding-bottom: calc(10px + env(safe-area-inset-bottom));
 }
 
+/* Selector de modo de pensamiento: dos pildoras discretas sobre el composer.
+   Discretas a proposito: la eleccion importa, pero no debe competir con el
+   campo de texto, que es donde esta la atencion. */
+.modo-switch {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 8px 4px;
+}
+
+.modo-opcion {
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.modo-opcion:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.modo-opcion.modo-activa {
+  color: var(--text);
+  background: var(--elevated);
+  border-color: var(--border-strong);
+}
+
+.modo-opcion:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;

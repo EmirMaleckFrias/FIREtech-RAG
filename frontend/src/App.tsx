@@ -30,6 +30,7 @@ import type {
   ChatMessage,
   Health,
   Me,
+  ModoPensamiento,
   ServerMessage,
   SessionInfo,
   SourceFocus,
@@ -129,6 +130,15 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  // Modo de pensamiento elegido. Se recuerda entre recargas porque quien
+  // trabaja con literatura suele quedarse en extendido toda la sesion.
+  const [modo, setModo] = useState<ModoPensamiento>(() => {
+    try {
+      return localStorage.getItem('rag-modo') === 'extendido' ? 'extendido' : 'normal';
+    } catch {
+      return 'normal';
+    }
+  });
 
   // Panel de fuentes: mensaje seleccionado + foco de cita.
   const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
@@ -440,6 +450,7 @@ export default function App() {
             },
           },
           controller.signal,
+          modo,
         );
 
         // El stream terminó sin evento done/error (conexión cortada).
@@ -611,6 +622,15 @@ export default function App() {
           isStreaming={isStreaming}
           panelTargetId={panelMessage?.localId ?? null}
           onSend={(t) => void handleSend(t)}
+          modo={modo}
+          onModoChange={(m) => {
+            setModo(m);
+            try {
+              localStorage.setItem('rag-modo', m);
+            } catch {
+              // Sin almacenamiento (modo privado): el modo dura la sesion.
+            }
+          }}
           onStop={stopStreaming}
           onFeedback={(m, r) => void handleFeedback(m, r)}
           onCitation={handleCitation}

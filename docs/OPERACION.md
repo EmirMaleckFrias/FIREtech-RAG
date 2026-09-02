@@ -53,7 +53,7 @@ variables del proyecto en Vercel en producción.
 | `QDRANT_COLLECTION` | `documentos` | local `.env` y Vercel | La colección `productos` del proyecto anterior sigue en su Qdrant y este backend ya no la mira |
 | `SUPABASE_URL` | vacío | local `.env` y Vercel | Vacía en local = modo dev sin autenticación, persistencia en memoria |
 | `SUPABASE_SERVICE_KEY` | vacío | local `.env` y Vercel | Solo en el backend, jamás en el frontend |
-| `MAX_HOPS` | `20` | local `.env` y Vercel | Tope de búsquedas por pregunta. **0 = sin límite**: si el modelo necesita 12 búsquedas, las hace. El freno de verdad son las dos variables siguientes |
+| `MAX_HOPS` | `0` | local `.env` y Vercel | Techo de búsquedas del despliegue. **0 = manda el perfil del modo** (normal 2, extendido sin tope). Estas tres variables son el techo de quien opera: solo pueden APRETAR el modo, nunca aflojarlo, para que un valor alto no convierta el modo normal en extendido sin que nadie lo pida |
 | `AGENT_BUDGET_S` | `240` | local `.env` y Vercel | Segundos de reloj antes de forzar la respuesta final. No es un capricho: la función de Vercel muere a los 300 s y sin este corte la respuesta no se acorta, se pierde entera. 0 = sin límite, solo sensato fuera de serverless |
 | `AGENT_MAX_HOPS_SIN_AVANCE` | `3` | local `.env` y Vercel | Búsquedas seguidas sin traer ni un fragmento nuevo antes de responder con lo que hay. Buscar más de lo mismo no acerca a la respuesta. 0 = desactivado |
 | `RERANK_TOP_K` | `12` | local `.env` y Vercel | Fragmentos que llegan al agente tras el rerank |
@@ -142,7 +142,29 @@ Los tests no llaman a OpenAI, ni a Qdrant, ni a la red: usan `set_async_client_f
 cliente único, un cliente espía de Qdrant y `get_settings.cache_clear()` para aislar la
 configuración. Si un test necesita red, está mal escrito.
 
-## 6. Qué NO hay todavía
+## 6. Los dos modos de pensamiento
+
+El usuario elige antes de preguntar, y la elección viaja en el cuerpo de `POST /api/chat`
+(`modo`: `normal` o `extendido`). Un valor desconocido no es un error: se responde en
+normal. El perfil de cada uno vive en `backend/app/services/modos.py` y el efectivo, ya
+con el techo del despliegue aplicado, se ve en `GET /api/health` bajo `modos`.
+
+| | Normal | Extendido |
+|---|---|---|
+| Búsquedas | 2 como máximo | sin tope |
+| Tiempo | 60 s | 240 s |
+| Sin avance | 1 búsqueda | 3 búsquedas |
+| Fragmentos por búsqueda | 8 | 12 |
+| `reasoning_effort` | no se envía | `high` |
+
+Lo que NO cambia entre modos: el prompt de fidelidad, las citas, el reranker y el filtro
+de relevancia. La diferencia es cuánto se le deja trabajar, no cuánta verdad se le exige.
+
+Coste: el extendido cuesta bastante más por pregunta (más búsquedas, más fragmentos en
+contexto y razonamiento alto). Cuando haya que medirlo, `backend/preguntar.py` imprime el
+coste real de cada pregunta y el modo queda en la telemetría de cada respuesta.
+
+## 7. Qué NO hay todavía
 
 Para que nadie lo busque en vano:
 

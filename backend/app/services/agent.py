@@ -14,7 +14,7 @@ from typing import AsyncIterator, Literal
 
 from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
-from app.services import telemetry
+from app.services import modos, telemetry
 from app.services.openai_client import get_async_client, openai_semaphore
 from app.services.qdrant import hybrid_search
 from app.services.reranker import filter_relevant, rerank
@@ -150,7 +150,9 @@ def _format_results(chunks: list[Chunk]) -> str:
     return "\n\n".join(parts)
 
 
-async def _execute_document_search(args: dict) -> tuple[list[Chunk], str]:
+async def _execute_document_search(
+    args: dict, fragmentos: int | None = None
+) -> tuple[list[Chunk], str]:
     """Busca evidencia en los documentos: recupera, reordena y filtra.
 
     El filtro de relevancia es lo que permite responder "no encuentro esto":
@@ -169,7 +171,10 @@ async def _execute_document_search(args: dict) -> tuple[list[Chunk], str]:
         document_type=str(args["document_type"]).strip() if args.get("document_type") else None,
         language=str(args["language"]).strip() if args.get("language") else None,
     )
-    limit = max(1, min(int(args.get("limit") or settings.rerank_top_k), 50))
+    limit = max(
+        1,
+        min(int(args.get("limit") or fragmentos or settings.rerank_top_k), 50),
+    )
 
     candidatos = await hybrid_search(query, filters, settings.search_top_k)
 
@@ -263,11 +268,15 @@ def _sources_payload(accumulated: dict[str, Chunk]) -> list[dict]:
     ]
 
 
-async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEvent]:
+async def run_agent(
+    message: str, history: list[dict], modo: str | None = None
+) -> AsyncIterator[AgentEvent]:
     """Loop de tool calling multi-hop + respuesta final en streaming.
 
     history: [{"role": "user"|"assistant", "content": str}, ...] (mensajes previos
     de la sesión); se antepone a los messages para conversación con contexto.
+    modo: "normal" (default) o "extendido". Cambia cuánto se busca y se
+    delibera, nunca las reglas de fidelidad: ver app/services/modos.py.
     """
     settings = get_settings()
     if not settings.openai_api_key:
@@ -275,11 +284,23 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             "OPENAI_API_KEY no está configurada. Configura OPENAI_API_KEY en backend/.env"
         )
 
+    perfil = modos.resolver(modo, settings)
+
     client = get_async_client()
     tel = telemetry.current()
-    tel.set_meta(prompt_version=settings.prompt_version, model=settings.openai_model)
+    tel.set_meta(
+        prompt_version=settings.prompt_version,
+        model=settings.openai_model,
+        modo=perfil.nombre,
+    )
 
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # La instrucción del modo va en su propio mensaje de sistema, DESPUÉS del
+    # prompt base: así el prefijo grande no cambia entre modos y sigue siendo
+    # cacheable por la API.
+    messages: list[dict] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": perfil.instruccion},
+    ]
     messages.extend({"role": m["role"], "content": m["content"]} for m in history)
     messages.append({"role": "user", "content": message})
 
@@ -310,18 +331,18 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
         tiempo no es un capricho, es que la función serverless muere a los
         300 s y sin este corte la respuesta no se acorta, se pierde entera.
         """
-        if settings.max_hops and hop_count >= settings.max_hops:
-            return f"tope de {settings.max_hops} búsquedas"
+        if perfil.max_hops and hop_count >= perfil.max_hops:
+            return f"tope de {perfil.max_hops} búsquedas"
         if (
-            settings.agent_max_hops_sin_avance
-            and hops_sin_avance >= settings.agent_max_hops_sin_avance
+            perfil.max_hops_sin_avance
+            and hops_sin_avance >= perfil.max_hops_sin_avance
         ):
             return (
                 f"{hops_sin_avance} búsquedas seguidas sin encontrar nada nuevo"
             )
-        if settings.agent_budget_s:
+        if perfil.budget_s:
             transcurrido = time.perf_counter() - inicio
-            if transcurrido >= settings.agent_budget_s:
+            if transcurrido >= perfil.budget_s:
                 return f"tiempo agotado ({transcurrido:.0f} s)"
         return None
 
@@ -351,6 +372,10 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
             # Tras MAX_HOPS tool calls se fuerza la respuesta final.
             "tool_choice": "none" if force_final else "auto",
         }
+        if perfil.esfuerzo:
+            # Solo se envia si el modo lo pide, para que un valor que la API no
+            # acepte se pueda desactivar cambiando el perfil y no el codigo.
+            kwargs["reasoning_effort"] = perfil.esfuerzo
         if not force_final:
             kwargs["parallel_tool_calls"] = False
 
@@ -504,7 +529,9 @@ async def run_agent(message: str, history: list[dict]) -> AsyncIterator[AgentEve
                 tel.incr("hops")
                 hop_t0 = time.perf_counter()
                 try:
-                    chunks, result_text = await _execute_document_search(args)
+                    chunks, result_text = await _execute_document_search(
+                        args, fragmentos=perfil.fragmentos
+                    )
                 except Exception as exc:  # la búsqueda no debe tumbar el stream
                     logger.warning("%s falló (hop %d): %s", tc["name"], hop_count, exc)
                     tel.incr("hops_con_error")

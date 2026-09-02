@@ -76,6 +76,10 @@ export interface SessionInfo {
   created_at: string;
 }
 
+/** Cuánto se le deja buscar y deliberar al agente. No cambia las reglas de
+ *  fidelidad: un modo rápido que además miente no sirve de nada. */
+export type ModoPensamiento = 'normal' | 'extendido';
+
 export interface Source {
   source_file: string;
   page: number | null;

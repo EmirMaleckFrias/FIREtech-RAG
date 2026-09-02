@@ -10,6 +10,7 @@ import type {
   Health,
   Hop,
   Me,
+  ModoPensamiento,
   ServerMessage,
   SessionInfo,
   Source,
@@ -666,6 +667,7 @@ export async function streamChat(
   message: string,
   handlers: ChatStreamHandlers,
   signal: AbortSignal,
+  modo: ModoPensamiento = 'normal',
 ): Promise<void> {
   const res = await fetch('/api/chat', {
     method: 'POST',
@@ -674,7 +676,7 @@ export async function streamChat(
       Accept: 'text/event-stream',
       ...(await authHeaders()),
     },
-    body: JSON.stringify({ session_id: sessionId, message }),
+    body: JSON.stringify({ session_id: sessionId, message, modo }),
     signal,
   });
 

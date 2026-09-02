@@ -105,7 +105,9 @@ Body: `{ "query": str, "top_k": int = 8, "project_id": str|null, "document_id": 
 Búsqueda cruda, sin agente ni reranker: sirve para depurar el retrieval.
 
 ### `POST /api/chat`  (SSE stream)
-Body: `{ "session_id": str|null, "message": str }`
+Body: `{ "session_id": str|null, "message": str, "modo": "normal"|"extendido"|null }`
+`modo` elige el presupuesto de búsqueda y deliberación (ver "Modos de pensamiento");
+ausente o desconocido = `normal`.
 Respuesta: `text/event-stream`, eventos:
 - `event: session` → `data: {"session_id": "uuid"}` (primero, siempre)
 - `event: hop` → `data: {"n": 1, "query": "resumen legible de la llamada a buscar_documentos"}`
@@ -292,6 +294,26 @@ la web y el CLI):
 ### `GET /api/sessions` → `{ "sessions": [{ "id", "title", "created_at" }] }`
 ### `GET /api/sessions/{id}/messages` → `{ "messages": [{ "id", "role", "content", "sources", "created_at" }] }`
 ### `POST /api/feedback` Body: `{ "message_id": str, "rating": 1|-1, "comment": str|null }` → `{ "ok": true }`
+
+## Modos de pensamiento
+
+`app/services/modos.py` define dos perfiles. Cambian cuánto se BUSCA y se DELIBERA, nunca
+las reglas de fidelidad: los dos usan el mismo `SYSTEM_PROMPT` y la instrucción del modo
+viaja en un segundo mensaje de sistema, para que el prefijo grande siga siendo cacheable.
+
+| | `normal` | `extendido` |
+|---|---|---|
+| `max_hops` | 2 | 0 (sin tope) |
+| `budget_s` | 60 | 240 |
+| `max_hops_sin_avance` | 1 | 3 |
+| `fragmentos` por búsqueda | 8 | 12 |
+| `reasoning_effort` | no se envía | `high` |
+
+`resolver(nombre, settings)` aplica encima los techos del despliegue (`MAX_HOPS`,
+`AGENT_BUDGET_S`, `AGENT_MAX_HOPS_SIN_AVANCE`), que solo pueden apretar el perfil y nunca
+aflojarlo: un techo alto no debe convertir el modo normal en extendido. El modo efectivo
+de cada uno se expone en `GET /api/health` bajo `modos`, y el elegido viaja en la
+telemetría (`meta.modo`).
 
 ## Agente multi-hop
 - Loop de tool calling con OpenAI. UNA sola tool, `buscar_documentos`:
