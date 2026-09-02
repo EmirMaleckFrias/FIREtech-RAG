@@ -157,16 +157,23 @@ async def test_cada_modo_pide_sus_fragmentos_por_busqueda(
         assert busqueda_falsa[-1]["fragmentos"] == esperado.fragmentos
 
 
-async def test_solo_el_extendido_pide_esfuerzo_de_razonamiento(
+async def test_ningun_modo_manda_reasoning_effort_con_tools(
     settings_override, fake_openai, busqueda_falsa
 ):
-    fake_openai.queue(make_text_stream("Corta.", usage=make_usage(10, 2)))
-    await _correr("pregunta", "normal")
-    assert "reasoning_effort" not in fake_openai.calls[-1]
+    """Medido contra la API el 2 sep 2026: gpt-5.4 en /v1/chat/completions
+    devuelve 400 si llega reasoning_effort junto a function tools.
 
-    fake_openai.queue(make_text_stream("Larga.", usage=make_usage(10, 2)))
-    await _correr("pregunta", "extendido")
-    assert fake_openai.calls[-1]["reasoning_effort"] == modos.EXTENDIDO.esfuerzo
+    Se envio en el modo extendido sin probarlo y rompio el modo entero en
+    produccion: toda pregunta en extendido moria con BadRequestError. El test
+    fija que no se vuelva a mandar mientras el bucle viva en chat/completions.
+    """
+    for modo in ("normal", "extendido"):
+        fake_openai.queue(make_text_stream("Respuesta.", usage=make_usage(10, 2)))
+        await _correr("pregunta", modo)
+        assert "reasoning_effort" not in fake_openai.calls[-1]
+
+    assert modos.NORMAL.esfuerzo is None
+    assert modos.EXTENDIDO.esfuerzo is None
 
 
 async def test_el_modo_queda_en_la_telemetria(

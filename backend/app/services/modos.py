@@ -36,6 +36,15 @@ class Modo:
     # Fragmentos que llegan al modelo por búsqueda.
     fragmentos: int
     # `reasoning_effort` de la API. None = no se envía el parámetro.
+    #
+    # OJO, medido contra la API el 2 sep 2026: gpt-5.4 en /v1/chat/completions
+    # RECHAZA con 400 cualquier reasoning_effort distinto de 'none' cuando la
+    # peticion lleva function tools ("To use function tools, use /v1/responses
+    # or set reasoning_effort to 'none'"). El agente vive de las tools, asi que
+    # hoy este campo tiene que quedarse en None: se dejo puesto en el perfil
+    # extendido sin probarlo contra la API y rompio el modo entero en
+    # produccion. Para subir la deliberacion de verdad hay que migrar el bucle
+    # a /v1/responses, que es trabajo aparte.
     esfuerzo: str | None
     # Coda que se añade al system prompt para explicar cómo trabajar.
     instruccion: str
@@ -69,7 +78,8 @@ EXTENDIDO = Modo(
     budget_s=240.0,
     max_hops_sin_avance=3,
     fragmentos=12,
-    esfuerzo="high",
+    # Ver la nota del campo: con tools, la API lo rechaza con 400.
+    esfuerzo=None,
     instruccion=(
         "MODO ACTIVO: pensamiento extendido, el que eligió quien pregunta. "
         "Tómate el trabajo en serio. Descompón la "
