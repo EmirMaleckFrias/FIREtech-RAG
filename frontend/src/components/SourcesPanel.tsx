@@ -52,12 +52,28 @@ function buildCitedMap(content: string): Map<string, CitedEntry> {
   return map;
 }
 
-function isCited(s: Source, entry: CitedEntry | undefined): boolean {
-  if (!entry) return false;
-  if (entry.all) return true;
-  // Fuente sin página de un archivo citado: no se puede descartar: cuenta.
-  if (s.page === null) return true;
-  return entry.pages.has(s.page);
+/** Claves con las que una cita puede referirse a esta fuente.
+ *
+ *  El modelo cita por el nombre del archivo, pero cuando el documento es un
+ *  artículo con autor y año cita "Allegri et al., 2021", que es como se cita
+ *  de verdad un trabajo. Sin esta segunda clave, esas citas no enlazaban con
+ *  su fuente y el panel mostraba todo como no citado. */
+function sourceKeys(s: Source): string[] {
+  const claves = [citationFileKey(s.source_file)];
+  if (s.citation) claves.push(citationFileKey(s.citation));
+  return claves;
+}
+
+function isCited(s: Source, citedMap: Map<string, CitedEntry>): boolean {
+  for (const clave of sourceKeys(s)) {
+    const entry = citedMap.get(clave);
+    if (!entry) continue;
+    if (entry.all) return true;
+    // Fuente sin página de un archivo citado: no se puede descartar, cuenta.
+    if (s.page === null) return true;
+    if (entry.pages.has(s.page)) return true;
+  }
+  return false;
 }
 
 /**
@@ -83,7 +99,7 @@ function buildGroups(sources: Source[], citedMap: Map<string, CitedEntry>): Sour
       byFile.set(fileKey, group);
       groups.push(group);
     }
-    const cited = isCited(s, citedMap.get(fileKey));
+    const cited = isCited(s, citedMap);
     group.items.push({ key, source: s, cited });
     if (cited) group.citedCount++;
   }
@@ -164,9 +180,14 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
   // Clic en una cita del mensaje: expande el grupo + la tarjeta y desplaza.
   useEffect(() => {
     if (!focus || !message) return;
-    const fileKey = citationFileKey(focus.file);
-    const group = groups.find((g) => g.fileKey === fileKey);
+    // La cita puede venir por nombre de archivo o por referencia del trabajo
+    // ("Allegri et al., 2021"), asi que se busca el grupo por las dos vias.
+    const clave = citationFileKey(focus.file);
+    const group =
+      groups.find((g) => g.fileKey === clave) ??
+      groups.find((g) => g.items.some((i) => sourceKeys(i.source).includes(clave)));
     if (!group) return;
+    const fileKey = group.fileKey;
     const target =
       (focus.page !== null
         ? group.items.find((i) => i.source.page === focus.page)

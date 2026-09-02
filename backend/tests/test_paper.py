@@ -142,7 +142,14 @@ def test_la_referencia_es_autor_y_anio_cuando_se_puede():
     assert meta.referencia == "Allegri et al., 2024"
 
 
-def test_sin_autor_la_referencia_cae_al_titulo():
+def test_sin_autor_no_se_cita_por_titulo():
+    """Medido en produccion: usar el titulo como cita era peor que el archivo.
+
+    Un titulo de 70 caracteres recortado con puntos suspensivos se repetia en
+    cada punto de una lista, hacia la respuesta ilegible y rompia el enlace de
+    la cita con su fuente en el panel. Sin autor y ano, la referencia queda
+    vacia y quien cita usa el nombre del archivo, que es corto y enlazable.
+    """
     pagina = [
         ("Guia clinica de manejo del deterioro cognitivo", 16.0, 40.0),
         ("Resumen", 12.0, 80.0),
@@ -152,7 +159,8 @@ def test_sin_autor_la_referencia_cae_al_titulo():
     meta = paper.extraer_metadatos(_chars(pagina), "sin anio ni doi")
 
     assert meta.autor == ""
-    assert meta.referencia == "Guia clinica de manejo del deterioro cognitivo"
+    assert meta.titulo == "Guia clinica de manejo del deterioro cognitivo"
+    assert meta.referencia == ""
 
 
 def test_sin_nada_extraible_la_referencia_queda_vacia():

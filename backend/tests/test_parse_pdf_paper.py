@@ -168,3 +168,60 @@ def test_la_marca_de_agua_de_descarga_no_entra_al_indice(tmp_path):
     texto = "\n".join(c["text"] for c in chunks)
     assert "Downloaded from" not in texto
     assert "faster cognitive decline" in texto
+
+
+def test_una_seccion_no_se_arrastra_por_lo_que_no_describe(tmp_path):
+    """El fallo visto en el indice de produccion el 2 sep 2026.
+
+    Una guia de 4 paginas quedo con "seccion: Introduccion" en TODOS sus
+    fragmentos, y el agente lo repitio en la respuesta ("se explica en la
+    pagina 3, en la seccion Introduccion"). La causa: solo se reconocian los
+    encabezados con nombre de articulo cientifico, asi que "Composicion del
+    Mazo" no contaba como encabezado y la seccion anterior seguia vigente.
+
+    Ahora un encabezado tambien se reconoce por la maqueta (linea corta, sin
+    punto final, con mas cuerpo de letra que el texto), y eso RESETEA la
+    seccion aunque su nombre no se conozca.
+    """
+    pdf = escribir_pdf(
+        tmp_path / "guia.pdf",
+        [[
+            ("Guia estrategica del mazo", 18.0),
+            ("Introduccion", 13.0),
+            ("Esta guia analiza el mazo y como jugarlo en cada fase.", 10.0),
+            ("Composicion del Mazo", 13.0),
+            ("El mazo lo forman ocho cartas con roles complementarios.", 10.0),
+            ("Estrategia Ofensiva", 13.0),
+            ("El empuje principal se arma detras de la unidad tanque.", 10.0),
+        ]],
+    )
+
+    chunks, _ = parse_generic(pdf, pdf.name)
+    por_texto = {c["text"]: c["section"] for c in chunks}
+
+    def seccion_de(fragmento: str) -> str:
+        for texto, seccion in por_texto.items():
+            if fragmento in texto:
+                return seccion
+        raise AssertionError(f"no se indexo el fragmento {fragmento!r}")
+
+    assert seccion_de("ocho cartas") == "Composicion del Mazo"
+    assert seccion_de("empuje principal") == "Estrategia Ofensiva"
+    # Y lo que si esta en la introduccion sigue diciendo que lo esta.
+    assert seccion_de("analiza el mazo") == "Introduccion"
+
+
+def test_sin_encabezados_maquetados_no_se_inventa_seccion(tmp_path):
+    """Un documento de un solo tamano de letra no tiene secciones que citar."""
+    pdf = escribir_pdf(
+        tmp_path / "plano.pdf",
+        [[
+            ("Primera linea del documento sin ninguna estructura visible.", 10.0),
+            ("Segunda linea que continua el mismo parrafo de siempre.", 10.0),
+            ("Tercera linea con mas contenido corrido y sin titulares.", 10.0),
+        ]],
+    )
+
+    chunks, _ = parse_generic(pdf, pdf.name)
+
+    assert all(c["section"] == "" for c in chunks)

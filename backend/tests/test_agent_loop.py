@@ -13,6 +13,7 @@ from app.services.agent import AgentEvent, run_agent
 from tests.conftest import FakeStream, make_text_stream, make_tool_call_stream, make_usage
 
 TOOL = "buscar_documentos"
+INVENTARIO = "listar_documentos"
 SIN_RESULTADOS = "sin resultados"
 
 
@@ -84,7 +85,7 @@ async def test_un_hop_y_final(settings_override, fake_openai, catalogo_falso):
     for kwargs in fake_openai.calls:
         assert kwargs["stream"] is True
         assert kwargs["stream_options"] == {"include_usage": True}
-        assert [t["function"]["name"] for t in kwargs["tools"]] == [TOOL]
+        assert [t["function"]["name"] for t in kwargs["tools"]] == [TOOL, INVENTARIO]
         assert kwargs["model"] == settings_override.openai_model
         assert kwargs["tool_choice"] == "auto"
         assert kwargs["parallel_tool_calls"] is False

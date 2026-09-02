@@ -142,7 +142,25 @@ Los tests no llaman a OpenAI, ni a Qdrant, ni a la red: usan `set_async_client_f
 cliente único, un cliente espía de Qdrant y `get_settings.cache_clear()` para aislar la
 configuración. Si un test necesita red, está mal escrito.
 
-## 6. Los dos modos de pensamiento
+## 6. Estresar el RAG
+
+La forma de encontrar fallos generales es lanzarle preguntas difíciles con la verdad
+conocida y mirar no solo la respuesta sino los hops. Lo que encontró la primera batería
+de 10 preguntas (2 sep 2026) da idea de qué buscar:
+
+- Un modo entero caído por un parámetro de la API que nunca se probó contra la API.
+- Una sección equivocada arrastrada desde el parser hasta el texto de la respuesta.
+- Una cita ilegible que además rompía el enlace con el panel de fuentes.
+- Una pregunta legítima sobre el índice contestada como si fuera sobre el asistente.
+
+Ninguno de los cuatro se ve mirando una respuesta suelta: se ven comparando lo que
+respondió con lo que el corpus dice de verdad. Conviene guardar la batería y repetirla
+tras cada cambio grande del prompt o del parser.
+
+Cada corrida cuesta dinero real (unos 0.01 USD por pregunta con el modelo grande). El
+detalle de hops, fuentes y coste por pregunta queda en el JSON que escribe el script.
+
+## 7. Los dos modos de pensamiento
 
 El usuario elige antes de preguntar, y la elección viaja en el cuerpo de `POST /api/chat`
 (`modo`: `normal` o `extendido`). Un valor desconocido no es un error: se responde en
@@ -164,7 +182,7 @@ Coste: el extendido cuesta bastante más por pregunta (más búsquedas, más fra
 contexto y razonamiento alto). Cuando haya que medirlo, `backend/preguntar.py` imprime el
 coste real de cada pregunta y el modo queda en la telemetría de cada respuesta.
 
-## 7. Qué NO hay todavía
+## 8. Qué NO hay todavía
 
 Para que nadie lo busque en vano:
 

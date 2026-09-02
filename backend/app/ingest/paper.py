@@ -235,16 +235,51 @@ class PaperMeta:
 
     @property
     def referencia(self) -> str:
-        """Cita corta: "Allegri et al., 2023", o el título, o vacío.
+        """Cita corta: "Allegri et al., 2023", o vacío.
 
-        Vacío significa "no se pudo determinar": quien llama debe caer al
-        nombre del archivo en vez de inventar nada.
+        Vacío significa "no se pudo determinar": quien llama cita entonces el
+        nombre del archivo, que es corto, único y con el que la interfaz sabe
+        enlazar.
+
+        NO se usa el título como respaldo, aunque se conozca. Medido en
+        producción: un título de 70 caracteres recortado con puntos suspensivos
+        se repetía en cada punto de una lista, hacía la respuesta ilegible y
+        rompía el enlace de la cita con su fuente. Una cita tiene que ser corta
+        antes que bonita.
         """
         if self.autor and self.anio:
             return f"{self.autor} et al., {self.anio}"
-        if self.titulo:
-            return self.titulo if len(self.titulo) <= 70 else self.titulo[:67] + "..."
         return ""
+
+
+def es_encabezado_por_formato(
+    texto: str, tamano: float, cuerpo: float, negrita: bool
+) -> bool:
+    """¿La línea parece un encabezado por cómo está maquetada?
+
+    Existe porque la lista cerrada de secciones solo cubre los nombres de un
+    artículo científico. En cualquier otro documento (una guía, un informe, un
+    folleto) los encabezados se llaman "Composición del mazo" o "Por qué
+    elegirnos", no se reconocen, y entonces la sección detectada al principio
+    se arrastra por todo lo que viene después: el fragmento de la página 4
+    acaba citado como "sección: Introducción", que es peor que no decir nada.
+
+    Un encabezado se reconoce por la maqueta y no por el nombre: línea corta,
+    sin puntuación final, y con más cuerpo de letra o en negrita respecto del
+    texto corrido.
+    """
+    limpio = texto.strip()
+    if not limpio or len(limpio) > 80:
+        return False
+    if limpio.endswith((".", ";", ",", ":")):
+        return False
+    if not any(c.isalpha() for c in limpio):
+        return False
+    if len(limpio.split()) > 12:
+        return False
+    if cuerpo and tamano >= cuerpo + 0.4:
+        return True
+    return bool(negrita and cuerpo and tamano >= cuerpo - 0.2)
 
 
 def _lineas_por_tamano(chars: list[dict]) -> list[tuple[float, float, str]]:
@@ -298,6 +333,45 @@ def _cabecera(lineas: list[tuple[float, float, str]]) -> list[tuple[float, float
         if detectar_seccion(texto) is not None:
             return lineas[:i]
     return lineas[:_MAX_LINEAS_CABECERA]
+
+
+def lineas_con_formato(chars: list[dict]) -> list[tuple[str, float, bool]]:
+    """(texto, tamaño, negrita) por línea, para detectar encabezados.
+
+    La negrita sale del nombre de la fuente, que es donde la deja el PDF
+    ("...-Bold", "...-Black"); no es infalible, pero es lo único que hay sin
+    renderizar la página.
+    """
+    filas: dict[int, list[dict]] = {}
+    for ch in chars:
+        top = ch.get("top")
+        if top is None:
+            continue
+        filas.setdefault(int(round(float(top) / 3.0)), []).append(ch)
+
+    salida: list[tuple[str, float, bool]] = []
+    for clave in sorted(filas):
+        grupo = sorted(filas[clave], key=lambda c: c.get("x0") or 0.0)
+        texto = "".join(str(c.get("text") or "") for c in grupo).strip()
+        if not texto:
+            continue
+        tamanos = sorted(float(c.get("size") or 0.0) for c in grupo)
+        mediana = tamanos[len(tamanos) // 2] if tamanos else 0.0
+        fuentes = " ".join(str(c.get("fontname") or "") for c in grupo).lower()
+        negrita = "bold" in fuentes or "black" in fuentes or "heavy" in fuentes
+        salida.append((texto, round(mediana, 1), negrita))
+    return salida
+
+
+def tamano_de_cuerpo(paginas: list[list[tuple[str, float, bool]]]) -> float:
+    """Tamaño del texto corrido de todo el documento, pesado por caracteres."""
+    por_tamano: dict[float, int] = {}
+    for lineas in paginas:
+        for texto, tamano, _ in lineas:
+            por_tamano[tamano] = por_tamano.get(tamano, 0) + len(texto)
+    if not por_tamano:
+        return 0.0
+    return max(por_tamano.items(), key=lambda kv: (kv[1], -kv[0]))[0]
 
 
 def _tamano_cuerpo(lineas: list[tuple[float, float, str]]) -> float:

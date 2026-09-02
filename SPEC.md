@@ -259,16 +259,24 @@ la web y el CLI):
   mezclar dos secciones en un chunk, más una tabla por chunk (`chunk_type` = "table",
   numeradas 1..n). Word no tiene páginas: las calcula el visor al renderizar.
 - **Conciencia de artículo** (`app/ingest/paper.py`, solo PDF, todo determinista y sin LLM):
-  - `section`: el encabezado vigente, arrastrado desde el último detectado. Se reconocen las
-    secciones habituales en inglés y español, con numeración (`3. Methods`, `III. RESULTADOS`).
-    La detección exige que la línea COMPLETA sea el nombre de la sección, para que "the methods
-    described by Smith et al." no cuente como encabezado. Un chunk nunca mezcla dos secciones.
+  - `section`: el encabezado vigente. Un encabezado se reconoce de dos maneras: por su
+    NOMBRE, cuando es una sección de artículo conocida (`3. Methods`, `III. RESULTADOS`), y
+    por su MAQUETA cuando no lo es (línea corta, sin punto final, con más cuerpo de letra o
+    en negrita que el texto corrido). La segunda es imprescindible fuera de la literatura
+    científica: medido en producción, una guía de 4 páginas quedó con "sección: Introducción"
+    en TODOS sus fragmentos porque "Composición del mazo" no estaba en el vocabulario y la
+    sección anterior seguía vigente; el agente lo repetía en la respuesta. La detección por
+    nombre exige que la línea COMPLETA sea el nombre, para que "the methods described by
+    Smith et al." no cuente. Un chunk nunca mezcla dos secciones.
   - `title`, `citation` y `doi`: el título sale del bloque de mayor tamaño de fuente de la
     cabecera, exigiendo que sea estrictamente mayor que el cuerpo (si no, no hay título
     maquetado y no se inventa uno); el apellido del primer autor, de la línea siguiente; el
     año, de la vecindad del DOI y descartando las líneas de marca de descarga, porque un PDF
-    bajado en 2026 no es un artículo de 2026. Si algo no se puede extraer con confianza queda
-    vacío y la cita cae al nombre del archivo: nunca se fabrica una referencia.
+    bajado en 2026 no es un artículo de 2026. `citation` se rellena SOLO con autor y año: el
+    título NO sirve de respaldo, porque medido en producción un título largo recortado con
+    puntos suspensivos se repetía en cada punto de una lista, hacía la respuesta ilegible y
+    rompía el enlace de la cita con su fuente. Sin autor y año la cita es el nombre del
+    archivo, que es corto y enlazable: nunca se fabrica una referencia.
   - La **bibliografía se descarta** por defecto (`skip_references=True`): son títulos de
     trabajos ajenos, matchean con casi cualquier consulta, no son evidencia de nada y se pagan
     igual al embeberlos (medido en un artículo de prueba: 30% menos tokens).
@@ -324,7 +332,12 @@ de cada uno se expone en `GET /api/health` bajo `modos`, y el elegido viaja en l
 telemetría (`meta.modo`).
 
 ## Agente multi-hop
-- Loop de tool calling con OpenAI. UNA sola tool, `buscar_documentos`:
+- Loop de tool calling con OpenAI. DOS tools:
+  - `listar_documentos` (sin parámetros): catálogo del índice con conteo exacto por
+    facets, cero LLM. Es la única forma de responder "cuántos documentos hay" o "qué
+    documentos hay": una búsqueda devuelve los fragmentos parecidos a la consulta, nunca
+    el catálogo. Sin ella, el modelo respondía esas preguntas hablando de sí mismo.
+  - `buscar_documentos`:
   `{ semantico, project_id?, document_id?, document_type?, language?, limit? }`
   (`limit` entre 1 y 20; por defecto `RERANK_TOP_K`).
 - Cada llamada la resuelve `_execute_document_search`: `hybrid_search` (top

@@ -189,15 +189,22 @@ def _decode_bytes(raw: bytes) -> str:
 def _parse_pdf(
     path: Path, file_name: str, skip_references: bool = True
 ) -> tuple[list[dict], int, int]:
-    """PDF con conciencia de artículo: sección vigente y metadatos de la obra.
+    """PDF con conciencia de documento: sección vigente y metadatos de la obra.
 
     Devuelve (chunks, páginas, párrafos_de_bibliografía_descartados).
 
-    La sección se arrastra desde el último encabezado detectado, así cada
-    fragmento sabe si sale de Métodos o de Discusión. La bibliografía se
-    descarta por defecto: son títulos de trabajos ajenos que matchean con casi
-    cualquier consulta sin ser evidencia de nada, y ocupan una parte nada
-    despreciable de lo que se paga por embeber.
+    La sección se arrastra desde el último encabezado, y un encabezado se
+    reconoce de dos maneras: por su nombre, cuando es una sección de artículo
+    conocida (Métodos, Resultados), y por su MAQUETA, cuando no lo es. La
+    segunda hace falta porque en un documento que no es un paper los
+    encabezados se llaman "Composición del mazo" o "Por qué elegirnos": sin
+    detectarlos, la primera sección reconocida se arrastraría hasta el final y
+    el fragmento de la página 4 acabaría citado como "sección: Introducción",
+    que es peor que no decir nada.
+
+    La bibliografía se descarta por defecto: son títulos de trabajos ajenos que
+    matchean con casi cualquier consulta sin ser evidencia de nada, y ocupan
+    una parte nada despreciable de lo que se paga por embeber.
     """
     import pdfplumber
 
@@ -210,10 +217,12 @@ def _parse_pdf(
     seccion = ""
     canonica = ""
 
-    # Primera pasada: el texto de cada página. Hace falta entero antes de
-    # empezar, porque las cabeceras y pies se detectan por repetirse entre
-    # páginas y eso no se sabe mirando una sola.
+    # Primera pasada: texto y formato de cada página. Hace falta el documento
+    # entero antes de empezar, por dos razones: las cabeceras y pies se
+    # detectan por repetirse entre páginas, y el tamaño del texto corrido (con
+    # el que se reconocen los encabezados) solo se sabe mirándolo todo.
     paginas: list[tuple[int, list[str]]] = []
+    formato: list[list[tuple[str, float, bool]]] = []
     chars: list[dict] = []
     cabecera_texto: list[str] = []
 
@@ -228,19 +237,29 @@ def _parse_pdf(
                     file_name, page_no, exc,
                 )
                 continue
+            try:
+                chars_pagina = page.chars or []
+            except Exception:
+                chars_pagina = []
             if page_no == 1:
-                try:
-                    chars = page.chars or []
-                except Exception:
-                    chars = []
+                chars = chars_pagina
             if page_no <= 2:
                 cabecera_texto.append(text)
             paginas.append((page_no, text.splitlines()))
+            formato.append(paper_mod.lineas_con_formato(chars_pagina))
 
     if chars:
         meta = paper_mod.extraer_metadatos(chars, "\n".join(cabecera_texto))
 
     repetidas = paper_mod.lineas_repetidas([lineas for _, lineas in paginas])
+    cuerpo = paper_mod.tamano_de_cuerpo(formato)
+    # Formato por texto de línea, para consultarlo mientras se recorre el texto
+    # plano (que es lo que da los párrafos). Si una línea se repite con formatos
+    # distintos gana el primero, que es suficiente para decidir si es titular.
+    formato_por_texto: dict[str, tuple[float, bool]] = {}
+    for lineas_pag in formato:
+        for texto_linea, tamano, negrita in lineas_pag:
+            formato_por_texto.setdefault(texto_linea.strip(), (tamano, negrita))
 
     # Segunda pasada: secciones y párrafos. Los encabezados se detectan línea a
     # línea, porque un encabezado suele ser su propia línea corta.
@@ -255,7 +274,19 @@ def _parse_pdf(
             ):
                 continue
             detectada = paper_mod.detectar_seccion(linea)
-            if detectada is not None:
+            if detectada is None:
+                # No es una sección con nombre conocido, pero puede ser un
+                # encabezado igualmente: si lo es, RESETEA la sección en vez de
+                # dejar que la anterior se arrastre por un contenido que no
+                # describe.
+                tamano, negrita = formato_por_texto.get(linea.strip(), (0.0, False))
+                if paper_mod.es_encabezado_por_formato(
+                    linea, tamano, cuerpo, negrita
+                ):
+                    canonica = ""
+                    seccion = linea.strip()
+                    continue
+            else:
                 canonica = detectada
                 seccion = linea.strip()
                 continue
