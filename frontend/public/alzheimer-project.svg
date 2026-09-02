@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 420" role="img" aria-labelledby="title desc">
+  <title id="title">Alzheimer Project</title>
+  <desc id="desc">Logo de Alzheimer Project</desc>
+  <g fill="none" stroke="#8f78c8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M260 225c-5-48-3-86 4-117M260 166c-30-35-51-56-75-65M264 151c30-39 48-58 76-69M260 199c-38-8-64-7-91 4M263 190c31-17 55-27 86-25"/>
+  </g>
+  <g fill="#52259b">
+    <circle cx="176" cy="91" r="38"/><circle cx="222" cy="63" r="42"/><circle cx="272" cy="57" r="43"/><circle cx="324" cy="77" r="40"/><circle cx="359" cy="116" r="34"/><circle cx="150" cy="129" r="35"/><circle cx="191" cy="145" r="39"/><circle cx="238" cy="116" r="40"/><circle cx="294" cy="111" r="43"/><circle cx="337" cy="148" r="39"/><circle cx="176" cy="174" r="35"/><circle cx="224" cy="174" r="39"/><circle cx="285" cy="168" r="42"/>
+    <path d="M245 205c2 52-7 74-28 91-18 15-42 21-77 25h236c-37-4-63-10-82-27-18-16-26-39-25-89z"/>
+  </g>
+  <g fill="#52259b" font-family="Arial,Helvetica,sans-serif" text-anchor="middle">
+    <text x="260" y="350" font-size="47" font-weight="700" letter-spacing="3">ALZHEIMER</text>
+    <text x="260" y="388" font-size="24" letter-spacing="10">PROJECT</text>
+  </g>
+  <g stroke="#52259b" stroke-width="3"><path d="M77 377h90M353 377h90"/></g>
+</svg>

@@ -465,8 +465,36 @@ textarea {
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   padding: 2px 6px 16px;
+}
+
+.brand-logo {
+  display: block;
+  width: auto;
+  object-fit: contain;
+  object-position: center;
+  background: #ffffff;
+  user-select: none;
+}
+
+.brand-logo-ai {
+  width: 92px;
+  height: 42px;
+}
+
+.brand-logo-project {
+  width: 106px;
+  height: 42px;
+}
+
+.welcome-logos {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 20px;
+  animation: fade-in 0.4s ease both;
 }
 
 /* placa FIREtech: wordmark tipográfico al estilo del logo real: texto
@@ -3350,8 +3378,23 @@ button.user-row:active {
     padding-bottom: 14px;
   }
 
-  .welcome-plate {
+  .welcome-plate,
+  .welcome-logos {
     margin-bottom: 16px;
+  }
+
+  .welcome-logos {
+    gap: 8px;
+  }
+
+  .welcome-logos .brand-logo-ai {
+    width: 78px;
+    height: 34px;
+  }
+
+  .welcome-logos .brand-logo-project {
+    width: 88px;
+    height: 34px;
   }
 
   /* iOS hace zoom automático al enfocar campos con fuente < 16px

@@ -40,13 +40,9 @@ const SUGGESTIONS: { label: string; question: string }[] = [
 export function WelcomeIntro() {
   return (
     <div className="welcome-intro">
-      <div className="brand-plate welcome-plate" role="img" aria-label="FIREtech">
-        <span className="brand-fire" aria-hidden="true">
-          FIRE
-        </span>
-        <span className="brand-tech" aria-hidden="true">
-          tech
-        </span>
+      <div className="welcome-logos" aria-label="AI ROBOTIX y Alzheimer Project">
+        <img className="brand-logo brand-logo-ai" src="/ai-robotix.svg" alt="AI ROBOTIX" />
+        <img className="brand-logo brand-logo-project" src="/alzheimer-project.svg" alt="Alzheimer Project" />
       </div>
       <h1 className="welcome-title">¿Qué investigamos hoy?</h1>
     </div>

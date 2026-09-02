@@ -99,11 +99,8 @@ export function SessionSidebar({
     <aside className={`sidebar ${open ? '' : 'sidebar-closed'}`}>
       <div className="sidebar-inner">
         <div className="sidebar-brand">
-          <span className="brand-plate" role="img" aria-label="FIREtech">
-            <span className="brand-fire" aria-hidden="true">FIRE</span>
-            <span className="brand-tech" aria-hidden="true">tech</span>
-          </span>
-          <span className="brand-badge">RAG</span>
+          <img className="brand-logo brand-logo-ai" src="/ai-robotix.svg" alt="AI ROBOTIX" />
+          <img className="brand-logo brand-logo-project" src="/alzheimer-project.svg" alt="Alzheimer Project" />
         </div>
 
         <button type="button" className="new-chat-btn" onClick={onNew}>
