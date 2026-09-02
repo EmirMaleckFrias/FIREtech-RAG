@@ -16,6 +16,12 @@ interface SuggestionsProps {
   disabled: boolean;
 }
 
+function timeGreeting(hour: number): string {
+  if (hour < 12) return 'Buenos días';
+  if (hour < 19) return 'Buenas tardes';
+  return 'Buenas noches';
+}
+
 /** Etiqueta corta visible en la píldora; `question` es lo que se escribe. */
 const SUGGESTIONS: { label: string; question: string }[] = [
   {
@@ -37,14 +43,18 @@ const SUGGESTIONS: { label: string; question: string }[] = [
 ];
 
 /** Placa y saludo: el bloque que queda justo encima del composer. */
-export function WelcomeIntro() {
+export function WelcomeIntro({ userName }: { userName: string }) {
+  const greeting = timeGreeting(new Date().getHours());
+
   return (
     <div className="welcome-intro">
       <div className="welcome-logos" aria-label="AI ROBOTIX y Alzheimer Project">
         <img className="brand-logo brand-logo-ai" src="/ai-robotix.png" alt="AI ROBOTIX" />
         <img className="brand-logo brand-logo-project" src="/alzheimer-project.png" alt="Alzheimer Project" />
       </div>
-      <h1 className="welcome-title">¿Qué investigamos hoy?</h1>
+      <h1 className="welcome-title">
+        {greeting}, {userName}.
+      </h1>
     </div>
   );
 }

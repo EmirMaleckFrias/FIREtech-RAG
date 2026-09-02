@@ -50,6 +50,15 @@ function newLocalId(): string {
   return `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function displayName(session: Session | null): string {
+  const fullName = session?.user.user_metadata?.full_name;
+  if (typeof fullName === 'string' && fullName.trim() !== '') return fullName.trim();
+  const emailName = session?.user.email?.split('@')[0] ?? '';
+  const words = emailName.split(/[._-]+/).filter(Boolean);
+  if (words.length === 0) return 'investigador';
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+}
+
 function toChatMessage(server: ServerMessage): ChatMessage {
   return {
     localId: server.id || newLocalId(),
@@ -596,6 +605,7 @@ export default function App() {
           onToggleSources={() => setSourcesOpen((v) => !v)}
         />
         <Chat
+          userName={displayName(session)}
           messages={messages}
           loadingMessages={loadingMessages}
           isStreaming={isStreaming}

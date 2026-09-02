@@ -6,6 +6,7 @@ import { MessageItem } from './MessageItem';
 import { WelcomeIntro, WelcomeSuggestions } from './Welcome';
 
 interface ChatProps {
+  userName: string;
   messages: ChatMessage[];
   loadingMessages: boolean;
   isStreaming: boolean;
@@ -25,6 +26,7 @@ const PRICE_NOTE =
   'Las respuestas se basan en los documentos indexados. Verifica la evidencia antes de tomar decisiones.';
 
 export function Chat({
+  userName,
   messages,
   loadingMessages,
   isStreaming,
@@ -203,7 +205,7 @@ export function Chat({
           </div>
         )}
 
-        {showWelcome && <WelcomeIntro />}
+        {showWelcome && <WelcomeIntro userName={userName} />}
 
         {!loadingMessages && messages.length > 0 && (
           <div className="message-list">
