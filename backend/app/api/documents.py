@@ -299,6 +299,77 @@ async def upload_document(
     return {"id": doc_id or file_name, "file_name": file_name, "status": "processing"}
 
 
+@router.post("/documents/{file_name}/reindex")
+async def reindex_document(
+    file_name: str,
+    background_tasks: BackgroundTasks,
+    user: AuthUser = Depends(require_admin),
+) -> JSONResponse:
+    """Reintenta la ingesta de un documento a partir del archivo ya subido.
+
+    Existe porque una ingesta falla casi siempre por algo transitorio -un
+    timeout de OpenAI, un corte con Qdrant- y sin esto la única salida era
+    borrar el registro y volver a buscar el archivo a mano. `POST /upload`
+    responde 409 si el nombre ya existe, así que reintentar por ahí no era
+    posible.
+
+    OJO con el límite real, y es el motivo de que este endpoint pueda decir
+    que no: el archivo NO se guarda de forma permanente. En local vive en
+    data/uploads y el reintento funciona siempre; en Vercel va a /tmp, que es
+    efímero, así que solo está si la misma instancia sigue caliente. Cuando no
+    está se responde 409 con `code: "file_not_stored"` para que la interfaz
+    pida la resubida en vez de mentir con un error genérico.
+    """
+    safe_name = _sanitize_file_name(file_name)
+    rows = await run_in_threadpool(supabase_db.list_documents)
+    row = next((r for r in rows if r.get("file_name") == file_name), None)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"'{file_name}' no está registrado"
+        )
+    if row.get("status") == "processing":
+        # Reingerir en paralelo duplicaría chunks y pelearía por el registro.
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{file_name}' ya se está procesando",
+        )
+
+    stored = UPLOADS_DIR / safe_name if safe_name else None
+    if stored is None or not stored.is_file():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"El archivo de '{file_name}' ya no está en el servidor: "
+                f"vuelve a subirlo para reintentar la indexación."
+            ),
+            headers={"X-Reindex-Code": "file_not_stored"},
+        )
+
+    # A 'processing' ANTES de encolar, igual que en upload: así el listado
+    # refleja el reintento al instante y el frontend puede hacer polling.
+    await run_in_threadpool(
+        supabase_db.upsert_document_status, file_name, "processing", None
+    )
+    document_id = row.get("id")
+
+    if IS_SERVERLESS:
+        status = await run_in_threadpool(
+            _ingest_uploaded, stored, file_name, document_id, None
+        )
+        return JSONResponse(
+            status_code=200,
+            content={"file_name": file_name, "status": status},
+        )
+
+    background_tasks.add_task(
+        _ingest_uploaded, stored, file_name, document_id, None
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"file_name": file_name, "status": "processing"},
+    )
+
+
 @router.delete("/documents/{file_name}")
 async def delete_document(
     file_name: str, user: AuthUser = Depends(require_admin)

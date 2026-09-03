@@ -341,6 +341,51 @@ export async function uploadDocument(
 }
 
 /** DELETE /api/documents/{file_name}: borra el documento y sus fragmentos. */
+/** El archivo ya no está en el servidor: la única salida es volver a subirlo. */
+export class FileNotStoredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FileNotStoredError';
+  }
+}
+
+/**
+ * Reintenta la indexación de un documento que falló, usando el archivo que
+ * quedó en el servidor.
+ *
+ * Lanza `FileNotStoredError` cuando ese archivo ya no está —en Vercel los
+ * uploads van a /tmp, que es efímero—, para que quien llama pueda ofrecer la
+ * resubida en vez de mostrar un error sin salida.
+ */
+export async function reindexDocument(fileName: string): Promise<DocumentStatus> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/documents/${encodeURIComponent(fileName)}/reindex`, {
+      method: 'POST',
+      headers: await authHeaders(),
+    });
+  } catch {
+    throw new Error(OFFLINE_MSG);
+  }
+  if (res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { status?: string };
+    return body.status === 'ready' || body.status === 'failed' ? body.status : 'processing';
+  }
+  if (res.status === 401) throw unauthorized();
+  const { detail } = await failure(res);
+  // La cabecera distingue "no tengo el archivo" de "ya se está procesando":
+  // los dos son 409 y llevan a acciones opuestas en la interfaz.
+  if (res.status === 409 && res.headers.get('X-Reindex-Code') === 'file_not_stored') {
+    throw new FileNotStoredError(
+      detail ?? 'El archivo ya no está en el servidor: vuelve a subirlo.',
+    );
+  }
+  if (res.status === 404) {
+    throw new Error(detail ?? 'El documento ya no existe en el índice.');
+  }
+  throw new Error(detail ?? `Error HTTP ${res.status} al reindexar.`);
+}
+
 export async function deleteDocument(fileName: string): Promise<void> {
   let res: Response;
   try {

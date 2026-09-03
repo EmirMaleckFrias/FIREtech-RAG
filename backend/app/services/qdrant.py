@@ -58,6 +58,10 @@ PAYLOAD_INDEXES: tuple[tuple[str, models.PayloadSchemaType], ...] = (
 # módulo no requiera Qdrant corriendo ni descargar el modelo BM25.
 _client: QdrantClient | None = None
 _bm25_model: Any | None = None
+# La colección ya se verificó en ESTE proceso (incluidos sus índices de
+# payload). Evita repetir la llamada en cada petición sin volver al error
+# de suponer que una colección existente está al día.
+_collection_checked = False
 _bm25_failed = False
 _server_bm25_checked = False
 _server_bm25_failed = False
@@ -110,14 +114,51 @@ def ensure_collection() -> None:
     La colección siempre se crea con ambos vectores nombrados (`dense` y
     `bm25`), haya o no fastembed: el sparse simplemente queda vacío si no se
     puede calcular.
+
+    Sobre una colección que YA existe se reconcilian los índices de payload
+    que falten, y esto no es paranoia: antes se volvía aquí de inmediato
+    suponiendo que una colección existente ya tenía todos sus índices "porque
+    se crean junto con ella". Esa suposición se rompe en cuanto alguien añade
+    un campo a PAYLOAD_INDEXES, que es exactamente lo que pasó con
+    `document_version`: la colección de producción se quedó con 6 de los 7
+    índices, y como Qdrant Cloud viene con strict mode (`strict_mode_config`:
+    `unindexed_filtering_update: false`), filtrar por una clave sin índice no
+    devuelve resultados de más, devuelve un 400. El síntoma que llegaba al
+    usuario era que cada subida terminaba en "Error" sin explicación.
+
+    El coste sigue siendo UNA llamada HTTP en el camino feliz: se pide
+    `get_collection` (que además trae el payload_schema) en vez de
+    `collection_exists`, y el resultado se recuerda por proceso.
     """
+    global _collection_checked
+    if _collection_checked:
+        return
+
     settings = get_settings()
     client = get_client()
     name = settings.qdrant_collection
 
-    if client.collection_exists(collection_name=name):
-        # Colección existente → ya tiene sus índices de payload (se crean
-        # junto con ella). Cold start = 1 sola llamada HTTP a Qdrant.
+    info = None
+    try:
+        info = client.get_collection(collection_name=name)
+    except Exception:
+        # Puede ser "no existe" (lo normal) o un fallo real: se distingue
+        # preguntando, y solo en este camino se paga la segunda llamada.
+        if client.collection_exists(collection_name=name):
+            raise
+
+    if info is not None:
+        existentes = set((info.payload_schema or {}).keys())
+        faltan = [(f, sch) for f, sch in PAYLOAD_INDEXES if f not in existentes]
+        for field, schema in faltan:
+            logger.info(
+                "Falta el índice de payload '%s' en '%s': se crea ahora.",
+                field, name,
+            )
+            client.create_payload_index(
+                collection_name=name, field_name=field, field_schema=schema
+            )
+        _collection_checked = True
         return
 
     client.create_collection(
@@ -142,6 +183,8 @@ def ensure_collection() -> None:
         except Exception:
             # El índice ya existe (o versión de Qdrant que no lo tolera): ok.
             logger.debug("Índice de payload '%s' ya existente.", field)
+
+    _collection_checked = True
 
 
 def _server_bm25_available() -> bool:

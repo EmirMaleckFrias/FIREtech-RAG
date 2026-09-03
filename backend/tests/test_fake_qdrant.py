@@ -179,3 +179,73 @@ def test_swap_de_version_borra_solo_los_puntos_anteriores(
     assert selector.filter.must_not[0].key == "document_version"
     assert selector.filter.must_not[0].match.value == "sha-nuevo"
     assert call["wait"] is True
+
+
+# ---------------------------------------------------------------------------
+# Reconciliación de índices de payload en una colección que YA existe
+# ---------------------------------------------------------------------------
+def test_una_coleccion_existente_recibe_los_indices_que_le_falten(
+    settings_override, fake_qdrant, monkeypatch
+):
+    """Regresión de un fallo que llegó a producción.
+
+    `ensure_collection` volvía de inmediato al ver que la colección existía,
+    suponiendo que ya tenía todos sus índices "porque se crean junto con
+    ella". Al añadir `document_version` a PAYLOAD_INDEXES, la colección de
+    producción se quedó con 6 de 7, y como Qdrant Cloud trae strict mode
+    (`unindexed_filtering_update: false`) filtrar por esa clave devolvía 400.
+    El usuario veía cada subida terminar en "Error" sin motivo.
+    """
+    from app.services import qdrant
+
+    # la colección existe pero le faltan document_version y chunk_type
+    presentes = {
+        f: object() for f, _ in qdrant.PAYLOAD_INDEXES
+        if f not in {"document_version", "chunk_type"}
+    }
+    fake_qdrant.set_response(
+        "get_collection",
+        types.SimpleNamespace(points_count=10, status="green", payload_schema=presentes),
+    )
+    qdrant._collection_checked = False
+
+    qdrant.ensure_collection()
+
+    creados = {kw["field_name"] for kw in fake_qdrant.calls_to("create_payload_index")}
+    assert creados == {"document_version", "chunk_type"}
+    # y NO se recrea la colección: eso borraría el índice entero
+    assert fake_qdrant.calls_to("create_collection") == []
+
+
+def test_no_se_repite_la_comprobacion_en_el_mismo_proceso(
+    settings_override, fake_qdrant
+):
+    """El early-return existía por una razón buena: en serverless cada cold
+    start pagaba la llamada. Se conserva, pero recordando el resultado en vez
+    de suponerlo."""
+    from app.services import qdrant
+
+    qdrant._collection_checked = False
+    qdrant.ensure_collection()
+    llamadas = len(fake_qdrant.calls_to("get_collection"))
+    qdrant.ensure_collection()
+    qdrant.ensure_collection()
+
+    assert len(fake_qdrant.calls_to("get_collection")) == llamadas
+
+
+def test_si_no_hay_indices_que_falten_no_se_crea_ninguno(settings_override, fake_qdrant):
+    from app.services import qdrant
+
+    fake_qdrant.set_response(
+        "get_collection",
+        types.SimpleNamespace(
+            points_count=10, status="green",
+            payload_schema={f: object() for f, _ in qdrant.PAYLOAD_INDEXES},
+        ),
+    )
+    qdrant._collection_checked = False
+
+    qdrant.ensure_collection()
+
+    assert fake_qdrant.calls_to("create_payload_index") == []

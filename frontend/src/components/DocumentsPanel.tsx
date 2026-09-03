@@ -27,7 +27,13 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from 'react';
-import { deleteDocument, fetchDocuments, uploadDocument } from '../api';
+import {
+  deleteDocument,
+  fetchDocuments,
+  FileNotStoredError,
+  reindexDocument,
+  uploadDocument,
+} from '../api';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import type { DocumentInfo } from '../types';
 import {
@@ -35,6 +41,7 @@ import {
   IconCheck,
   IconDocument,
   IconLock,
+  IconRefresh,
   IconSpinner,
   IconTrash,
   IconUpload,
@@ -117,6 +124,7 @@ export function DocumentsPanel({
 
   const [confirmFor, setConfirmFor] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  const [reindexing, setReindexing] = useState<Set<string>>(new Set());
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [openErrors, setOpenErrors] = useState<Set<string>>(new Set());
   const [justReady, setJustReady] = useState<Set<string>>(new Set());
@@ -126,6 +134,10 @@ export function DocumentsPanel({
   const grabberRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Documento cuya resubida se pidió desde su fila: al elegir el archivo se
+  // borra su registro fallido antes de subir, porque /upload da 409 si el
+  // nombre ya existe. null = subida normal.
+  const reuploadForRef = useRef<string | null>(null);
   const dragCounterRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
   /** Nombres subidos desde esta sesión: su polling sigue aunque se cierre el panel. */
@@ -342,6 +354,65 @@ export function DocumentsPanel({
     [onHealthRefresh, refreshDocs],
   );
 
+  /**
+   * Reintenta la indexación de un documento que falló.
+   *
+   * Casi siempre falla por algo transitorio (un timeout de OpenAI, un corte
+   * con Qdrant), y sin esto la única salida era borrar la fila y volver a
+   * buscar el archivo: `POST /upload` responde 409 si el nombre ya existe,
+   * incluso cuando la fila está en `failed`.
+   *
+   * Si el backend contesta que ya no tiene el archivo -en Vercel los uploads
+   * van a /tmp, que es efímero- se dice exactamente eso y se abre el selector
+   * de archivos, en vez de dejar un error sin salida.
+   */
+  const handleReindex = useCallback(
+    async (fileName: string) => {
+      setRowErrors((errs) => {
+        const next = { ...errs };
+        delete next[fileName];
+        return next;
+      });
+      setReindexing((s) => new Set(s).add(fileName));
+      try {
+        const status = await reindexDocument(fileName);
+        setDocs((prev) =>
+          prev === null
+            ? prev
+            : prev.map((d) =>
+                d.file_name === fileName ? { ...d, status, error: null } : d,
+              ),
+        );
+        onHealthRefresh();
+        void refreshDocs({ silent: true });
+      } catch (err) {
+        if (err instanceof FileNotStoredError) {
+          setRowErrors((errs) => ({
+            ...errs,
+            [fileName]: `${err.message} Elige el archivo para volver a intentarlo.`,
+          }));
+          // La resubida exige que el nombre no exista, así que se borra la
+          // fila fallida primero. Es segura de borrar: quedó en 0 chunks.
+          reuploadForRef.current = fileName;
+          fileInputRef.current?.click();
+        } else {
+          setRowErrors((errs) => ({
+            ...errs,
+            [fileName]:
+              err instanceof Error ? err.message : 'No se pudo reindexar el documento.',
+          }));
+        }
+      } finally {
+        setReindexing((s) => {
+          const next = new Set(s);
+          next.delete(fileName);
+          return next;
+        });
+      }
+    },
+    [onHealthRefresh, refreshDocs],
+  );
+
   const toggleErrorDetail = (fileName: string) => {
     setOpenErrors((s) => {
       const next = new Set(s);
@@ -378,7 +449,46 @@ export function DocumentsPanel({
   const handleFilePicked = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files && e.target.files.length > 0 ? e.target.files[0] : null;
     e.target.value = ''; // permite re-elegir el mismo archivo
-    if (file) void startUpload(file);
+    const reuploadFor = reuploadForRef.current;
+    reuploadForRef.current = null;
+    if (!file) return;
+    if (reuploadFor === null) {
+      void startUpload(file);
+      return;
+    }
+    // Resubida pedida desde una fila fallida: se borra su registro antes de
+    // subir, porque /upload da 409 si el nombre ya existe. Solo se borra si
+    // el archivo elegido es el mismo: cambiar de archivo a mitad dejaría un
+    // documento borrado y otro con nombre distinto, que no es lo que nadie
+    // pidió.
+    if (file.name !== reuploadFor) {
+      setRowErrors((errs) => ({
+        ...errs,
+        [reuploadFor]:
+          `Elegiste "${file.name}" y el documento a reintentar es ` +
+          `"${reuploadFor}". No se ha tocado nada.`,
+      }));
+      return;
+    }
+    void (async () => {
+      try {
+        await deleteDocument(reuploadFor);
+        docsRequestRef.current++;
+        setDocs((prev) =>
+          prev === null ? prev : prev.filter((d) => d.file_name !== reuploadFor),
+        );
+      } catch (err) {
+        setRowErrors((errs) => ({
+          ...errs,
+          [reuploadFor]:
+            err instanceof Error
+              ? `No se pudo limpiar el registro anterior: ${err.message}`
+              : 'No se pudo limpiar el registro anterior.',
+        }));
+        return;
+      }
+      await startUpload(file);
+    })();
   };
 
   // --- focus trap ligero + Escape ---
@@ -582,6 +692,7 @@ export function DocumentsPanel({
             <ul className="docs-list">
               {docs.map((d) => {
                 const isDeleting = deleting.has(d.file_name);
+                const isReindexing = reindexing.has(d.file_name);
                 const isConfirm = confirmFor === d.file_name;
                 const errOpen = openErrors.has(d.file_name);
                 const popped = justReady.has(d.file_name);
@@ -669,6 +780,27 @@ export function DocumentsPanel({
                               >
                                 <IconAlert size={11} />
                                 Error
+                              </button>
+                            )}
+
+                            {/* Reintentar: solo en los fallidos y solo para
+                                admin. Va ANTES de la papelera a propósito:
+                                reintentar es la acción esperada ante un error,
+                                y borrar la de último recurso. */}
+                            {canManage && d.status === 'failed' && (
+                              <button
+                                type="button"
+                                className="doc-action-btn"
+                                disabled={isReindexing}
+                                onClick={() => void handleReindex(d.file_name)}
+                                title="Reintentar la indexación"
+                                aria-label={`Reintentar la indexación de ${d.file_name}`}
+                              >
+                                {isReindexing ? (
+                                  <IconSpinner size={14} />
+                                ) : (
+                                  <IconRefresh size={14} />
+                                )}
                               </button>
                             )}
 

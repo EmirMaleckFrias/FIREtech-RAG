@@ -185,6 +185,16 @@ export function IconTrash({ size = 15, ...props }: IconProps) {
   );
 }
 
+/** Flecha circular: reintentar la indexación de un documento fallido. */
+export function IconRefresh({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 4v4.5h-4.5" />
+    </svg>
+  );
+}
+
 /** Candado cerrado (catálogos base, no borrables). */
 export function IconLock({ size = 14, ...props }: IconProps) {
   return (
