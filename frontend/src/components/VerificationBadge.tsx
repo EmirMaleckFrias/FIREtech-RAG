@@ -29,6 +29,7 @@ const ESTILO: Record<Veredicto, { etiqueta: string; clase: string; grave: boolea
   parcial: { etiqueta: 'Parcial', clase: 'verif-parcial', grave: true },
   no_sostenida: { etiqueta: 'No sostenida', clase: 'verif-mal', grave: true },
   cita_no_resuelve: { etiqueta: 'Cita sin fuente', clase: 'verif-mal', grave: true },
+  sin_cita: { etiqueta: 'Sin ninguna cita', clase: 'verif-mal', grave: true },
   sin_verificar: { etiqueta: 'Sin comprobar', clase: 'verif-aviso', grave: true },
 };
 
@@ -42,8 +43,10 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
   // Abre solo si hay algo que mirar: lo limpio no interrumpe.
   const [abierto, setAbierto] = useState(problemas.length > 0);
 
-  // Sin afirmaciones citadas no hay atribución que auditar (una abstención
-  // legítima no lleva citas). Decirlo es más honesto que no pintar nada.
+  // Lista vacía = abstención legítima, y solo eso: una respuesta que afirma sin
+  // citar YA NO llega aquí, llega con una afirmación de veredicto `sin_cita`
+  // que se pinta en rojo como el fallo que es. Así que este caso es sobrio a
+  // propósito: no citar cuando no hay datos es lo correcto.
   if (afirmaciones.length === 0) {
     return (
       <div className="verif verif-vacia">
@@ -58,6 +61,7 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
   const resumen = limpio
     ? `${sostenidas} de ${afirmaciones.length} afirmaciones respaldadas por su fuente`
     : [
+        cuenta(afirmaciones, 'sin_cita') > 0 && 'la respuesta no cita ninguna fuente',
         cuenta(afirmaciones, 'cita_no_resuelve') > 0 &&
           `${cuenta(afirmaciones, 'cita_no_resuelve')} cita(s) sin fuente recuperada`,
         cuenta(afirmaciones, 'no_sostenida') > 0 &&

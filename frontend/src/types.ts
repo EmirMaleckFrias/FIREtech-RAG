@@ -15,7 +15,7 @@ export interface Health {
  *
  * OJO con el desajuste, es deliberado y temporal: el identificador almacenado
  * sigue siendo `vendedor` porque la base solo acepta admin/vendedor hasta que
- * se aplique supabase/migrations/009_rol_lector.sql, y hoy nadie del equipo
+ * se aplique supabase/migrations/010_rol_lector.sql, y hoy nadie del equipo
  * tiene acceso al proyecto de Supabase para correrla. Lo que el usuario LEE ya
  * es "Lector" (ver ROLE_LABEL). No renombres el identificador a `lector` antes
  * de aplicar 009: el check constraint rechazaría la escritura y el boton de
@@ -134,7 +134,10 @@ export type Veredicto =
   | 'sostenida'
   | 'parcial'
   | 'no_sostenida'
+  /** La cita no corresponde a ningún fragmento recuperado. */
   | 'cita_no_resuelve'
+  /** La respuesta afirma y no cita nada, sin declarar ausencia de evidencia. */
+  | 'sin_cita'
   | 'sin_verificar';
 
 export interface Afirmacion {

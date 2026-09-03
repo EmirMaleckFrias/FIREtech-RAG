@@ -1,3 +1,10 @@
+-- Renumerada de 009 a 010: tres comentarios del codigo (routes.py x2 y
+-- telemetry.py) reservan el 009 para la migracion de metricas de
+-- chat_messages, que aun no existe. Renumerar esta era gratis porque
+-- NUNCA se ha aplicado en ningun entorno; renombrar el 009 de los
+-- comentarios habria sido mas ruido y habria dejado la referencia
+-- apuntando a esto.
+--
 -- PENDIENTE DE APLICAR (3-sep-2026). Hace falta acceso al proyecto de Supabase
 -- y hoy nadie del equipo lo tiene; la service key sirve para filas, no para
 -- esquema. Hasta que se corra, el codigo almacena el rol como 'vendedor' y solo

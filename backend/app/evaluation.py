@@ -74,7 +74,12 @@ CITATION_RE = re.compile(
     r"\[[^\[\]\n]+,\s*(?:p[aá]g\.?|secci[oó]n:|fila|tabla|fragmento)\s*[^\[\]\n]+\]",
     re.IGNORECASE,
 )
-_DEFAULT_ABSTENTION_PATTERNS = (
+# Público a propósito, igual que CITATION_RE: `app.services.verificador`
+# usa EXACTAMENTE estos patrones para distinguir una abstención legítima
+# (que no lleva citas por definición) de una respuesta factual que no citó
+# nada, que es el peor caso posible. Si runtime y benchmark discreparan en
+# qué cuenta como abstención, medirían cosas distintas.
+ABSTENTION_PATTERNS = (
     r"no (?:lo |la )?encuentro",
     r"no (?:aparece|figura|consta)",
     r"no hay (?:evidencia|informaci[oó]n|datos)",
@@ -197,7 +202,7 @@ def score_case(case: EvalCase, result: dict[str, Any]) -> dict[str, Any]:
     if forbidden_answer_patterns:
         failures.append("contenido prohibido: " + ", ".join(forbidden_answer_patterns))
 
-    abstained = any(_matches(pattern, answer) for pattern in _DEFAULT_ABSTENTION_PATTERNS)
+    abstained = any(_matches(pattern, answer) for pattern in ABSTENTION_PATTERNS)
     if case.expect_abstention and not abstained:
         failures.append("debía abstenerse y no lo hizo")
     if not case.expect_abstention and abstained:

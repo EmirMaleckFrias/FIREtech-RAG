@@ -668,6 +668,7 @@ const VEREDICTOS: readonly Veredicto[] = [
   'parcial',
   'no_sostenida',
   'cita_no_resuelve',
+  'sin_cita',
   'sin_verificar',
 ];
 

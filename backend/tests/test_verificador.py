@@ -15,6 +15,7 @@ from app.models import Chunk
 from app.services import verificador
 from app.services.verificador import (
     CITA_NO_RESUELVE,
+    SIN_CITA,
     NO_SOSTENIDA,
     PARCIAL,
     SIN_VERIFICAR,
@@ -35,16 +36,50 @@ def _veredictos(informe) -> list[str]:
 # ---------------------------------------------------------------------------
 # Troceo y resolución de citas: deterministas, sin modelo
 # ---------------------------------------------------------------------------
-async def test_una_respuesta_sin_citas_no_inventa_veredicto(settings_override, fake_openai):
-    """Sin citas no se puede atribuir nada, y tampoco se puede condenar: una
-    abstención legítima no lleva citas. Se informa, no se juzga."""
+async def test_una_abstencion_sin_citas_es_correcta(settings_override, fake_openai):
+    """No citar es lo correcto cuando la respuesta declara que no hay datos.
+    Es el único caso en que la ausencia de citas no es un fallo."""
     informe = await verificar("No encuentro ese dato en los documentos.", [])
 
     assert informe.afirmaciones == []
     assert informe.fidelidad is None
     assert informe.ok is True
-    assert "no contiene citas" in informe.nota
+    assert "se abstiene" in informe.nota
     assert fake_openai.calls == []  # no se gasta una llamada en esto
+
+
+async def test_una_respuesta_factual_sin_citas_es_el_peor_caso(
+    settings_override, fake_openai
+):
+    """Regresión de una permisividad que se colaba.
+
+    Antes, CUALQUIER respuesta sin citas devolvía ok=True con "nada que
+    atribuir": no había citas que comprobar, luego nada que reprochar. El
+    razonamiento estaba al revés. Una respuesta que afirma cifras y no
+    respalda ninguna es lo más grave que puede pasar aquí, porque quien
+    investiga no puede rastrear nada hasta su fuente.
+    """
+    informe = await verificar(
+        "El AUC de p-tau217 fue 0.94 en una cohorte de 412 pacientes.", []
+    )
+
+    assert informe.ok is False
+    assert [a.veredicto for a in informe.afirmaciones] == [SIN_CITA]
+    # 0.0 y no None: aquí sí se midió, y nada está respaldado
+    assert informe.fidelidad == 0.0
+    assert "sin una sola cita" in informe.nota
+    assert fake_openai.calls == []
+
+
+async def test_sin_citas_y_sin_abstencion_reporta_el_plan_entero_sin_cubrir(
+    settings_override, fake_openai
+):
+    informe = await verificar(
+        "Los tres estudios coinciden en el desenlace.", [], {"e1": "la cifra", "e2": "la cohorte"}
+    )
+
+    assert informe.ok is False
+    assert informe.evidencia_sin_cubrir == ["e1", "e2"]
 
 
 async def test_una_cita_que_no_resuelve_se_marca_sin_llamar_al_modelo(

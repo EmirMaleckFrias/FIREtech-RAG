@@ -45,7 +45,7 @@ import time
 from dataclasses import asdict, dataclass, field
 
 from app.config import get_settings
-from app.evaluation import CITATION_RE
+from app.evaluation import ABSTENTION_PATTERNS, CITATION_RE
 from app.models import Chunk
 from app.services import telemetry
 from app.services.openai_client import get_async_client, openai_slot
@@ -58,6 +58,12 @@ SOSTENIDA = "sostenida"
 NO_SOSTENIDA = "no_sostenida"
 PARCIAL = "parcial"
 CITA_NO_RESUELVE = "cita_no_resuelve"
+# Respuesta que afirma cosas y no cita NADA. Es el peor caso de todos, y
+# durante un tiempo pasaba como "nada que atribuir": no hay citas que
+# comprobar, luego no hay nada que reprochar. El razonamiento estaba al
+# revés. Una abstención legítima tampoco lleva citas, así que las dos se
+# distinguen por el TEXTO, con los mismos patrones que el evaluador.
+SIN_CITA = "sin_cita"
 SIN_VERIFICAR = "sin_verificar"
 
 _VEREDICTOS_MODELO = {SOSTENIDA, NO_SOSTENIDA, PARCIAL}
@@ -124,6 +130,17 @@ class Verificacion:
             "ok": self.ok,
             "nota": self.nota,
         }
+
+
+def _parece_abstencion(answer: str) -> bool:
+    """Si la respuesta dice que no encontró la información.
+
+    Una abstención es el ÚNICO caso en que no citar nada es correcto, así que
+    es la línea que separa "no hay nada que atribuir" de "afirmó sin respaldo".
+    """
+    return any(
+        re.search(patron, answer, re.IGNORECASE) for patron in ABSTENTION_PATTERNS
+    )
 
 
 def _trocear(answer: str) -> list[tuple[str, str]]:
@@ -240,12 +257,34 @@ async def verificar(
     settings = get_settings()
     troceado = _trocear(answer)
     if not troceado:
-        # Una respuesta sin ninguna cita puede ser legítima (abstención) o el
-        # peor caso posible (afirmaciones sin respaldo). Aquí no se puede
-        # distinguir, así que no se inventa un veredicto.
+        # Sin ninguna cita hay dos casos opuestos y hay que separarlos, porque
+        # tratarlos igual convierte el fallo más grave en un visto bueno.
+        if _parece_abstencion(answer):
+            return Verificacion(
+                ok=True,
+                nota="la respuesta se abstiene y no cita: correcto, nada que atribuir",
+            )
+        # Afirma cosas y no respalda ninguna. En investigación médica esto no
+        # es un aviso, es la respuesta inutilizable: no se puede rastrear nada
+        # hasta su fuente. Se reporta como una afirmación no citada que abarca
+        # toda la respuesta, y con fidelidad 0.0 en vez de None: aquí sí se
+        # midió, y el resultado es que nada está respaldado.
         return Verificacion(
-            ok=True,
-            nota="la respuesta no contiene citas; nada que atribuir",
+            afirmaciones=[
+                Afirmacion(
+                    texto=answer.strip()[:400],
+                    cita="",
+                    veredicto=SIN_CITA,
+                    motivo=(
+                        "la respuesta afirma sin citar ninguna fuente y no se "
+                        "declara ausencia de evidencia"
+                    ),
+                )
+            ],
+            evidencia_sin_cubrir=sorted(evidencia_requerida or {}),
+            fidelidad=0.0,
+            ok=False,
+            nota="respuesta sin una sola cita que no es una abstención",
         )
 
     indice = _indice_de_fragmentos(chunks)
