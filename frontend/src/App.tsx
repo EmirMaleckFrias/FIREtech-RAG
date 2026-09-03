@@ -43,6 +43,8 @@ const HEALTH_INTERVAL_MS = 15_000;
  * un freno para no martillear a Supabase: agotarlo NO cierra la sesión.
  */
 const RENEW_THROTTLE_MS = 10_000;
+/** 401 seguidos que se toleran creyendo a Supabase antes de cerrar sesión. */
+const MAX_RECHAZOS = 2;
 
 function newLocalId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -88,6 +90,8 @@ export default function App() {
 
   const hasSessionRef = useRef(false);
   const lastRenewRef = useRef(0);
+  // 401 seguidos tras haber intentado renovar. Ver handleUnauthorized.
+  const rechazosRef = useRef(0);
 
   useEffect(() => {
     let alive = true;
@@ -187,6 +191,9 @@ export default function App() {
       const list = await fetchSessions();
       setSessions(list);
       setSessionsError(false);
+      // Una petición con éxito significa que el token sirve: se olvida la
+      // cuenta de rechazos para no acumularla entre incidentes distintos.
+      rechazosRef.current = 0;
     } catch {
       setSessionsError(true);
     } finally {
@@ -200,6 +207,19 @@ export default function App() {
     if (userId === null) return;
     void refreshSessions();
   }, [refreshSessions, userId]);
+
+  // Reintento cuando el backend vuelve. Sin esto, un fallo de un segundo
+  // (un redeploy, un reinicio en local, la red del portátil) dejaba el error
+  // "¿Está el backend en marcha?" pegado en el sidebar hasta que alguien
+  // recargaba la página a mano: la carga solo se disparaba al montar o al
+  // cambiar de usuario. La sesión caducada NO pasa por aquí, la resuelve el
+  // ciclo de 401 (onUnauthorized) expulsando a la pantalla de acceso, así que
+  // lo único que llega hasta este punto es un fallo de transporte o un 5xx,
+  // que es exactamente lo que se puede reintentar solo.
+  useEffect(() => {
+    if (userId === null || !sessionsError || healthError || health === null) return;
+    void refreshSessions();
+  }, [userId, sessionsError, healthError, health, refreshSessions]);
 
   // --- identidad y rol (GET /api/me) ---
   useEffect(() => {
@@ -250,7 +270,19 @@ export default function App() {
       const token = await renewAccessToken();
       if (token !== null) return; // token nuevo: la siguiente petición irá bien
     }
-    if (await hasValidSession()) return; // el problema no es la sesión
+    // Una sesión que Supabase considera válida pero que el backend rechaza es,
+    // en la práctica, una sesión inválida: el usuario se queda "dentro" con
+    // TODAS las peticiones en 401, sin listado de conversaciones y sin poder
+    // preguntar, y sin nada que le explique por qué ni forma de salir. Ese
+    // punto muerto se daba porque aquí se cortaba en seco al confiar en
+    // hasValidSession(). Se le concede el beneficio de la duda un par de
+    // veces (un 401 aislado puede ser una carrera con la renovación del
+    // token), y si el backend insiste se cierra sesión igual.
+    if (await hasValidSession() && rechazosRef.current < MAX_RECHAZOS) {
+      rechazosRef.current += 1;
+      return;
+    }
+    rechazosRef.current = 0;
     hasSessionRef.current = false;
     setExpired(true);
     await signOut();

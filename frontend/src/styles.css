@@ -60,7 +60,11 @@
 
   /* placa de marca: el rojo intenso del logo real, con texto siempre blanco.
      Se define una sola vez: la placa es idéntica en light y dark. */
-  --brand-plate: #f00728;
+  /* Morado de Alzheimer Project. No es un color elegido a ojo: es la
+     mediana de los pixeles de marca saturados de alzheimer-project.png,
+     el mismo que usan el favicon y los iconos del PWA. Blanco encima da
+     13.21:1. Antes aqui vivia el rojo de FIREtech, del producto anterior. */
+  --brand-plate: #3d1974;
   --brand-plate-text: #ffffff;
 
   /* semánticos */
@@ -539,31 +543,6 @@ textarea {
   background: var(--logo-plate);
 }
 
-/* placa FIREtech: wordmark tipográfico al estilo del logo real: texto
-   blanco sobre el rojo de marca, sin imágenes. Idéntica en ambos temas. */
-.brand-plate {
-  display: inline-flex;
-  align-items: baseline;
-  padding: 4px 11px 5px;
-  border-radius: 9px;
-  background: var(--brand-plate);
-  color: var(--brand-plate-text);
-  font-size: 15px;
-  line-height: 1.2;
-  white-space: nowrap;
-  user-select: none;
-}
-
-.brand-fire {
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  text-transform: uppercase;
-}
-
-.brand-tech {
-  font-weight: 400;
-}
-
 .brand-badge {
   border-radius: 999px;
   padding: 1px 8px;
@@ -969,7 +948,7 @@ textarea {
   align-items: flex-start;
 }
 
-/* avatar del asistente: monograma "F" blanco sobre el rojo de marca
+/* avatar del asistente: monograma "A" blanco sobre el morado de marca
    (a 26px no cabe el wordmark completo) */
 .msg-avatar {
   width: 26px;

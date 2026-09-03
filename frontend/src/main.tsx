@@ -25,7 +25,9 @@ createRoot(rootElement).render(
 // jamás se intercepta (SSE incluido), cache-first para /assets/ hasheados.
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {
+    // La query no es decorativa: el SW toma de ahí el nombre de sus cachés,
+    // y al cambiar el id purga las del build anterior en su `activate`.
+    navigator.serviceWorker.register(`/sw.js?v=${__BUILD_ID__}`).catch(() => {
       // sin red o sin soporte: la app funciona igual, solo no es instalable
     });
   });

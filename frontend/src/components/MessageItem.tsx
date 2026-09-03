@@ -44,7 +44,7 @@ export function MessageItem({
   return (
     <div className={`msg msg-assistant ${isPanelTarget ? 'msg-panel-target' : ''}`}>
       <div className="msg-avatar" aria-hidden="true">
-        F
+        A
       </div>
 
       <div className="msg-body">

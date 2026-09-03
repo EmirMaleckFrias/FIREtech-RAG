@@ -1,10 +1,19 @@
-/* Service worker mínimo de FIREtech RAG.
+/* Service worker mínimo de Alzheimer Project.
    - /api/*: NUNCA se intercepta ni se cachea (incluye streams SSE).
    - Navegaciones: network-first con copia en caché como fallback offline.
    - /assets/* (hasheados por Vite): cache-first, inmutables.
    - activate: limpia caches de versiones anteriores. */
 
-const VERSION = 'firetech-v1';
+// Versión de este build, tomada de la query con la que main.tsx registró este
+// script (`/sw.js?v=<id>`). Antes era la constante fija 'firetech-v1', y eso
+// hacía que la limpieza del `activate` de abajo NO borrara nunca nada: todas
+// las cachés empezaban por el mismo prefijo, así que el filtro las conservaba
+// todas. Era código muerto que aparentaba funcionar.
+//
+// El fallback 'v0' cubre el caso de un registro sin query (un SW viejo que
+// sobrevive a la actualización): no rompe, solo no purga hasta que el registro
+// nuevo lo reemplace.
+const VERSION = `sw-${new URL(self.location.href).searchParams.get('v') || 'v0'}`;
 const PAGES = `${VERSION}-pages`;
 const ASSETS = `${VERSION}-assets`;
 

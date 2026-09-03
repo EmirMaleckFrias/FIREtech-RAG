@@ -1,7 +1,7 @@
 {
-  "name": "FIREtech RAG",
-  "short_name": "FIREtech",
-  "description": "Asistente sobre los catálogos de protección contra incendios: cada respuesta cita archivo y página.",
+  "name": "Alzheimer Project · AI ROBOTIX",
+  "short_name": "Alzheimer Project",
+  "description": "Asistente de investigación sobre literatura científica de Alzheimer: cada afirmación cita su fuente y se verifica contra el fragmento citado.",
   "lang": "es",
   "display": "standalone",
   "start_url": "/",

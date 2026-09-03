@@ -1,5 +1,12 @@
 // Genera los íconos PWA (PNG reales) rasterizando un SVG coherente con el
-// favicon: cuadrado rojo FIREtech (#F00728) redondeado con "F" blanca bold.
+// favicon: cuadrado morado redondeado con "A" blanca bold.
+//
+// El morado (#3D1974) NO es inventado: es la mediana de los píxeles de marca
+// saturados de public/alzheimer-project.png, así que el ícono y el logo son
+// el mismo color. Blanco sobre él da 13.21:1, de sobra para un glifo.
+//
+// Se usa una LETRA y no el árbol del logo a propósito: a 16 px una silueta
+// con ramas es una mancha, y el favicon se ve sobre todo a ese tamaño.
 //
 // Uso (una sola vez, desde frontend/):
 //   npm run icons        (o: node scripts/generate-icons.mjs)
@@ -17,22 +24,22 @@ import sharp from 'sharp';
 
 const outDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
-const RED = '#F00728';
+const PURPLE = '#3D1974';
 const WHITE = '#FFFFFF';
 
 /**
  * SVG del ícono a viewBox 100x100.
  * @param {object} opts
  * @param {number} opts.radius  radio de esquina (0 = cuadrado pleno)
- * @param {number} opts.glyph   tamaño de la "F" (font-size en unidades viewBox)
+ * @param {number} opts.glyph   tamaño de la "A" (font-size en unidades viewBox)
  */
 function iconSvg({ radius, glyph }) {
-  const baseline = 50 + glyph * 0.355; // centrado óptico de la "F" bold
+  const baseline = 50 + glyph * 0.355; // centrado óptico del glifo bold
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <rect width="100" height="100" rx="${radius}" fill="${RED}"/>
+  <rect width="100" height="100" rx="${radius}" fill="${PURPLE}"/>
   <text x="50" y="${baseline}" text-anchor="middle"
         font-family="Arial,Helvetica,sans-serif" font-weight="bold"
-        font-size="${glyph}" fill="${WHITE}">F</text>
+        font-size="${glyph}" fill="${WHITE}">A</text>
 </svg>`;
 }
 
