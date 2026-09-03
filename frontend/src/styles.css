@@ -60,12 +60,12 @@
 
   /* placa de marca: el rojo intenso del logo real, con texto siempre blanco.
      Se define una sola vez: la placa es idéntica en light y dark. */
-  /* Morado de Alzheimer Project. No es un color elegido a ojo: es la
-     mediana de los pixeles de marca saturados de alzheimer-project.png,
-     el mismo que usan el favicon y los iconos del PWA. Blanco encima da
-     13.21:1. Antes aqui vivia el rojo de FIREtech, del producto anterior. */
-  --brand-plate: #3d1974;
-  --brand-plate-text: #ffffff;
+  /* Disco claro sobre el que se pinta el arbol del logo (avatar del
+     asistente). Es claro y no el morado de marca porque el arbol es morado
+     oscuro: sobre morado se desvanece, sobre blanco se lee incluso a 26 px.
+     Aqui vivian las variables de la placa tipografica de FIREtech, del
+     producto anterior; esa placa ya no existe. */
+  --logo-disc: #ffffff;
 
   /* semánticos */
   --green: #16a34a;
@@ -948,17 +948,19 @@ textarea {
   align-items: flex-start;
 }
 
-/* avatar del asistente: monograma "A" blanco sobre el morado de marca
-   (a 26px no cabe el wordmark completo) */
+/* avatar del asistente: el árbol del logo sobre disco claro.
+   El disco es claro y NO del morado de marca por una razón medida: el árbol
+   es morado oscuro, así que sobre #3D1974 se desvanece y a 26 px queda una
+   mancha; sobre blanco se lee como un árbol a ese mismo tamaño. Se comprobó
+   rasterizando las dos variantes antes de elegir. Igual en ambos temas: en
+   oscuro el disco claro además lo despega del fondo. */
 .msg-avatar {
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: var(--brand-plate);
-  color: var(--brand-plate-text);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
+  background:
+    url('/arbol-marca.png') center / 78% no-repeat,
+    var(--logo-disc);
   display: flex;
   align-items: center;
   justify-content: center;

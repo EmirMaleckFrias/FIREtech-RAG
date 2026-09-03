@@ -43,9 +43,9 @@ export function MessageItem({
 
   return (
     <div className={`msg msg-assistant ${isPanelTarget ? 'msg-panel-target' : ''}`}>
-      <div className="msg-avatar" aria-hidden="true">
-        A
-      </div>
+      {/* El árbol de marca va como fondo en CSS: es decoración, no
+          contenido, y así no entra en el árbol de accesibilidad. */}
+      <div className="msg-avatar" aria-hidden="true" />
 
       <div className="msg-body">
         {/*

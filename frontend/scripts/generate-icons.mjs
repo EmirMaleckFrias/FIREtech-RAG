@@ -1,66 +1,112 @@
-// Genera los íconos PWA (PNG reales) rasterizando un SVG coherente con el
-// favicon: cuadrado morado redondeado con "A" blanca bold.
+// Genera los íconos de marca a partir del logo real: el árbol de Alzheimer
+// Project sobre un disco/cuadrado claro.
 //
-// El morado (#3D1974) NO es inventado: es la mediana de los píxeles de marca
-// saturados de public/alzheimer-project.png, así que el ícono y el logo son
-// el mismo color. Blanco sobre él da 13.21:1, de sobra para un glifo.
-//
-// Se usa una LETRA y no el árbol del logo a propósito: a 16 px una silueta
-// con ramas es una mancha, y el favicon se ve sobre todo a ese tamaño.
-//
-// Uso (una sola vez, desde frontend/):
+// Uso (desde frontend/):
 //   npm run icons        (o: node scripts/generate-icons.mjs)
 //
 // Escribe en public/:
-//   icon-192.png, icon-512.png            → manifest (purpose: any)
-//   icon-maskable-192.png, -512.png       → manifest (purpose: maskable,
-//                                            glifo reducido a la zona segura)
-//   apple-touch-icon.png (180)            → iOS home screen (sin esquinas
-//                                            redondeadas: iOS las aplica)
+//   arbol-marca.png                        → el árbol recortado, con alfa.
+//                                            Lo usa el avatar del asistente.
+//   favicon.png (32)                       → pestaña del navegador
+//   icon-192.png, icon-512.png             → manifest (purpose: any)
+//   icon-maskable-192.png, -512.png        → manifest (purpose: maskable,
+//                                             glifo en la zona segura)
+//   apple-touch-icon.png (180)             → iOS (sin esquinas redondeadas:
+//                                             iOS las aplica)
+//
+// POR QUÉ EL FONDO ES CLARO Y NO EL MORADO DE MARCA: el árbol del logo es
+// morado oscuro. Sobre el morado #3D1974 se desvanece y a 26 px es una
+// mancha; sobre blanco se lee como un árbol incluso a ese tamaño. Se
+// comprobó rasterizando las dos variantes a 26/32/48/96 px antes de elegir.
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 
-const outDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
+const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
+const LOGO = join(publicDir, 'alzheimer-project.png');
 
-const PURPLE = '#3D1974';
-const WHITE = '#FFFFFF';
+// El logo son dos piezas apiladas: el árbol arriba y el wordmark
+// "ALZHEIMER PROJECT" abajo, separados por una banda de píxeles totalmente
+// transparentes. Ese corte está en el 60.6% de la altura (fila 381 de 629),
+// medido sobre el canal alfa. Se recorta ahí y luego se aprieta con trim()
+// para quitar el margen sobrante, así que un logo nuevo de proporciones
+// parecidas sigue funcionando sin tocar este número.
+const CORTE_ARBOL = 0.606;
+
+const { height, width } = await sharp(LOGO).metadata();
+// extract y trim NO se encadenan en el mismo pipeline: sharp los aplica en un
+// orden que hace fallar el recorte ("extract_area: bad extract area"). Dos
+// pasos separados, con el buffer intermedio.
+const banda = await sharp(LOGO)
+  .extract({ left: 0, top: 0, width, height: Math.round(height * CORTE_ARBOL) })
+  .png()
+  .toBuffer();
+const arbol = await sharp(banda).trim().png().toBuffer();
+
+await mkdir(publicDir, { recursive: true });
+await writeFile(join(publicDir, 'arbol-marca.png'), arbol);
+const meta = await sharp(arbol).metadata();
+console.log(`✓ public/arbol-marca.png (${meta.width}×${meta.height})`);
+
+const CLARO = { r: 255, g: 255, b: 255, alpha: 1 };
 
 /**
- * SVG del ícono a viewBox 100x100.
- * @param {object} opts
- * @param {number} opts.radius  radio de esquina (0 = cuadrado pleno)
- * @param {number} opts.glyph   tamaño de la "A" (font-size en unidades viewBox)
+ * Compone el árbol centrado sobre un fondo claro.
+ * @param {object} o
+ * @param {number} o.size    lado del PNG final
+ * @param {number} o.radius  radio de esquina en unidades del lado (0 = pleno)
+ * @param {number} o.inset   proporción del lado que ocupa el árbol
  */
-function iconSvg({ radius, glyph }) {
-  const baseline = 50 + glyph * 0.355; // centrado óptico del glifo bold
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <rect width="100" height="100" rx="${radius}" fill="${PURPLE}"/>
-  <text x="50" y="${baseline}" text-anchor="middle"
-        font-family="Arial,Helvetica,sans-serif" font-weight="bold"
-        font-size="${glyph}" fill="${WHITE}">A</text>
-</svg>`;
-}
+async function icono({ size, radius, inset }) {
+  const lado = Math.round(size * inset);
+  const glifo = await sharp(arbol)
+    .resize(lado, lado, { fit: 'inside', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .toBuffer();
+  const g = await sharp(glifo).metadata();
 
-// - normal: esquinas redondeadas como el favicon (rx 7/32 ≈ 22)
-// - maskable: lienzo completo (el SO recorta), glifo en la zona segura (80%)
-// - apple: cuadrado pleno, iOS redondea por su cuenta
-const VARIANTS = [
-  { file: 'icon-192.png', size: 192, svg: iconSvg({ radius: 22, glyph: 66 }) },
-  { file: 'icon-512.png', size: 512, svg: iconSvg({ radius: 22, glyph: 66 }) },
-  { file: 'icon-maskable-192.png', size: 192, svg: iconSvg({ radius: 0, glyph: 52 }) },
-  { file: 'icon-maskable-512.png', size: 512, svg: iconSvg({ radius: 0, glyph: 52 }) },
-  { file: 'apple-touch-icon.png', size: 180, svg: iconSvg({ radius: 0, glyph: 62 }) },
-];
+  const fondo =
+    radius > 0
+      ? await sharp(
+          Buffer.from(
+            `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">` +
+              `<rect width="${size}" height="${size}" rx="${Math.round(size * radius)}" fill="#FFFFFF"/>` +
+              `</svg>`,
+          ),
+        )
+          .png()
+          .toBuffer()
+      : await sharp({
+          create: { width: size, height: size, channels: 4, background: CLARO },
+        })
+          .png()
+          .toBuffer();
 
-await mkdir(outDir, { recursive: true });
-
-for (const { file, size, svg } of VARIANTS) {
-  const png = await sharp(Buffer.from(svg), { density: 300 })
-    .resize(size, size)
+  return sharp(fondo)
+    .composite([
+      {
+        input: glifo,
+        left: Math.round((size - g.width) / 2),
+        top: Math.round((size - g.height) / 2),
+      },
+    ])
     .png()
     .toBuffer();
-  await writeFile(join(outDir, file), png);
-  console.log(`✓ public/${file} (${size}×${size}, ${png.length} bytes)`);
+}
+
+const VARIANTS = [
+  { file: 'favicon.png', size: 32, radius: 0.22, inset: 0.86 },
+  { file: 'icon-192.png', size: 192, radius: 0.22, inset: 0.8 },
+  { file: 'icon-512.png', size: 512, radius: 0.22, inset: 0.8 },
+  // maskable: el SO recorta hasta un 20% por lado, así que el árbol se queda
+  // en la zona segura y el fondo llega al borde.
+  { file: 'icon-maskable-192.png', size: 192, radius: 0, inset: 0.6 },
+  { file: 'icon-maskable-512.png', size: 512, radius: 0, inset: 0.6 },
+  { file: 'apple-touch-icon.png', size: 180, radius: 0, inset: 0.8 },
+];
+
+for (const { file, ...opts } of VARIANTS) {
+  const png = await icono(opts);
+  await writeFile(join(publicDir, file), png);
+  console.log(`✓ public/${file} (${opts.size}×${opts.size}, ${png.length} bytes)`);
 }
