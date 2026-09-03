@@ -38,6 +38,13 @@ _sync_lock = threading.Lock()
 # primera vez que alguien espera en él.
 _semaphores: dict[int, asyncio.Semaphore] = {}
 
+# Endpoint por defecto, explícito a propósito. Con `base_url=None` el SDK lee
+# OPENAI_BASE_URL del entorno por su cuenta Y acepta la cadena vacía como URL
+# (medido: `OPENAI_BASE_URL=` deja base_url='' y entonces TODA llamada falla).
+# Pasándolo explícito, el endpoint depende solo de settings.openai_base_url,
+# que es una sola puerta y se ve en /api/health.
+_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
 
 def _loop_key() -> int:
     try:
@@ -56,6 +63,7 @@ def get_async_client() -> AsyncOpenAI:
         settings = get_settings()
         client = AsyncOpenAI(
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url or _DEFAULT_BASE_URL,
             timeout=settings.openai_timeout_s,
             max_retries=settings.openai_max_retries,
         )
@@ -71,6 +79,7 @@ def get_sync_client() -> OpenAI:
             settings = get_settings()
             _sync_client = OpenAI(
                 api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url or _DEFAULT_BASE_URL,
                 timeout=settings.openai_timeout_s,
                 max_retries=settings.openai_max_retries,
             )

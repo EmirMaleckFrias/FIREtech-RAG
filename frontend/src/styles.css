@@ -3,7 +3,8 @@
    --------------------------------------------------------------------------
    Lenguaje: calma, denso en calidad, minimal. Neutros cálidos con un único
    acento rojo FIREtech usado con moderación. Light y dark de primera clase
-   vía prefers-color-scheme.
+   vía [data-theme] en <html>, que escribe src/lib/theme.ts: por defecto
+   sigue al sistema, y se puede forzar en Ajustes → Mi cuenta → Apariencia.
 
    Índice:
      1. Tokens de diseño (light / dark)
@@ -29,7 +30,8 @@
    ---------------------------------------------------------------------- */
 
 :root {
-  color-scheme: light dark;
+  /* El tema efectivo lo fija [data-theme]; ver :root[data-theme='dark']. */
+  color-scheme: light;
 
   /* superficies (neutros cálidos) */
   --bg: #fafaf9;
@@ -100,52 +102,61 @@
     monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #101010;
-    --surface: #171717;
-    --elevated: #1f1f1f;
-    --sidebar-bg: #0b0b0b;
-    --inset: #1d1d1c;
-    --border: rgba(255, 255, 255, 0.09);
-    --border-strong: rgba(255, 255, 255, 0.17);
-    --hover: rgba(255, 255, 255, 0.06);
-    --active: rgba(255, 255, 255, 0.1);
+/* Tema oscuro. Cuelga de [data-theme] y NO de una media query: el tema
+   puede venir del sistema o elegirse en Ajustes -> Mi cuenta, y quien lo
+   resuelve es src/lib/theme.ts, que escribe data-theme en <html> siempre.
+   Hacerlo asi deja esta paleta en un solo sitio; con la media query harian
+   falta dos copias identicas y acabarian desincronizandose. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
 
-    --text: #ededec;
-    --text-2: #a3a3a0;
-    --text-3: #6f6f6c;
+  --bg: #101010;
+  --surface: #171717;
+  --elevated: #1f1f1f;
+  --sidebar-bg: #0b0b0b;
+  --inset: #1d1d1c;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.17);
+  --hover: rgba(255, 255, 255, 0.06);
+  --active: rgba(255, 255, 255, 0.1);
 
-    /* rojo FIREtech aclarado: ~6.3:1 sobre #101010 (AA para texto normal) */
-    --accent: #ff5a63;
-    --accent-strong: #ff747c;
-    --accent-contrast: #2b060a;
-    --accent-soft: rgba(255, 90, 99, 0.1);
-    --accent-soft-2: rgba(255, 90, 99, 0.18);
-    --accent-border: rgba(255, 90, 99, 0.42);
-    --chip-text: #ff8087;
+  /* Placa clara para los logos PNG de marca. Solo existe en oscuro: ver
+     .brand-logo en el @media de abajo. */
+  --logo-plate: #f4f3f1;
 
-    --green: #4ade80;
-    --red: #f87171;
-    --amber: #f59e0b;
-    --gray-dot: #57534e;
+  --text: #ededec;
+  --text-2: #a3a3a0;
+  --text-3: #6f6f6c;
 
-    --user-bubble: #1f1f1e;
-    --code-bg: rgba(255, 255, 255, 0.065);
+  /* rojo FIREtech aclarado: ~6.3:1 sobre #101010 (AA para texto normal) */
+  --accent: #ff5a63;
+  --accent-strong: #ff747c;
+  --accent-contrast: #2b060a;
+  --accent-soft: rgba(255, 90, 99, 0.1);
+  --accent-soft-2: rgba(255, 90, 99, 0.18);
+  --accent-border: rgba(255, 90, 99, 0.42);
+  --chip-text: #ff8087;
 
-    --shadow-soft:
-      0 1px 2px rgba(0, 0, 0, 0.3),
-      0 2px 8px rgba(0, 0, 0, 0.25);
-    --shadow-float:
-      0 1px 2px rgba(0, 0, 0, 0.4),
-      0 4px 14px rgba(0, 0, 0, 0.35),
-      0 14px 36px rgba(0, 0, 0, 0.3);
-    --shadow-overlay: 0 10px 44px rgba(0, 0, 0, 0.6);
-    --shadow-lift:
-      0 2px 6px rgba(0, 0, 0, 0.45),
-      0 8px 22px rgba(0, 0, 0, 0.4),
-      0 18px 44px rgba(0, 0, 0, 0.38);
-  }
+  --green: #4ade80;
+  --red: #f87171;
+  --amber: #f59e0b;
+  --gray-dot: #57534e;
+
+  --user-bubble: #1f1f1e;
+  --code-bg: rgba(255, 255, 255, 0.065);
+
+  --shadow-soft:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 2px 8px rgba(0, 0, 0, 0.25);
+  --shadow-float:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 4px 14px rgba(0, 0, 0, 0.35),
+    0 14px 36px rgba(0, 0, 0, 0.3);
+  --shadow-overlay: 0 10px 44px rgba(0, 0, 0, 0.6);
+  --shadow-lift:
+    0 2px 6px rgba(0, 0, 0, 0.45),
+    0 8px 22px rgba(0, 0, 0, 0.4),
+    0 18px 44px rgba(0, 0, 0, 0.38);
 }
 
 /* ----------------------------------------------------------------------
@@ -505,6 +516,27 @@ textarea {
 .welcome-logos .brand-logo-project {
   width: 174px;
   height: 68px;
+}
+
+/* Los dos logos de marca son PNG de tinta oscura: el azul marino de AI
+   ROBOTIX (rgb(30,57,138)) y el morado de Alzheimer Project (rgb(89,49,136)).
+   Sobre --sidebar-bg del tema oscuro (#0b0b0b) dan 1.89:1 y 2.08:1, por
+   debajo del minimo 3:1 que pide WCAG para graficos, y por eso se ven
+   apagados. Se les pone la placa clara en vez de aclararlos con un filter,
+   que les cambiaria el color de marca.
+   Ademas arregla los bordes: los dos se muestran muy reducidos (6.3x y 8.3x),
+   asi que el antialiasing deja mucho pixel a medio alfa, y sobre un fondo casi
+   negro esos pixeles se componen hacia el negro y ensucian los trazos finos.
+   Sobre la placa se componen contra el fondo claro para el que se dibujaron.
+   `content-box` es a proposito: el resto de la hoja va en border-box, y con el
+   los tamanos declarados arriba (y los del @media de 820px) seguirian siendo
+   la caja exterior, de modo que el padding encogeria el logo. Asi la placa
+   crece hacia fuera y el logo se ve del mismo tamano en todos los anchos. */
+:root[data-theme='dark'] .brand-logo {
+  box-sizing: content-box;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--logo-plate);
 }
 
 /* placa FIREtech: wordmark tipográfico al estilo del logo real: texto
@@ -3371,6 +3403,173 @@ button.user-row:active {
   color: var(--text);
 }
 
+/* Informe de atribución (VerificationBadge).
+   Usa --green/--red/--amber, que ya están definidos en los DOS temas, así que
+   no hace falta ninguna regla [data-theme] aquí. Los fondos se derivan con
+   color-mix del propio token: así el contraste acompaña al tema en vez de
+   quedar fijado a un rgba pensado para uno solo. */
+.verif {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12.5px;
+}
+
+.verif-vacia {
+  padding: 7px 10px;
+  color: var(--text-3);
+}
+
+.verif-limpio {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--border));
+}
+
+.verif-con-avisos {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: color-mix(in srgb, var(--amber) 6%, transparent);
+}
+
+.verif-cabecera {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verif-limpio .verif-cabecera svg {
+  color: var(--green);
+}
+
+.verif-con-avisos .verif-cabecera svg {
+  color: var(--amber);
+}
+
+.verif-resumen {
+  flex: 1;
+  min-width: 0;
+}
+
+.verif-flecha {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-3);
+  transition: transform 0.15s ease;
+}
+
+.verif-flecha-abierta {
+  transform: rotate(180deg);
+}
+
+/* El verificador no pudo dictaminar: se dice, no se disimula. */
+.verif-nota {
+  margin: 0;
+  padding: 0 10px 7px;
+  color: var(--amber);
+}
+
+.verif-lista {
+  margin: 0;
+  padding: 0 10px 9px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.verif-item {
+  display: flex;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.verif-veredicto {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  align-self: flex-start;
+}
+
+.verif-ok .verif-veredicto {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  color: var(--green);
+}
+
+.verif-parcial .verif-veredicto,
+.verif-aviso .verif-veredicto {
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  color: var(--amber);
+}
+
+.verif-mal .verif-veredicto {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  color: var(--red);
+}
+
+.verif-texto {
+  min-width: 0;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.verif-cita {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.verif-motivo {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-3);
+  font-style: italic;
+}
+
+/* Apariencia (Ajustes -> Mi cuenta). Reaprovecha .modo-item, que ya resuelve
+   la fila de opcion con nombre, ayuda y check; aqui solo se ajusta el ancho y
+   el marcado del elegido, porque un radiogroup si tiene estado visible en
+   reposo (el menu de modo solo existe abierto). */
+.account-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+
+.tema-opciones {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tema-opcion {
+  border: 1px solid transparent;
+}
+
+.tema-opcion[aria-checked='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.tema-opcion[aria-checked='true']:hover {
+  background: var(--accent-soft-2);
+}
+
 .account-form {
   gap: 11px;
 }
@@ -4194,7 +4393,7 @@ button.doc-badge-failed:active {
 /* cerrar sesión ya no vive en el pie del sidebar: está en Ajustes > Mi
    cuenta (.settings-signout, §12c), en un solo sitio para todos los roles */
 
-/* --- documentos en solo lectura (rol vendedor) --- */
+/* --- documentos en solo lectura (rol lector) --- */
 .docs-readonly-note {
   display: flex;
   align-items: center;

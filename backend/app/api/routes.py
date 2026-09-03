@@ -55,6 +55,10 @@ def _runtime_config() -> dict:
         "bm25_backend": bm25_backend(),
         "model": settings.openai_model,
         "rerank_model": settings.rerank_model_resolved,
+        # A qué endpoint se habla de verdad. Con un gateway compatible por
+        # delante, los nombres de modelo van prefijados y el coste se factura
+        # en otro sitio: verlo aquí evita diagnosticar a ciegas.
+        "api_endpoint": settings.openai_base_url or "https://api.openai.com/v1",
         # El presupuesto efectivo de cada modo, ya con el techo del despliegue
         # aplicado: `max_hops` a secas no diria nada porque 0 significa "manda
         # el modo", y cada modo tiene el suyo.
@@ -385,7 +389,7 @@ async def chat(
             async for ev in run_agent(body.message, history, perfil.nombre):
                 if ev.type == "final":
                     final = ev.data
-                else:  # hop | sources | token → passthrough al contrato SSE
+                else:  # plan | hop | sources | token | verificacion → passthrough SSE
                     if ev.type == "token":
                         partial_tokens.append(ev.data.get("text") or "")
                     elif ev.type == "sources":

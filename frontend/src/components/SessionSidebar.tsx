@@ -25,7 +25,7 @@ interface SessionSidebarProps {
 
 const ROLE_LABEL: Record<UserRole, string> = {
   admin: 'Administrador',
-  vendedor: 'Vendedor',
+  vendedor: 'Lector',
 };
 
 /** Etiqueta de grupo por fecha relativa, estilo ChatGPT/Claude. */
@@ -172,7 +172,7 @@ export function SessionSidebar({
             <span>Documentos</span>
           </button>
 
-          {/* Ajustes es para todos: dentro, un vendedor solo ve "Mi cuenta"
+          {/* Ajustes es para todos: dentro, un lector solo ve "Mi cuenta"
               (contraseña y cierre de sesión) y un admin además Usuarios y
               Sistema */}
           <button

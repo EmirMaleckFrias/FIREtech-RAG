@@ -47,6 +47,8 @@ CACHE_MAX_ENTRIES = 512
 # responde. Nunca se usa cuando la verificación funciona.
 STALE_GRACE_SECONDS = 1800.0
 
+# Identificador almacenado. Sigue siendo "vendedor" hasta que se aplique
+# 009_rol_lector.sql; la UI ya lo muestra como "Lector".
 _DEFAULT_ROLE = "vendedor"  # menos privilegio si el perfil aún no existe
 
 # Usuario ficticio para desarrollo local SIN credenciales de Supabase:

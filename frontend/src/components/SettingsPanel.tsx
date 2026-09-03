@@ -3,7 +3,7 @@
 // asa en móvil, focus trap, Escape cierra) con una fila de pestañas dentro.
 //
 // Decisiones:
-// - Visibilidad por rol: un vendedor solo tiene "Mi cuenta" y ni siquiera se
+// - Visibilidad por rol: un lector solo tiene "Mi cuenta" y ni siquiera se
 //   monta la pestaña de usuarios ni la de sistema, así que sus endpoints de
 //   admin (GET /api/users, GET /api/stats) nunca se llaman desde su sesión.
 // - Solo se monta el contenido de la pestaña activa, pero sigue montado con
@@ -38,9 +38,11 @@ import {
 import { deleteUser, fetchStats, fetchUsers, setUserBlocked, updateUserRole } from '../api';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import { updatePassword } from '../lib/session';
+import { aplicarTema, guardarTema, leerTema, type Tema } from '../lib/theme';
 import type { AdminStats, UserAccount, UserRole } from '../types';
 import {
   IconAlert,
+  IconCheck,
   IconChevronDown,
   IconLock,
   IconLogout,
@@ -55,6 +57,13 @@ import {
 type SettingsTab = 'usuarios' | 'sistema' | 'cuenta';
 
 const NOTICE_MS = 3_200;
+
+/** Opciones de apariencia, en el orden en que se muestran. */
+const TEMAS: { valor: Tema; etiqueta: string; ayuda: string }[] = [
+  { valor: 'sistema', etiqueta: 'Automático', ayuda: 'Sigue la apariencia de tu sistema' },
+  { valor: 'claro', etiqueta: 'Claro', ayuda: 'Siempre en claro' },
+  { valor: 'oscuro', etiqueta: 'Oscuro', ayuda: 'Siempre en oscuro' },
+];
 /** Mínimo que exige el producto para una contraseña nueva. */
 const MIN_PASSWORD = 8;
 
@@ -64,7 +73,9 @@ const FOCUSABLE_SELECTOR =
 
 const ROLE_LABEL: Record<UserRole, string> = {
   admin: 'Administrador',
-  vendedor: 'Vendedor',
+  // El identificador es `vendedor` (ver UserRole en types.ts); lo que se
+  // muestra ya es "Lector", que es lo que pidio el producto.
+  vendedor: 'Lector',
 };
 
 /** Miles con separador español (1.234). */
@@ -154,7 +165,7 @@ function confirmPrompt(action: RowAction, user: UserAccount): { question: string
   switch (action) {
     case 'demote':
       return {
-        question: '¿Quitarle el rol de administrador? Seguirá entrando como vendedor.',
+        question: '¿Quitarle el rol de administrador? Seguirá entrando como lector.',
         verb: 'Quitar',
       };
     case 'block':
@@ -881,6 +892,11 @@ interface AccountTabProps {
 }
 
 function AccountTab({ userEmail, role, onSignOut }: AccountTabProps) {
+  // El tema vive en el DOM (data-theme en <html>), no en el arbol de React:
+  // este estado es solo para pintar cual esta marcado. Se lee de
+  // localStorage al montar, asi que refleja la eleccion real aunque el panel
+  // se abra despues de una recarga.
+  const [tema, setTema] = useState<Tema>(() => leerTema());
   const [password, setPassword] = useState('');
   const [repeat, setRepeat] = useState('');
   const [busy, setBusy] = useState(false);
@@ -930,6 +946,36 @@ function AccountTab({ userEmail, role, onSignOut }: AccountTabProps) {
           <span className={`sidebar-role sidebar-role-${role}`}>{ROLE_LABEL[role]}</span>
         )}
       </div>
+
+      <section className="account-section">
+        <h3 className="stats-title">Apariencia</h3>
+        <div className="tema-opciones" role="radiogroup" aria-label="Apariencia">
+          {TEMAS.map((t) => (
+            <button
+              key={t.valor}
+              type="button"
+              role="radio"
+              aria-checked={tema === t.valor}
+              className="modo-item tema-opcion"
+              onClick={() => {
+                setTema(t.valor);
+                guardarTema(t.valor);
+                aplicarTema(t.valor);
+              }}
+            >
+              <span className="modo-item-texto">
+                <span className="modo-item-nombre">{t.etiqueta}</span>
+                <span className="modo-item-ayuda">{t.ayuda}</span>
+              </span>
+              {tema === t.valor && (
+                <span className="modo-item-check" aria-hidden="true">
+                  <IconCheck size={14} />
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </section>
 
       <form className="auth-form account-form" onSubmit={(e) => void handleSubmit(e)} noValidate>
         <h3 className="stats-title">Cambiar contraseña</h3>
@@ -1008,7 +1054,7 @@ function AccountTab({ userEmail, role, onSignOut }: AccountTabProps) {
 interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
-  /** Rol de GET /api/me; null mientras no se conoce (se asume vendedor). */
+  /** Rol de GET /api/me; null mientras no se conoce (se asume lector). */
   role: UserRole | null;
   /** id del usuario de la sesión: su fila se marca "Tú" y no tiene acción. */
   currentUserId: string | null;
@@ -1032,7 +1078,7 @@ export function SettingsPanel({
   const closeBtnRef = useRef<HTMLButtonElement>(null);
 
   // El rol llega asíncrono (GET /api/me) y puede cambiar de usuario: la
-  // pestaña por defecto se recalcula al conocerlo, y un vendedor nunca se
+  // pestaña por defecto se recalcula al conocerlo, y un lector nunca se
   // queda mirando una pestaña de admin.
   useEffect(() => {
     setTab(role === 'admin' ? 'usuarios' : 'cuenta');
@@ -1106,7 +1152,7 @@ export function SettingsPanel({
           </button>
         </div>
 
-        {/* un vendedor solo tiene "Mi cuenta": sin fila de pestañas */}
+        {/* un lector solo tiene "Mi cuenta": sin fila de pestañas */}
         {isAdmin && (
           <div className="auth-tabs settings-tabs" role="tablist" aria-label="Secciones de ajustes">
             {tabs.map((t) => (

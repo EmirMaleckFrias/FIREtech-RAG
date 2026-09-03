@@ -31,3 +31,5 @@ backend/evals/results/
 .DS_Store
 Thumbs.db
 .vscode/
+# Reportes de evaluación pueden contener preguntas o respuestas sensibles.
+backend/evals/results/

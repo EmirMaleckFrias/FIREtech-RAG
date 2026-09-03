@@ -40,6 +40,7 @@ variables del proyecto en Vercel en producción.
 | Variable | Default en código | Dónde vive | Notas |
 |---|---|---|---|
 | `OPENAI_API_KEY` | vacío | local `.env` y Vercel | Obligatoria. Sin ella el chat responde con error controlado |
+| `OPENAI_BASE_URL` | vacío | local `.env` y Vercel | Vacío = `api.openai.com`. Admite cualquier endpoint compatible con OpenAI (AI Gateway de Vercel: `https://ai-gateway.vercel.sh/v1`, clave `vck_...`). Con gateway, los tres modelos van prefijados: `openai/gpt-5.4`. El endpoint efectivo sale en `GET /api/health` como `api_endpoint` |
 | `OPENAI_MODEL` | `gpt-5.4` | local `.env` y Vercel | Modelo del agente |
 | `EMBEDDING_MODEL` | `text-embedding-3-large` | local `.env` y Vercel | Cambiarlo obliga a reindexar |
 | `EMBEDDING_DIMS` | `3072` | normalmente no se toca | Debe coincidir con el vector `dense` de la colección |
@@ -51,6 +52,7 @@ variables del proyecto en Vercel en producción.
 | `QDRANT_URL` | `http://localhost:6333` | local `.env` y Vercel | En Vercel apunta al cluster de Qdrant Cloud |
 | `QDRANT_API_KEY` | vacío | Vercel (local vacío) | Clave del cluster |
 | `QDRANT_COLLECTION` | `documentos` | local `.env` y Vercel | La colección `productos` del proyecto anterior sigue en su Qdrant y este backend ya no la mira |
+| `QDRANT_BM25_BACKEND` | `server` | local `.env` y Vercel | BM25 nativo de Qdrant; alternativas: `fastembed`, `auto`, `disabled`. Cambiarlo exige reindexar |
 | `SUPABASE_URL` | vacío | local `.env` y Vercel | Vacía en local = modo dev sin autenticación, persistencia en memoria |
 | `SUPABASE_SERVICE_KEY` | vacío | local `.env` y Vercel | Solo en el backend, jamás en el frontend |
 | `MAX_HOPS` | `0` | local `.env` y Vercel | Techo de búsquedas del despliegue. **0 = manda el perfil del modo** (normal 2, extendido sin tope). Estas tres variables son el techo de quien opera: solo pueden APRETAR el modo, nunca aflojarlo, para que un valor alto no convierta el modo normal en extendido sin que nadie lo pida |
@@ -123,9 +125,9 @@ Lo que conviene saber al desplegar:
 - `api/requirements.txt` es el de `backend/` sin `uvicorn` ni `fastembed`. Hoy usa rangos
   (`>=`); los pins exactos están pendientes de confirmar con un deploy de preview antes de
   fijarlos, para no romper producción con una versión que no se probó.
-- `fastembed` queda fuera del bundle a propósito: arrastra `onnxruntime` (unos 200 MB) y no cabe
-  en la función. Por eso producción es dense-only. `retrieval` en `/api/health` lo dice tal
-  cual: `hybrid` solo si BM25 funciona, si no `dense-only`.
+- `fastembed` queda fuera del bundle a propósito: arrastra `onnxruntime` (unos 200 MB). Con
+  `QDRANT_BM25_BACKEND=server`, el cluster calcula BM25 y producción conserva recuperación
+  híbrida. `retrieval` solo dice `hybrid` después de comprobar el cluster.
 - Variables de entorno: las de la tabla de la sección 2. Tras cambiarlas, redeploy.
 - Comprobación mínima después de cada deploy: `GET /api/health` responde `qdrant: true`, y el
   `python`, `retrieval` y `prompt_version` que esperabas.

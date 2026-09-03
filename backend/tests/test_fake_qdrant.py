@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
+from app.config import get_settings
+from app.models import SearchFilters
 from app.services import qdrant
 
 
@@ -74,6 +78,8 @@ def test_retrieval_mode_fuerza_la_carga_de_bm25(settings_override, monkeypatch):
     # del modelo fallara después: ahora la fuerza y refleja lo que hará hybrid_search.
     monkeypatch.setattr(qdrant, "_bm25_model", None)
     monkeypatch.setattr(qdrant, "_bm25_failed", False)
+    monkeypatch.setenv("QDRANT_BM25_BACKEND", "fastembed")
+    get_settings.cache_clear()
 
     def _falla():
         raise RuntimeError("modelo no descargable")
@@ -91,6 +97,48 @@ def test_retrieval_mode_fuerza_la_carga_de_bm25(settings_override, monkeypatch):
     monkeypatch.setattr(qdrant, "_bm25_model", None)
     monkeypatch.setattr(qdrant, "_make_bm25", None)
     assert qdrant.retrieval_mode() == "dense-only"
+
+
+def test_bm25_nativo_se_verifica_y_se_usa_al_ingerir(
+    settings_override, fake_qdrant, monkeypatch
+):
+    monkeypatch.setenv("QDRANT_BM25_BACKEND", "server")
+    get_settings.cache_clear()
+    monkeypatch.setattr(qdrant, "_server_bm25_checked", False)
+    monkeypatch.setattr(qdrant, "_server_bm25_failed", False)
+
+    assert qdrant.retrieval_mode() == "hybrid"
+    assert qdrant.bm25_backend() == "qdrant-server"
+
+    qdrant.upsert_chunks([{
+        "id": "1", "dense": [0.1, 0.2], "text": "beta amiloide",
+        "source_file": "a.pdf", "page": 1,
+    }])
+    point = fake_qdrant.calls_to("upsert")[0]["points"][0]
+    sparse = point.vector["bm25"]
+    assert sparse.text == "beta amiloide"
+    assert sparse.model == "qdrant/bm25"
+
+
+@pytest.mark.asyncio
+async def test_busqueda_nativa_fusiona_dense_y_bm25(
+    settings_override, fake_qdrant, monkeypatch
+):
+    monkeypatch.setenv("QDRANT_BM25_BACKEND", "server")
+    get_settings.cache_clear()
+    monkeypatch.setattr(qdrant, "_server_bm25_checked", True)
+    monkeypatch.setattr(qdrant, "_server_bm25_failed", False)
+
+    async def _dense(_query):
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(qdrant, "embed_query", _dense)
+    await qdrant.hybrid_search("APOE4", SearchFilters(), top_k=8)
+
+    call = fake_qdrant.calls_to("query_points")[-1]
+    assert len(call["prefetch"]) == 2
+    assert call["prefetch"][1].query.text == "APOE4"
+    assert call["prefetch"][1].query.model == "qdrant/bm25"
 
 
 def test_el_payload_es_una_lista_blanca(settings_override, fake_qdrant):
@@ -117,3 +165,17 @@ def test_el_payload_es_una_lista_blanca(settings_override, fake_qdrant):
     assert punto.payload["text"] == "hola"
     assert punto.payload["page"] == 3
     assert punto.payload["language"] is None  # no lo puso el parser
+
+
+def test_swap_de_version_borra_solo_los_puntos_anteriores(
+    settings_override, fake_qdrant
+):
+    qdrant.delete_old_versions("paper.pdf", "sha-nuevo")
+
+    call = fake_qdrant.calls_to("delete")[0]
+    selector = call["points_selector"]
+    assert selector.filter.must[0].key == "source_file"
+    assert selector.filter.must[0].match.value == "paper.pdf"
+    assert selector.filter.must_not[0].key == "document_version"
+    assert selector.filter.must_not[0].match.value == "sha-nuevo"
+    assert call["wait"] is True

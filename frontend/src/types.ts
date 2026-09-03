@@ -11,7 +11,15 @@ export interface Health {
   upload_limit_mb?: number;
 }
 
-/** Roles de negocio (profiles.role). `vendedor` solo consulta. */
+/** Roles de negocio (profiles.role).
+ *
+ * OJO con el desajuste, es deliberado y temporal: el identificador almacenado
+ * sigue siendo `vendedor` porque la base solo acepta admin/vendedor hasta que
+ * se aplique supabase/migrations/009_rol_lector.sql, y hoy nadie del equipo
+ * tiene acceso al proyecto de Supabase para correrla. Lo que el usuario LEE ya
+ * es "Lector" (ver ROLE_LABEL). No renombres el identificador a `lector` antes
+ * de aplicar 009: el check constraint rechazaría la escritura y el boton de
+ * degradar en Ajustes fallaria. */
 export type UserRole = 'admin' | 'vendedor';
 
 /** Identidad del usuario del token, tal como la devuelve GET /api/me. */
@@ -116,6 +124,39 @@ export interface ServerMessage {
 }
 
 /** Mensaje en el estado local del chat (incluye estado de streaming y feedback). */
+/** Veredicto de una afirmación frente al fragmento que citó.
+ *
+ * `sin_verificar` es el estado por defecto del backend y NO significa
+ * "correcta": significa que nadie la comprobó (modelo caído, JSON inválido o
+ * respuesta por encima del tope). Pintarlo como aprobado sería exactamente el
+ * fallo que el verificador existe para evitar. */
+export type Veredicto =
+  | 'sostenida'
+  | 'parcial'
+  | 'no_sostenida'
+  | 'cita_no_resuelve'
+  | 'sin_verificar';
+
+export interface Afirmacion {
+  texto: string;
+  cita: string;
+  veredicto: Veredicto;
+  motivo: string;
+  fragmento_id: string;
+}
+
+/** Informe de atribución de una respuesta (evento SSE `verificacion`). */
+export interface Verificacion {
+  afirmaciones: Afirmacion[];
+  evidencia_sin_cubrir: string[];
+  /** Citas que no corresponden a ningún fragmento recuperado. El fallo grave. */
+  citas_sin_resolver: string[];
+  /** Proporción de sostenidas sobre las juzgadas. null = no se juzgó ninguna. */
+  fidelidad: number | null;
+  ok: boolean;
+  nota: string;
+}
+
 export interface ChatMessage {
   /** Clave estable local (los mensajes en streaming aún no tienen id de servidor). */
   localId: string;
@@ -125,6 +166,8 @@ export interface ChatMessage {
   content: string;
   sources: Source[];
   hops: Hop[];
+  /** Informe del verificador. null mientras no llega o si está desactivado. */
+  verificacion: Verificacion | null;
   streaming: boolean;
   error: string | null;
   feedback: 1 | -1 | null;

@@ -20,12 +20,10 @@ arrancarlo.
 
 ## 1. Qué hace, con sus asteriscos
 
-- **Recuperación híbrida dense + BM25 con fusión RRF en Qdrant... en local.**
-  En **producción es dense-only**. `fastembed` arrastra `onnxruntime` (unos 200 MB) y no cabe
-  en el límite de 250 MB de la función de Vercel, así que se excluyó del bundle serverless
-  (ver `api/requirements.txt`). Los vectores sparse existen en el índice, pero producción no
-  los consulta. El modo vigente se expone como `retrieval` en `GET /api/health` y en el
-  bloque `config` de `GET /api/stats`, para que la degradación sea visible y no folclore.
+- **Recuperación híbrida dense + BM25 con fusión RRF en Qdrant.** El backend recomendado
+  (`QDRANT_BM25_BACKEND=server`) delega BM25 al cluster, por lo que funciona en local y en
+  Vercel sin cargar `fastembed`/`onnxruntime` en la función. El arranque prueba la capacidad
+  real del cluster; si falta, `retrieval` muestra `dense-only` en vez de ocultar la degradación.
 - **Reranking listwise con LLM**: top-30 de Qdrant, una sola llamada JSON, corte a top-8.
   Si el JSON falla, se conserva el orden de Qdrant.
 - **Filtro de relevancia con tres estados**, que es lo que permite responder "no encuentro
@@ -70,7 +68,7 @@ arrancarlo.
   prueba), las marcas de agua de descarga y las cabeceras y pies repetidos en cada página.
   Cuando algo no se puede extraer con confianza queda vacío y se cita el archivo: nunca se
   fabrica una referencia.
-- **Autenticación multiusuario (Supabase Auth) con roles** `admin` y `vendedor`. Un admin puede
+- **Autenticación multiusuario (Supabase Auth) con roles** `admin` y `lector`. Un admin puede
   promover, degradar, **bloquear** (revoca acceso sin borrar nada) o **eliminar** cuentas.
   Nadie puede cambiarse, bloquearse ni borrarse a sí mismo.
 - **Conversaciones estrictamente privadas**: ningún usuario ve las de otro, **tampoco un admin**.
@@ -116,8 +114,7 @@ arrancarlo.
 
 ### Requisitos
 
-- Python 3.12+ (probado en 3.14; `fastembed` solo se instala en < 3.15, y sin él la búsqueda
-  local también cae a dense-only)
+- Python 3.12+ (`fastembed` es opcional; BM25 nativo de Qdrant es el backend recomendado)
 - Node 20+
 - Docker (para Qdrant local)
 - Una `OPENAI_API_KEY` y un proyecto de Supabase
@@ -149,6 +146,7 @@ copy .env.example .env
 | `PROMPT_VERSION` | Etiqueta del prompt del agente (`v1`); viaja en health, stats y telemetría. |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `http://localhost:6333` y clave vacía en local. |
 | `QDRANT_COLLECTION` | `documentos`. |
+| `QDRANT_BM25_BACKEND` | `server` recomendado; `fastembed`, `auto` o `disabled`. Cambiarlo exige reindexar. |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | **Obligatorias para autenticación real.** Son las que sostienen el login, los roles y toda la persistencia. La service key vive solo en el backend. |
 | `MAX_HOPS` | Techo de búsquedas del despliegue; `0` = manda el modo (normal 2, extendido sin tope). Solo puede apretar el perfil, nunca aflojarlo. |
 | `AGENT_BUDGET_S` / `AGENT_MAX_HOPS_SIN_AVANCE` | Los otros dos techos: 240 s de reloj y 3 búsquedas sin nada nuevo. |
@@ -177,7 +175,7 @@ cualquier llamada.
 | `006_documentos_por_entorno.sql` | Unicidad por `(file_name, environment)`. |
 | `007_revocar_acceso_directo.sql` | Revoca privilegios de `anon` y `authenticated` sobre `public`: a las tablas solo entra el backend con la service key. |
 
-El primer usuario `emir.malek@airobotix.net` nace `admin`; el resto nace `vendedor`.
+El primer usuario `emir.malek@airobotix.net` nace `admin`; el resto nace `lector`.
 
 ### 5. Ingesta de documentos
 
@@ -240,15 +238,17 @@ ingesta por carpetas (incluido que el dry-run no pueda tocar servicios externos)
   la app ASGI de FastAPI, streaming SSE incluido (`maxDuration` 300 s, 1024 MB).
 - Rewrites: `/api/*` a la función y todo lo demás a `index.html` (SPA).
 - `api/requirements.txt` es el de backend **sin `uvicorn`** (el runtime sirve la app ASGI) y
-  **sin `fastembed`** (no cabe en la función; de ahí el dense-only). Los pins exactos están
+  **sin `fastembed`** (no cabe en la función; BM25 se calcula en Qdrant). Los pins exactos están
   pendientes de confirmar con un deploy de preview.
 - `.python-version` en la raíz fija el runtime de la función en **3.12**; el venv local sigue
   en 3.14.
 - `.vercelignore` mantiene el bundle pequeño y evita que datos o secretos suban.
 
-Variables de entorno en Vercel: `OPENAI_API_KEY`, `OPENAI_MODEL`, `EMBEDDING_MODEL`,
+Variables de entorno en Vercel: `OPENAI_API_KEY`, `OPENAI_BASE_URL` (vacío = OpenAI
+directo; con el AI Gateway de Vercel los modelos van como `openai/gpt-5.4`), `OPENAI_MODEL`, `EMBEDDING_MODEL`,
 `RERANK_MODEL` (recomendado `gpt-5.4-mini`), `OPENAI_TIMEOUT_S`, `OPENAI_MAX_RETRIES`,
 `OPENAI_CONCURRENCY`, `PROMPT_VERSION`, `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION`,
+`QDRANT_BM25_BACKEND`,
 `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `MAX_HOPS`, `ENVIRONMENT=production`, y para el build
 del frontend `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`. Tras cambiar una, redeploy; el
 valor vigente se comprueba en `GET /api/health`.
@@ -264,9 +264,9 @@ de Qdrant más el registro en Supabase.
 
 ## 5. Decisiones y limitaciones conocidas
 
-- **Producción es dense-only.** Es la limitación grande y es permanente mientras el backend viva
-  en una función de Vercel. Local sí usa híbrida con RRF, así que cualquier métrica de
-  recuperación medida en local no describe producción.
+- **BM25 nativo requiere un Qdrant compatible.** Tras desplegar hay que comprobar que
+  `/api/health` diga `retrieval: hybrid` y `bm25_backend: qdrant-server`. Un corpus indexado
+  antes de activar este backend debe reingerirse para poblar los vectores sparse.
 - **Subida de documentos: 4 MB en producción, 25 MB en local.** Vercel corta cualquier body
   mayor a 4.5 MB con un 413 antes de invocar la función. El límite vigente se expone en
   `GET /api/health` (`upload_limit_mb`) y el frontend anuncia el valor real.

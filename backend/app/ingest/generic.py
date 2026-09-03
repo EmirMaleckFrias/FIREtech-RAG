@@ -74,6 +74,7 @@ def _base_chunk(
         "page": page,
         "project_id": None,
         "document_id": None,
+        "document_version": None,
         "section": section,
         "language": "",
         "document_type": Path(file_name).suffix.lower().lstrip(".") or "unknown",

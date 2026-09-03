@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     )
 
     openai_api_key: str = ""
+    # Endpoint del API. Vacío = api.openai.com, el default del SDK. Sirve para
+    # apuntar a cualquier endpoint compatible con OpenAI; el caso vigente es el
+    # AI Gateway de Vercel ("https://ai-gateway.vercel.sh/v1"), que factura por
+    # Vercel y nombra los modelos con el proveedor por delante. OJO: si se usa
+    # el gateway, los tres modelos de abajo llevan prefijo ("openai/gpt-5.4"),
+    # porque el nombre viaja tal cual en cada petición.
+    openai_base_url: str = ""
     openai_model: str = "gpt-5.4"
     embedding_model: str = "text-embedding-3-large"
     embedding_dims: int = 3072
@@ -39,6 +46,11 @@ class Settings(BaseSettings):
     # Colección de documentos. La colección del proyecto anterior se queda
     # intacta en su Qdrant: este backend ya no la mira.
     qdrant_collection: str = "documentos"
+    # "server" usa el BM25 nativo de Qdrant y cabe en Vercel sin
+    # fastembed/onnxruntime. "fastembed" conserva el backend local antiguo;
+    # "auto" prueba servidor y luego fastembed; "disabled" fuerza dense-only.
+    # Cambiar de implementación requiere reindexar el corpus.
+    qdrant_bm25_backend: str = "server"
 
     supabase_url: str = ""
     supabase_service_key: str = ""
@@ -61,6 +73,22 @@ class Settings(BaseSettings):
     # Búsquedas seguidas sin traer ni un fragmento nuevo antes de rendirse.
     # Buscar más de lo mismo no acerca a la respuesta, solo gasta.
     agent_max_hops_sin_avance: int = 3
+    # El modo extendido descompone la pregunta y ejecuta estas búsquedas antes
+    # de redactar. Se puede apagar como rollback operativo sin cambiar código.
+    enable_query_planning: bool = True
+    planner_max_queries: int = 5
+    # Verificación de la respuesta final, afirmación por afirmación, contra los
+    # fragmentos recuperados (app/services/verificador.py). Es el requisito
+    # central del proyecto: una respuesta fluida con una cita que no sostiene
+    # lo dicho es un fallo grave en investigación médica. Se puede apagar como
+    # rollback operativo; entonces el sistema se comporta como antes.
+    enable_answer_verification: bool = True
+    # Modelo del verificador. Vacío = hereda rerank_model_resolved.
+    verifier_model: str = ""
+    # Tope de afirmaciones que se verifican en una respuesta. Existe para que
+    # una respuesta muy larga no dispare el coste ni el reloj; las que exceden
+    # el tope quedan declaradas como no verificadas, nunca como sostenidas.
+    verifier_max_claims: int = 24
     # Fragmentos que llegan al modelo por búsqueda, y candidatos que salen de
     # Qdrant antes de reordenar.
     rerank_top_k: int = 12
@@ -70,6 +98,10 @@ class Settings(BaseSettings):
     @property
     def rerank_model_resolved(self) -> str:
         return self.rerank_model or self.openai_model
+
+    @property
+    def verifier_model_resolved(self) -> str:
+        return self.verifier_model or self.rerank_model_resolved
 
     @property
     def cors_origins_list(self) -> list[str]:

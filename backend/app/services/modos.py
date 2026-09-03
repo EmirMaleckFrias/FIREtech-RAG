@@ -35,6 +35,13 @@ class Modo:
     max_hops_sin_avance: int
     # Fragmentos que llegan al modelo por búsqueda.
     fragmentos: int
+    # Si la pregunta se descompone en un plan de evidencia antes de buscar
+    # (app/services/planner.py). Vive aquí y no en Settings porque es parte de
+    # CÓMO trabaja el modo: normal va al grano con dos búsquedas y el plan solo
+    # le gastaría una de ellas; extendido existe justo para descomponer. El
+    # interruptor de despliegue es Settings.enable_query_planning, que puede
+    # apagarlo en los dos modos pero nunca encenderlo donde el modo dice no.
+    planifica: bool
     # `reasoning_effort` de la API. None = no se envía el parámetro.
     #
     # OJO, medido contra la API el 2 sep 2026: gpt-5.4 en /v1/chat/completions
@@ -59,6 +66,7 @@ NORMAL = Modo(
     # insistir: se responde con lo que haya.
     max_hops_sin_avance=1,
     fragmentos=8,
+    planifica=False,
     esfuerzo=None,
     instruccion=(
         "MODO ACTIVO: pensamiento normal, el que eligió quien pregunta. Ve al "
@@ -78,6 +86,7 @@ EXTENDIDO = Modo(
     budget_s=240.0,
     max_hops_sin_avance=3,
     fragmentos=12,
+    planifica=True,
     # Ver la nota del campo: con tools, la API lo rechaza con 400.
     esfuerzo=None,
     instruccion=(

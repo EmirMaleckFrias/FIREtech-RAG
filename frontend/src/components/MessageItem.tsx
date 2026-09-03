@@ -10,6 +10,7 @@ import {
   IconThumbDown,
   IconThumbUp,
 } from './icons';
+import { VerificationBadge } from './VerificationBadge';
 
 interface MessageItemProps {
   msg: ChatMessage;
@@ -122,6 +123,12 @@ export function MessageItem({
             <IconAlert size={15} />
             <span>{msg.error}</span>
           </div>
+        )}
+
+        {/* Informe de atribución. Solo con la respuesta cerrada: durante el
+            streaming el texto aún cambia y el veredicto llega después. */}
+        {!msg.streaming && msg.verificacion !== null && (
+          <VerificationBadge informe={msg.verificacion} />
         )}
 
         {!msg.streaming && (msg.id !== null || msg.sources.length > 0) && (

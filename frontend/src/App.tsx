@@ -68,6 +68,7 @@ function toChatMessage(server: ServerMessage): ChatMessage {
     content: server.content ?? '',
     sources: normalizeSources(server.sources),
     hops: [],
+    verificacion: null,
     streaming: false,
     error: null,
     feedback: null,
@@ -323,6 +324,7 @@ export default function App() {
             content: '',
             sources: [],
             hops: [],
+            verificacion: null,
             streaming: false,
             error: 'No se pudieron cargar los mensajes de esta conversación.',
             feedback: null,
@@ -370,6 +372,7 @@ export default function App() {
         content: trimmed,
         sources: [],
         hops: [],
+        verificacion: null,
         streaming: false,
         error: null,
         feedback: null,
@@ -381,6 +384,7 @@ export default function App() {
         content: '',
         sources: [],
         hops: [],
+        verificacion: null,
         streaming: true,
         error: null,
         feedback: null,
@@ -410,6 +414,9 @@ export default function App() {
             },
             onHop: (hop) => {
               updateMessage(assistantLocalId, (m) => ({ ...m, hops: [...m.hops, hop] }));
+            },
+            onVerificacion: (informe) => {
+              updateMessage(assistantLocalId, (m) => ({ ...m, verificacion: informe }));
             },
             onSources: (incoming) => {
               updateMessage(assistantLocalId, (m) => {

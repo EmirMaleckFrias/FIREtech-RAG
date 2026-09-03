@@ -3,7 +3,7 @@
 #   - sin uvicorn:   el runtime Python de Vercel sirve la app ASGI él mismo.
 #   - sin fastembed: arrastra onnxruntime (~200 MB) y reventaría el límite de
 #     250 MB de la función. app/services/qdrant.py ya trae guard de import y
-#     cae a búsqueda dense-only sin romper (verificado con import-hook).
+#     usa el BM25 nativo del servidor Qdrant sin aumentar el bundle.
 # openpyxl SÍ es necesario: documents.py importa app.ingest.pipeline →
 # parse_xlsx.py, que hace `import openpyxl` a nivel de módulo (y generic.py
 # lo usa para .xlsx subidos). pdfplumber ídem (parse.py, nivel de módulo).

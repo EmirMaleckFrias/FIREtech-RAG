@@ -9,13 +9,14 @@ lista de archivos.
   chunks y los tokens, y al final el COSTE ESTIMADO de los embeddings. Sirve
   para saber lo que va a costar antes de gastarlo.
 - Ingesta real: preflight de solo lectura (host de Qdrant sin credenciales,
-  colección, puntos, filas en Supabase) → por archivo: embed, borrar los
-  puntos anteriores de ese archivo, upsert, registrar en Supabase.
+  colección, puntos, filas en Supabase) → por archivo: parse acotado, embed,
+  upsert de la versión nueva, retiro de versiones anteriores y registro.
 
 Idempotencia: cada archivo se identifica por su sha256. Si ya está registrado
 con el mismo sha256, se salta sin embeber nada (`--force` lo reingesta igual).
-Reingerir un archivo cambiado borra sus puntos viejos antes de insertar, así
-que nunca quedan fragmentos huérfanos de una versión anterior.
+Reingerir un archivo cambiado hace un swap seguro por sha256: la versión vieja
+solo se retira después de confirmar la nueva, así un fallo no deja el documento
+sin ninguna versión consultable.
 
 Exit codes de `run_ingest`: 0 ok, 1 fallo, 2 abortado por una guarda del
 preflight (nada se tocó).
@@ -25,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -43,6 +45,42 @@ _EMBED_USD_PER_MTOK = 0.13
 
 # Carpeta por defecto de la ingesta por CLI.
 DEFAULT_DOCS_DIRNAME = "documentos"
+
+
+@dataclass(frozen=True)
+class FilePlan:
+    """Metadatos livianos del preanálisis; nunca retiene el texto del corpus."""
+
+    path: Path
+    sha256: str
+    pages: int
+    chunks: int
+    tokens: int
+
+
+def _inspect_files(files: list[Path]) -> tuple[list[FilePlan], list[tuple[Path, str]]]:
+    """Parsea para validar y estimar coste, descartando los chunks al terminar.
+
+    La versión anterior acumulaba en RAM todos los textos de todos los
+    archivos. Este preanálisis conserva solo cinco escalares por archivo; la
+    ingesta real vuelve a parsear uno por vez después de todas las guardas.
+    """
+    plans: list[FilePlan] = []
+    failures: list[tuple[Path, str]] = []
+    for path in files:
+        try:
+            chunks, pages = parse_generic(path, path.name)
+            tokens = sum(_est_tokens(c["text"]) for c in chunks)
+            plans.append(FilePlan(path, _sha256(path), pages, len(chunks), tokens))
+            print(
+                f"  {path.name}: {len(chunks)} fragmentos"
+                + (f" de {pages} páginas" if path.suffix.lower() == ".pdf" else "")
+                + f", {tokens} tokens estimados"
+            )
+        except Exception as exc:
+            failures.append((path, str(exc)))
+            print(f"  FALLO {path.name}: {exc}")
+    return plans, failures
 
 
 def _est_tokens(text: str) -> int:
@@ -203,38 +241,19 @@ def run_ingest(
 
     print(f"Archivos encontrados: {len(files)}")
 
-    # 1. Parse (sin servicios externos).
-    parsed: list[dict] = []
-    total_chunks = total_tokens = 0
-    failures: list[tuple[Path, str]] = []
-    for path in files:
-        try:
-            chunks, pages = parse_generic(path, path.name)
-        except Exception as exc:
-            failures.append((path, str(exc)))
-            print(f"  FALLO {path.name}: {exc}")
-            continue
-        tokens = sum(_est_tokens(c["text"]) for c in chunks)
-        for chunk in chunks:
-            chunk["project_id"] = project_id
-        parsed.append(
-            {"path": path, "chunks": chunks, "pages": pages, "tokens": tokens}
-        )
-        total_chunks += len(chunks)
-        total_tokens += tokens
-        print(
-            f"  {path.name}: {len(chunks)} fragmentos"
-            + (f" de {pages} páginas" if path.suffix.lower() == ".pdf" else "")
-            + f", {tokens} tokens estimados"
-        )
+    # 1. Preanálisis sin servicios externos. Solo conserva un manifiesto
+    # liviano: el corpus completo nunca queda simultáneamente en memoria.
+    plans, failures = _inspect_files(files)
+    total_chunks = sum(plan.chunks for plan in plans)
+    total_tokens = sum(plan.tokens for plan in plans)
 
-    if not parsed:
+    if not plans:
         print("\nNingún archivo se pudo parsear.")
         return 1
 
     coste = total_tokens / 1_000_000 * _EMBED_USD_PER_MTOK
     print(
-        f"\nTOTAL: {len(parsed)} archivos, {total_chunks} fragmentos, "
+        f"\nTOTAL: {len(plans)} archivos, {total_chunks} fragmentos, "
         f"{total_tokens} tokens estimados."
     )
     # Con pocos archivos el coste redondeado a céntimos es 0.00 y no dice
@@ -274,7 +293,7 @@ def run_ingest(
     from app.services import supabase_db
     from app.services.embeddings import embed_texts
     from app.services.qdrant import (
-        delete_by_file,
+        delete_old_versions,
         ensure_collection,
         get_client,
         upsert_chunks,
@@ -311,56 +330,83 @@ def run_ingest(
 
         total_points = 0
         saltados = 0
-        for data in parsed:
-            path: Path = data["path"]
-            chunks: list[dict] = data["chunks"]
-            sha256 = _sha256(path)
+        processing_failures: list[tuple[Path, str]] = []
+        for plan in plans:
+            path = plan.path
 
-            if not force and registrados.get(path.name) == sha256:
+            if not force and registrados.get(path.name) == plan.sha256:
                 saltados += 1
                 print(f"  {path.name}: sin cambios (mismo sha256), se salta.")
                 continue
 
-            print(f"Embebiendo {len(chunks)} chunks de {path.name} ...", flush=True)
-            vectors = embed_texts([c["text"] for c in chunks])
-            if len(vectors) != len(chunks):
-                raise RuntimeError(
-                    f"{path.name}: {len(vectors)} embeddings para "
-                    f"{len(chunks)} chunks"
+            try:
+                # Protección contra archivos modificados entre el preanálisis
+                # y la escritura: jamás registrar una versión con otro hash.
+                if _sha256(path) != plan.sha256:
+                    raise RuntimeError("el archivo cambió durante la ingesta; reintenta")
+
+                # Segundo parse deliberado, uno por vez. Duplica CPU, pero la
+                # memoria queda acotada al documento actual en corpus enormes.
+                chunks, pages = parse_generic(path, path.name)
+                for chunk in chunks:
+                    chunk["project_id"] = project_id
+                    chunk["document_version"] = plan.sha256
+
+                print(f"Embebiendo {len(chunks)} chunks de {path.name} ...", flush=True)
+                vectors = embed_texts([c["text"] for c in chunks])
+                if len(vectors) != len(chunks):
+                    raise RuntimeError(
+                        f"{path.name}: {len(vectors)} embeddings para {len(chunks)} chunks"
+                    )
+                for chunk, vec in zip(chunks, vectors):
+                    chunk["dense"] = vec
+
+                # Swap seguro por versión: la anterior sigue consultable si
+                # falla el upsert; se borra solo después de confirmar la nueva.
+                upserted = upsert_chunks(chunks)
+                delete_old_versions(path.name, plan.sha256)
+                total_points += upserted
+                print(f"  upserted {upserted} puntos.")
+
+                supabase_db.register_document(
+                    file_name=path.name,
+                    sha256=plan.sha256,
+                    pages=pages,
+                    chunks=len(chunks),
                 )
-            for chunk, vec in zip(chunks, vectors):
-                chunk["dense"] = vec
-
-            # Borrar antes de insertar: si el archivo ya estaba con otra
-            # versión, sus puntos viejos no deben sobrevivir.
-            delete_by_file(path.name)
-            upserted = upsert_chunks(chunks)
-            total_points += upserted
-            print(f"  upserted {upserted} puntos.")
-
-            supabase_db.register_document(
-                file_name=path.name,
-                sha256=sha256,
-                pages=data["pages"],
-                chunks=len(chunks),
-            )
-            run_stats["files"][path.name] = {
-                "pages": data["pages"],
-                "chunks": len(chunks),
-                "upserted": upserted,
-            }
+                run_stats["files"][path.name] = {
+                    "status": "ready",
+                    "pages": pages,
+                    "chunks": len(chunks),
+                    "upserted": upserted,
+                }
+            except Exception as exc:
+                logger.exception("Falló el archivo %s", path)
+                processing_failures.append((path, str(exc)))
+                run_stats["files"][path.name] = {
+                    "status": "failed",
+                    "error": str(exc)[:1000],
+                }
+                print(f"  FALLO {path.name}: {exc}")
+                continue
 
         run_stats["total_points"] = total_points
         run_stats["saltados"] = saltados
+        run_stats["parse_failures"] = len(failures)
+        run_stats["processing_failures"] = len(processing_failures)
         run_stats["elapsed_s"] = round(time.time() - t0, 1)
-        supabase_db.finish_run(run_id, "completed", run_stats)
+        has_failures = bool(failures or processing_failures)
+        supabase_db.finish_run(
+            run_id, "partial" if has_failures else "completed", run_stats
+        )
         print(
-            f"\nIngesta completa: {total_points} puntos en "
+            f"\nIngesta {'parcial' if has_failures else 'completa'}: {total_points} puntos en "
             f"'{settings.qdrant_collection}'"
             + (f", {saltados} archivos sin cambios" if saltados else "")
+            + (f", {len(failures) + len(processing_failures)} fallos" if has_failures else "")
             + f" ({run_stats['elapsed_s']}s)."
         )
-        return 0
+        return 1 if has_failures else 0
     except Exception as exc:
         logger.exception("Falló la ingesta")
         run_stats["elapsed_s"] = round(time.time() - t0, 1)

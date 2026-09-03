@@ -11,9 +11,32 @@
       content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="color-scheme" content="light dark" />
-    <!-- color de la UI del navegador acorde al fondo de la app en cada tema -->
-    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FAFAF9" />
-    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010" />
+    <!-- color de la UI del navegador acorde al fondo de la app. Sin media
+         query: lo actualiza src/lib/theme.ts, porque el tema ya no lo decide
+         solo el sistema (Ajustes -> Mi cuenta -> Apariencia). -->
+    <meta name="theme-color" content="#FAFAF9" />
+    <!-- Tema ANTES de pintar. Los tokens de styles.css cuelgan de
+         [data-theme], asi que sin esto quien tiene oscuro veria un fogonazo
+         blanco en cada carga. Duplica a proposito la logica de
+         src/lib/theme.ts (aplicarTema): es la unica forma de que corra antes
+         del bundle. Si cambia una, cambia la otra. -->
+    <script>
+      (function () {
+        var tema = 'sistema';
+        try {
+          var g = localStorage.getItem('rag-tema');
+          if (g === 'claro' || g === 'oscuro' || g === 'sistema') tema = g;
+        } catch (e) {
+          /* navegacion privada: se queda en 'sistema' */
+        }
+        var oscuro =
+          tema === 'oscuro' ||
+          (tema === 'sistema' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = oscuro ? 'dark' : 'light';
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', oscuro ? '#101010' : '#FAFAF9');
+      })();
+    </script>
     <!-- PWA instalable -->
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />

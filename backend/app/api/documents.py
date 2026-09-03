@@ -8,7 +8,7 @@ Contrato: SPEC.md, sección "Gestión de documentos (indexación dinámica)".
 
 Autenticación (SPEC.md § "Autenticación multiusuario"): los documentos son
 compartidos (cualquier usuario autenticado los ve y los consulta), pero
-subirlos y borrarlos es exclusivo de `admin` (403 para vendedor).
+subirlos y borrarlos es exclusivo de `admin` (403 para el rol de consulta).
 """
 from __future__ import annotations
 
@@ -73,6 +73,14 @@ def _sanitize_file_name(raw: str) -> str:
     name = Path(raw.replace("\\", "/")).name
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
     return name.lstrip(".")
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _doc_row(row: dict) -> dict:
@@ -143,15 +151,17 @@ def _ingest_uploaded(
     try:
         from app.services.embeddings import embed_texts
         from app.services.qdrant import (
-            delete_by_file,
+            delete_old_versions,
             ensure_collection,
             upsert_chunks,
         )
 
         chunks, pages = parse_generic(path, file_name)
+        version = _sha256_path(path)
         for chunk in chunks:
             chunk["document_id"] = document_id
             chunk["project_id"] = project_id
+            chunk["document_version"] = version
         logger.info(
             "Ingesta de '%s': %d chunks, %d páginas/filas.",
             file_name, len(chunks), pages,
@@ -167,8 +177,8 @@ def _ingest_uploaded(
             chunk["dense"] = vec
 
         ensure_collection()
-        delete_by_file(file_name)  # re-ingesta idempotente
         upserted = upsert_chunks(chunks)
+        delete_old_versions(file_name, version)
 
         # ¿Borraron el documento durante el processing? Entonces limpiar y
         # salir sin registrar nada (el registro nunca resucita).

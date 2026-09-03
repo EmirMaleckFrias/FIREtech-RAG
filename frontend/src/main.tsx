@@ -2,7 +2,13 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@fontsource-variable/inter';
 import App from './App';
+import { observarSistema } from './lib/theme';
 import './styles.css';
+
+// El tema ya lo aplico el script inline de index.html (antes de pintar).
+// Esto solo engancha los cambios de tema del SISTEMA, para que la opcion
+// 'sistema' siga al SO en vivo sin recargar.
+observarSistema();
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

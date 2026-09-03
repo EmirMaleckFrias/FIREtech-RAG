@@ -2,7 +2,7 @@
 
 Contrato (SPEC.md):
     async def run_agent(message, history) -> AsyncIterator[AgentEvent]
-    AgentEvent.type: "hop" | "sources" | "token" | "final"
+    AgentEvent.type: "plan" | "hop" | "sources" | "token" | "final" | "verificacion"
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import AsyncIterator, Literal
 
 from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
-from app.services import modos, telemetry
+from app.services import modos, planner, telemetry, verificador
 from app.services.openai_client import get_async_client, openai_semaphore
 from app.services.qdrant import hybrid_search, index_inventory
 from app.services.reranker import filter_relevant, rerank
@@ -205,7 +205,7 @@ async def _execute_inventory() -> tuple[list[Chunk], str]:
 class AgentEvent:
     """Evento emitido por el agente hacia la capa SSE."""
 
-    type: Literal["hop", "sources", "token", "final"]
+    type: Literal["hop", "plan", "sources", "token", "final", "verificacion"]
     data: dict = field(default_factory=dict)
 
 
@@ -381,6 +381,25 @@ async def run_agent(
     ]
     messages.extend({"role": m["role"], "content": m["content"]} for m in history)
     messages.append({"role": "user", "content": message})
+
+    # Plan de evidencia. El modo decide si la pregunta se descompone (normal va
+    # al grano y el plan le gastaría una de sus dos búsquedas); el ajuste de
+    # despliegue solo puede apagarlo. El checklist entra como mensaje de
+    # sistema DESPUÉS del turno del usuario a propósito: así el modelo lo lee
+    # como la agenda de esta pregunta concreta y no como parte del prompt base.
+    plan: list[planner.PlanItem] = []
+    if perfil.planifica and settings.enable_query_planning:
+        plan = await planner.plan_question(message, settings.planner_max_queries)
+        messages.append({"role": "system", "content": planner.format_checklist(plan)})
+        yield AgentEvent(
+            "plan",
+            {
+                "items": [
+                    {"id": it.id, "query": it.query, "evidence_needed": it.evidence_needed}
+                    for it in plan
+                ]
+            },
+        )
 
     accumulated: dict[str, Chunk] = {}  # dedup por id, conserva orden de llegada
     hops: list[dict] = []
@@ -653,6 +672,59 @@ async def run_agent(
         if not sources_emitted:
             yield AgentEvent("sources", {"sources": _sources_payload(accumulated)})
             sources_emitted = True
+
+        # Verificación de atribución. Va DESPUÉS de streamear la respuesta y
+        # antes de `final`: el texto ya se leyó, así que verificar no retrasa
+        # nada visible, y el veredicto llega como anotación. No reescribe la
+        # respuesta ni la censura; la deja auditable. Su fallo no tumba la
+        # pregunta, igual que el del reranker.
+        if settings.enable_answer_verification and content:
+            requerida = {it.id: it.evidence_needed for it in plan} or None
+            try:
+                informe = await verificador.verificar(
+                    content, list(accumulated.values()), requerida
+                )
+            except Exception:
+                logger.exception("La verificación falló; la respuesta se emite sin anotar")
+            else:
+                # Resumen escalar a telemetría: es lo que hace la verificación
+                # AUDITABLE y no solo visible. `summary()` ya viaja al evento
+                # `metrics`, a los evals y a la futura columna
+                # chat_messages.metrics, así que persiste por un solo sitio.
+                # El detalle por afirmación se queda en el evento SSE: no tiene
+                # sentido duplicar párrafos de respuesta en las métricas.
+                # Sin tel.mark("fidelidad"): mark() redondea a 1 decimal
+                # porque está pensado para marcas de tiempo en ms, y con un
+                # ratio 0..1 eso pierde precisión (0.667 -> 0.7). El valor
+                # exacto va en meta, que es donde se lee.
+                tel.set_meta(
+                    verificacion={
+                        "afirmaciones": len(informe.afirmaciones),
+                        "sostenidas": sum(
+                            1 for a in informe.afirmaciones
+                            if a.veredicto == verificador.SOSTENIDA
+                        ),
+                        "no_sostenidas": sum(
+                            1 for a in informe.afirmaciones
+                            if a.veredicto == verificador.NO_SOSTENIDA
+                        ),
+                        "parciales": sum(
+                            1 for a in informe.afirmaciones
+                            if a.veredicto == verificador.PARCIAL
+                        ),
+                        "sin_verificar": sum(
+                            1 for a in informe.afirmaciones
+                            if a.veredicto == verificador.SIN_VERIFICAR
+                        ),
+                        # El fallo grave: la respuesta apuntó a una fuente que
+                        # no existe en esta consulta. Se guarda entero.
+                        "citas_sin_resolver": informe.citas_sin_resolver,
+                        "fidelidad": informe.fidelidad,
+                        "ok": informe.ok,
+                    }
+                )
+                yield AgentEvent("verificacion", informe.to_payload())
+
         yield AgentEvent(
             "final",
             {

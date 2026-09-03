@@ -54,11 +54,10 @@ proyecto/
 - Nombre: `documentos` (env `QDRANT_COLLECTION`)
 - Vectores nombrados:
   - `dense`: 3072 dims, coseno (OpenAI text-embedding-3-large)
-  - `bm25`: sparse vector (BM25 vía fastembed). Si fastembed no está disponible la búsqueda
-    cae a dense-only sin romper. IMPORTANTE: ese es el estado PERMANENTE de producción
-    serverless (fastembed/onnxruntime no cabe en la función de Vercel), así que producción
-    consulta dense-only aunque los vectores sparse existan en el índice. El modo vigente se
-    expone como `retrieval` en `GET /api/health` y en el bloque config de `/api/stats`.
+  - `bm25`: sparse vector. El backend recomendado es la inferencia BM25 nativa del cluster
+    (`QDRANT_BM25_BACKEND=server`), compatible con local y Vercel sin onnxruntime. FastEmbed
+    queda como backend alternativo. El modo efectivo se prueba contra el cluster y se expone
+    como `retrieval` y `bm25_backend` en health/stats.
 - Payload por punto (chunk):
   ```json
   {
@@ -67,6 +66,7 @@ proyecto/
     "page": 3,
     "project_id": "id del proyecto o null",
     "document_id": "id del documento o null",
+    "document_version": "sha256 de esta versión del archivo",
     "section": "Métodos",
     "language": "es",
     "document_type": "pdf | docx | xlsx | csv | txt | md",
@@ -81,8 +81,8 @@ proyecto/
   La lista es CERRADA: `_PAYLOAD_KEYS` en `app/services/qdrant.py` es una lista blanca, así
   que lo que el parser no declare ahí no llega nunca al índice y un campo nuevo en la
   ingesta no se filtra por accidente.
-- Índices de payload (6): `project_id`, `document_id`, `document_type`, `language`,
-  `source_file` y `chunk_type`, todos keyword. La lista vive en `qdrant.PAYLOAD_INDEXES` y
+- Índices de payload (7): `project_id`, `document_id`, `document_version`, `document_type`,
+  `language`, `source_file` y `chunk_type`, todos keyword. La lista vive en `qdrant.PAYLOAD_INDEXES` y
   la crea `ensure_collection` junto con la colección. `project_id` y `document_id` son
   además la frontera de acceso: sin su índice, una búsqueda acotada sería un escaneo.
 
@@ -94,8 +94,8 @@ Base: `http://localhost:8000`
      "retrieval": "hybrid" | "dense-only", "bm25_backend": str, "qdrant_version": str,
      "model": str, "rerank_model": str, "max_hops": int, "prompt_version": str,
      "python": str, "environment": "local" | "production" }`
-`retrieval` es honesto: `hybrid` solo si el codificador BM25 está cargado en ese proceso; si no,
-`dense-only` (el estado permanente de producción).
+`retrieval` es honesto: `hybrid` solo si el probe del backend BM25 configurado funciona; si no,
+`dense-only`.
 
 ### `POST /api/search`
 Body: `{ "query": str, "top_k": int = 8, "project_id": str|null, "document_id": str|null,
@@ -140,12 +140,12 @@ Sustituye por completo al gate de clave compartida (`APP_ACCESS_KEY` y el header
 - Alta con correo y contraseña. Solo dominio `@airobotix.net`; lo impone un trigger de
   Postgres sobre `auth.users`, así que un registro con otro dominio falla aunque se llame
   a la API de Supabase directamente.
-- Roles en `profiles.role`: `admin` y `vendedor`. `emir.malek@airobotix.net` nace admin;
-  el resto nace vendedor.
+- Roles en `profiles.role`: `admin` y `lector`. `emir.malek@airobotix.net` nace admin;
+  el resto nace lector.
 - **Conversaciones privadas**: cada usuario ve solo las suyas (`chat_sessions.user_id`).
   Las sesiones históricas con `user_id` nulo solo las ven los admin.
 - **Documentos compartidos**: todos los usuarios ven y consultan todos los documentos.
-  Subir y borrar es exclusivo de `admin` (403 para vendedor).
+  Subir y borrar es exclusivo de `admin` (403 para lector).
 - **Costos internos siguen ocultos para todos los roles** (sin cambios).
 
 **Contrato HTTP**
@@ -196,9 +196,9 @@ proceso, si no `dense-only`.
 
 **Gestión de usuarios (solo admin)**
 - `GET /api/users` → `{ "users": [{ "id", "email", "role", "created_at", "last_sign_in_at",
-  "sessions_count", "messages_count" }] }` ordenados por fecha de alta. 403 para vendedor.
+  "sessions_count", "messages_count" }] }` ordenados por fecha de alta. 403 para lector.
 - `PATCH /api/users/{user_id}` body con `role` y/o `blocked`:
-  `{ "role": "admin" | "vendedor" }` y/o `{ "blocked": true | false }` → devuelve la fila
+  `{ "role": "admin" | "lector" }` y/o `{ "blocked": true | false }` → devuelve la fila
   actualizada `{ "id", "email", "role", "blocked" }`. Bloquear revoca el acceso sin borrar
   nada: la cuenta y sus conversaciones se conservan y se puede desbloquear.
 - `DELETE /api/users/{user_id}` → borra la cuenta de forma permanente junto con sus
@@ -230,7 +230,7 @@ proceso, si no `dense-only`.
   devuelve a la pantalla de acceso.
 - Pie del sidebar: correo del usuario, su rol y acceso a Ajustes (cerrar sesión vive dentro,
   en la pestaña Mi cuenta).
-- Si el rol es `vendedor`: el panel de Documentos muestra la lista completa pero sin
+- Si el rol es `lector`: el panel de Documentos muestra la lista completa pero sin
   dropzone ni botones de borrar, con una nota de que solo un administrador puede
   gestionarlos.
 
@@ -386,16 +386,18 @@ telemetría (`meta.modo`).
 ## Variables de entorno (backend/.env)
 ```
 OPENAI_API_KEY=
+OPENAI_BASE_URL=          # vacío = api.openai.com; endpoint compatible (AI Gateway de Vercel) si se pone
 OPENAI_MODEL=gpt-5.4
 EMBEDDING_MODEL=text-embedding-3-large
 RERANK_MODEL=gpt-5.4-mini   # default en código; vacío = hereda OPENAI_MODEL
 OPENAI_TIMEOUT_S=120        # timeout por request del cliente único
 OPENAI_MAX_RETRIES=2        # reintentos del SDK
 OPENAI_CONCURRENCY=3        # semáforo de llamadas concurrentes a OpenAI
-PROMPT_VERSION=v1           # etiqueta del prompt; viaja en health, stats, metrics y evals
+PROMPT_VERSION=v3           # etiqueta del prompt; viaja en health, stats, metrics y evals
 QDRANT_URL=http://localhost:6333
 QDRANT_API_KEY=          # vacío para local
 QDRANT_COLLECTION=documentos
+QDRANT_BM25_BACKEND=server # server | fastembed | auto | disabled; cambiar exige reindexar
 SUPABASE_URL=
 SUPABASE_SERVICE_KEY=
 MAX_HOPS=4
@@ -422,12 +424,12 @@ def collection_count() -> int | None       # None si Qdrant no responde
 def upsert_chunks(chunks: list[dict]) -> int
     # cada dict: las claves de _PAYLOAD_KEYS (lista blanca) + "id" + "dense": list[float].
     # Lo que no esté en _PAYLOAD_KEYS se descarta; lo que falte queda en None.
-    # Calcula bm25 internamente si fastembed está disponible.
+    # Calcula bm25 en el servidor Qdrant o con fastembed, según configuración.
 def index_inventory() -> dict
     # inventario en vivo por facets: total_chunks, archivos, tipos, idiomas, proyectos
 def delete_by_file(source_file: str) -> None
 async def hybrid_search(query: str, filters: SearchFilters, top_k: int) -> list[Chunk]
-    # dense (embed_query) + bm25 con fusión RRF vía Query API de Qdrant; fallback dense-only sin fastembed
+    # dense + bm25 con RRF; reintento dense-only si el sparse falla durante una consulta
 ```
 
 `app/services/reranker.py`:

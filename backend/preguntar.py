@@ -82,6 +82,7 @@ def ask(question: str, base: str, token: str | None) -> dict:
     print("=" * 88)
     print(f"PREGUNTA: {question}\n")
     hops: list[dict] = []
+    verificacion: dict | None = None
     sources: list[dict] = []
     answer: list[str] = []
     metrics: dict = {}
@@ -105,9 +106,15 @@ def ask(question: str, base: str, token: str | None) -> dict:
                     data = json.loads(line.split(":", 1)[1].strip())
                 except json.JSONDecodeError:
                     continue
-                if event == "hop":
+                if event == "plan":
+                    print("  PLAN DE EVIDENCIA:")
+                    for it in data.get("items") or []:
+                        print(f"    {it.get('id')}: {it.get('evidence_needed')}")
+                elif event == "hop":
                     hops.append(data)
                     print(f"  hop {data.get('n')}: {data.get('query')}")
+                elif event == "verificacion":
+                    verificacion = data
                 elif event == "sources":
                     sources = data.get("sources", [])
                 elif event == "token":
@@ -121,6 +128,29 @@ def ask(question: str, base: str, token: str | None) -> dict:
     texto = "".join(answer)
     print(f"\nRESPUESTA ({len(hops)} hops, {len(sources)} fuentes):\n")
     print(texto)
+
+    # Informe de atribución. Se imprime lo que FALLA en primer plano: en una
+    # comprobación puntual, lo útil no es saber que 3 de 3 están bien, es que
+    # una cita no resuelve.
+    if verificacion:
+        afirmaciones = verificacion.get("afirmaciones") or []
+        fidelidad = verificacion.get("fidelidad")
+        sin_resolver = verificacion.get("citas_sin_resolver") or []
+        etiqueta = "n/d" if fidelidad is None else f"{fidelidad:.0%}"
+        print(f"\nVERIFICACION DE ATRIBUCION (fidelidad {etiqueta}):")
+        if not verificacion.get("ok", True):
+            print(f"  AVISO: {verificacion.get('nota')}")
+        if sin_resolver:
+            print(f"  CITAS SIN FUENTE RECUPERADA: {', '.join(sin_resolver)}")
+        for a in afirmaciones:
+            if a.get("veredicto") == "sostenida":
+                continue
+            print(f"  [{a.get('veredicto')}] {str(a.get('texto'))[:90]}")
+            print(f"      cita: {a.get('cita')}")
+            if a.get("motivo"):
+                print(f"      motivo: {a.get('motivo')}")
+        sostenidas = sum(1 for a in afirmaciones if a.get("veredicto") == "sostenida")
+        print(f"  {sostenidas}/{len(afirmaciones)} afirmaciones sostenidas por su fuente")
 
     if sources:
         print("\nFUENTES:")
@@ -151,6 +181,10 @@ def ask(question: str, base: str, token: str | None) -> dict:
         "respuesta": texto,
         "hops": hops,
         "fuentes": sources,
+        # El informe completo, para que --json quede auditable: en
+        # investigación la atribución de cada afirmación es parte del
+        # resultado, no un detalle de la consola.
+        "verificacion": verificacion,
         "metrics": metrics,
         "coste_usd": coste,
         "error": error,

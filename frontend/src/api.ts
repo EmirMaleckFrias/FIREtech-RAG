@@ -17,6 +17,8 @@ import type {
   UploadAccepted,
   UserAccount,
   UserRole,
+  Veredicto,
+  Verificacion,
 } from './types';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -412,7 +414,7 @@ function normalizeUsers(raw: unknown): UserAccount[] {
   return out;
 }
 
-/** GET /api/users: cuentas ordenadas por fecha de alta. 403 para vendedor. */
+/** GET /api/users: cuentas ordenadas por fecha de alta. 403 para lector. */
 export async function fetchUsers(): Promise<UserAccount[]> {
   let res: Response;
   try {
@@ -616,6 +618,51 @@ export async function fetchStats(): Promise<AdminStats> {
  * faltantes). Los campos documentales y enriquecidos no existen en mensajes
  * antiguos: reciben valores neutros.
  */
+const VEREDICTOS: readonly Veredicto[] = [
+  'sostenida',
+  'parcial',
+  'no_sostenida',
+  'cita_no_resuelve',
+  'sin_verificar',
+];
+
+/** Valida el informe del verificador que llega por SSE.
+ *
+ * Un veredicto que no esté en el contrato cae a `sin_verificar`, nunca a
+ * `sostenida`: si el backend cambiara y el frontend no, el fallo tiene que ser
+ * visible como "sin comprobar" y no como un visto bueno inventado. */
+export function normalizeVerificacion(raw: unknown): Verificacion | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  const crudas = Array.isArray(o.afirmaciones) ? o.afirmaciones : [];
+  const afirmaciones = crudas.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const a = item as Record<string, unknown>;
+    const v = a.veredicto;
+    return [
+      {
+        texto: typeof a.texto === 'string' ? a.texto : '',
+        cita: typeof a.cita === 'string' ? a.cita : '',
+        veredicto: VEREDICTOS.includes(v as Veredicto)
+          ? (v as Veredicto)
+          : ('sin_verificar' as Veredicto),
+        motivo: typeof a.motivo === 'string' ? a.motivo : '',
+        fragmento_id: typeof a.fragmento_id === 'string' ? a.fragmento_id : '',
+      },
+    ];
+  });
+  const textos = (valor: unknown): string[] =>
+    Array.isArray(valor) ? valor.filter((x): x is string => typeof x === 'string') : [];
+  return {
+    afirmaciones,
+    evidencia_sin_cubrir: textos(o.evidencia_sin_cubrir),
+    citas_sin_resolver: textos(o.citas_sin_resolver),
+    fidelidad: typeof o.fidelidad === 'number' ? o.fidelidad : null,
+    ok: o.ok !== false,
+    nota: typeof o.nota === 'string' ? o.nota : '',
+  };
+}
+
 export function normalizeSources(raw: unknown): Source[] {
   if (!Array.isArray(raw)) return [];
   const out: Source[] = [];
@@ -652,6 +699,7 @@ export interface ChatStreamHandlers {
   onSession: (sessionId: string) => void;
   onHop: (hop: Hop) => void;
   onSources: (sources: Source[]) => void;
+  onVerificacion: (informe: Verificacion) => void;
   onToken: (text: string) => void;
   onDone: (messageId: string) => void;
   onError: (detail: string) => void;
@@ -716,6 +764,11 @@ export async function streamChat(
         if (typeof parsed !== 'object' || parsed === null) break;
         const raw = (parsed as Record<string, unknown>).sources;
         handlers.onSources(normalizeSources(raw));
+        break;
+      }
+      case 'verificacion': {
+        const informe = normalizeVerificacion(parsed);
+        if (informe) handlers.onVerificacion(informe);
         break;
       }
       case 'token': {

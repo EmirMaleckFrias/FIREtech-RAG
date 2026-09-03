@@ -66,7 +66,7 @@ interface DocumentsPanelProps {
   uploadLimitMb?: number;
   /**
    * Solo el rol `admin` sube y borra (el backend responde 403 al resto). Un
-   * vendedor ve la lista completa, sin dropzone ni botones de borrar. También
+   * lector ve la lista completa, sin dropzone ni botones de borrar. También
    * es false mientras no se conoce el rol: se asume el menor permiso.
    */
   canManage: boolean;
@@ -444,7 +444,7 @@ export function DocumentsPanel({
         </div>
 
         <div className="docs-body">
-          {/* rol vendedor: lista completa, gestión fuera (nota discreta) */}
+          {/* rol lector: lista completa, gestión fuera (nota discreta) */}
           {!canManage && (
             <p className="docs-readonly-note">
               <IconLock size={13} />
@@ -672,7 +672,7 @@ export function DocumentsPanel({
                               </button>
                             )}
 
-                            {/* gestión solo para admin: el vendedor ve la
+                            {/* gestión solo para admin: el lector ve la
                                 ficha completa, sin acciones */}
                             {canManage &&
                               (isDeleting ? (

@@ -4,13 +4,20 @@ idénticas y final forzado por MAX_HOPS."""
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from app.config import get_settings
 from app.services import agent, telemetry
 from app.services.agent import AgentEvent, run_agent
-from tests.conftest import FakeStream, make_text_stream, make_tool_call_stream, make_usage
+from tests.conftest import (
+    FakeStream,
+    make_json_completion,
+    make_text_stream,
+    make_tool_call_stream,
+    make_usage,
+)
 
 TOOL = "buscar_documentos"
 INVENTARIO = "listar_documentos"
@@ -328,15 +335,49 @@ async def test_se_para_cuando_deja_de_encontrar_cosas_nuevas(
     assert "sin encontrar nada nuevo" in rondas[-1].note
 
 
+class _RelojDePasos:
+    """Reloj falso que avanza un paso fijo en cada lectura.
+
+    Existe para que el corte por presupuesto se pueda probar sin depender del
+    reloj real. Delega en el modulo `time` cualquier otro atributo, de modo
+    que sustituirlo en el agente no rompa otros usos.
+    """
+
+    def __init__(self, paso_s: float) -> None:
+        self._paso_s = paso_s
+        self._lecturas = 0
+
+    def perf_counter(self) -> float:
+        valor = self._lecturas * self._paso_s
+        self._lecturas += 1
+        return valor
+
+    def __getattr__(self, nombre: str):
+        return getattr(time, nombre)
+
+
 async def test_el_reloj_corta_antes_de_que_muera_la_funcion(
     settings_override, fake_openai, catalogo_falso, monkeypatch
 ):
     """El corte por tiempo evita perder la respuesta entera cuando Vercel mata
     la funcion a los 300 s. La PRIMERA ronda siempre ocurre: el presupuesto
     limita cuanto se busca, no si se responde.
+
+    El reloj se controla a mano. Con un presupuesto real de 0.0001 s, que el
+    corte saltara o no dependia de lo calientes que estuvieran las caches: el
+    test pasaba aislado y fallaba al correr despues de otros, porque la ronda
+    se completaba en menos de 100 us. Con PASO_S por lectura, la cuenta es
+    fija: la lectura de `inicio` marca 0, la comprobacion de la primera ronda
+    lee 1 x PASO_S (por debajo del presupuesto, asi que busca), y la de la
+    segunda lee 3 x PASO_S o mas -- el agente cronometra cada ronda, asi que
+    entre una comprobacion y la siguiente hay al menos dos lecturas mas.
     """
+    PASO_S = 1.0
+    PRESUPUESTO_S = 1.5  # entre 1 x PASO_S y 3 x PASO_S
+
+    monkeypatch.setattr(agent, "time", _RelojDePasos(PASO_S))
     monkeypatch.setenv("MAX_HOPS", "0")
-    monkeypatch.setenv("AGENT_BUDGET_S", "0.0001")
+    monkeypatch.setenv("AGENT_BUDGET_S", str(PRESUPUESTO_S))
     get_settings.cache_clear()
 
     fake_openai.queue(
@@ -352,3 +393,101 @@ async def test_el_reloj_corta_antes_de_que_muera_la_funcion(
     assert fake_openai.calls[1]["tool_choice"] == "none"
     rondas = [r for r in tel.rounds if r.component == "agente"]
     assert "tiempo agotado" in rondas[-1].note
+
+
+# ---------------------------------------------------------------------------
+# Plan de evidencia y verificación de atribución (cableados al bucle)
+# ---------------------------------------------------------------------------
+async def test_el_modo_extendido_planifica_y_emite_el_plan(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """El plan entra como mensaje de sistema DESPUÉS del turno del usuario, para
+    que el modelo lo lea como la agenda de esta pregunta."""
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+
+    fake_openai.queue(
+        make_json_completion(
+            {
+                "items": [
+                    {"id": "e1", "query": "auc p-tau217", "evidence_needed": "el AUC"},
+                    {"id": "e2", "query": "cohorte tamaño", "evidence_needed": "la cohorte"},
+                ]
+            }
+        ),
+        make_text_stream("Respondo.", usage=make_usage(50, 5)),
+    )
+
+    eventos = await _correr("compara ambos", modo="extendido")
+
+    tipos = _tipos(eventos)
+    assert tipos[0] == "plan"
+    plan = eventos[0].data["items"]
+    assert [it["id"] for it in plan] == ["e1", "e2"]
+    # el checklist viaja como system, tras el mensaje del usuario
+    mensajes = fake_openai.calls[1]["messages"]
+    roles = [m["role"] for m in mensajes]
+    assert roles[-1] == "system"
+    assert "PLAN DE EVIDENCIA OBLIGATORIO" in mensajes[-1]["content"]
+    assert mensajes[-2]["role"] == "user"
+
+
+async def test_el_modo_normal_no_planifica(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """Normal tiene dos búsquedas y el plan le gastaría una: el perfil manda."""
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+    fake_openai.queue(make_text_stream("Respondo.", usage=make_usage(50, 5)))
+
+    eventos = await _correr("algo directo", modo="normal")
+
+    assert "plan" not in _tipos(eventos)
+    assert len(fake_openai.calls) == 1  # ni una llamada al planificador
+
+
+async def test_la_verificacion_se_emite_antes_del_final(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """El orden importa: los tokens ya se streamearon, así que verificar no
+    retrasa nada visible, y `final` cierra después de la anotación."""
+    monkeypatch.setenv("ENABLE_ANSWER_VERIFICATION", "true")
+    get_settings.cache_clear()
+
+    fake_openai.queue(
+        make_text_stream("No encuentro ese dato.", usage=make_usage(40, 4)),
+    )
+
+    eventos = await _correr("algo que no esta", modo="normal")
+
+    tipos = _tipos(eventos)
+    assert "verificacion" in tipos
+    assert tipos.index("verificacion") < tipos.index("final")
+    # sin citas no se gasta llamada al verificador: solo la del agente
+    assert len(fake_openai.calls) == 1
+
+
+async def test_una_cita_inventada_queda_registrada_en_la_telemetria(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """El fallo grave: la respuesta apunta a una fuente que no se recuperó. Debe
+    llegar a `metrics`, que es por donde se persiste y se audita."""
+    monkeypatch.setenv("ENABLE_ANSWER_VERIFICATION", "true")
+    get_settings.cache_clear()
+
+    fake_openai.queue(
+        make_text_stream(
+            "El AUC fue 0.94 [fantasma.pdf, pág. 7].", usage=make_usage(40, 4)
+        ),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("dame el auc", modo="normal")
+
+    informe = next(ev for ev in eventos if ev.type == "verificacion").data
+    assert informe["citas_sin_resolver"] == ["[fantasma.pdf, pág. 7]"]
+    assert informe["afirmaciones"][0]["veredicto"] == "cita_no_resuelve"
+    # y queda en el resumen que viaja a metrics / evals / BD
+    meta = tel.summary()["meta"]["verificacion"]
+    assert meta["citas_sin_resolver"] == ["[fantasma.pdf, pág. 7]"]
+    assert meta["afirmaciones"] == 1

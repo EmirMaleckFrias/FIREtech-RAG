@@ -1,8 +1,8 @@
-"""Cliente Qdrant: setup de colección, upsert y búsqueda híbrida (dense + BM25 con RRF).
+"""Cliente Qdrant: setup, filtros y búsqueda híbrida dense + BM25 con RRF.
 
-Si `fastembed` no está instalado (p. ej. Python 3.14 sin wheels), el módulo sigue
-funcionando: la colección se crea igual con ambos vectores nombrados, pero el
-upsert omite el vector sparse y `hybrid_search` cae a dense-only.
+El camino principal usa BM25 nativo del servidor Qdrant. Así producción no
+depende de fastembed/onnxruntime dentro de Vercel. FastEmbed queda disponible
+como backend explícito de compatibilidad.
 """
 from __future__ import annotations
 
@@ -47,6 +47,7 @@ _UPSERT_BATCH = 64
 PAYLOAD_INDEXES: tuple[tuple[str, models.PayloadSchemaType], ...] = (
     ("project_id", models.PayloadSchemaType.KEYWORD),
     ("document_id", models.PayloadSchemaType.KEYWORD),
+    ("document_version", models.PayloadSchemaType.KEYWORD),
     ("document_type", models.PayloadSchemaType.KEYWORD),
     ("language", models.PayloadSchemaType.KEYWORD),
     ("source_file", models.PayloadSchemaType.KEYWORD),
@@ -58,6 +59,16 @@ PAYLOAD_INDEXES: tuple[tuple[str, models.PayloadSchemaType], ...] = (
 _client: QdrantClient | None = None
 _bm25_model: Any | None = None
 _bm25_failed = False
+_server_bm25_checked = False
+_server_bm25_failed = False
+
+
+def _configured_bm25_backend() -> str:
+    value = get_settings().qdrant_bm25_backend.strip().lower()
+    if value not in {"server", "fastembed", "auto", "disabled"}:
+        logger.warning("QDRANT_BM25_BACKEND=%r no es válido; se desactiva BM25.", value)
+        return "disabled"
+    return value
 
 
 def get_client() -> QdrantClient:
@@ -69,6 +80,7 @@ def get_client() -> QdrantClient:
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key or None,
             timeout=30,
+            cloud_inference=_configured_bm25_backend() in {"server", "auto"},
         )
     return _client
 
@@ -132,29 +144,47 @@ def ensure_collection() -> None:
             logger.debug("Índice de payload '%s' ya existente.", field)
 
 
+def _server_bm25_available() -> bool:
+    """Comprueba una vez que el cluster acepta inferencia BM25 nativa."""
+    global _server_bm25_checked, _server_bm25_failed
+    if _server_bm25_checked:
+        return not _server_bm25_failed
+    _server_bm25_checked = True
+    settings = get_settings()
+    try:
+        get_client().query_points(
+            collection_name=settings.qdrant_collection,
+            query=models.Document(text="bm25 health probe", model="qdrant/bm25"),
+            using="bm25",
+            limit=1,
+            with_payload=False,
+        )
+        return True
+    except Exception as exc:
+        _server_bm25_failed = True
+        logger.warning("BM25 nativo de Qdrant no disponible (%s).", exc)
+        return False
+
+
+def _active_bm25_backend() -> str:
+    configured = _configured_bm25_backend()
+    if configured == "disabled":
+        return "none"
+    if configured in {"server", "auto"} and _server_bm25_available():
+        return "qdrant-server"
+    if configured in {"fastembed", "auto"} and _get_bm25() is not None:
+        return "fastembed"
+    return "none"
+
+
 def retrieval_mode() -> str:
-    """'hybrid' si el codificador BM25 está disponible; 'dense-only' si no.
-
-    En producción serverless fastembed no cabe en la función, así que las
-    consultas son dense-only aunque los vectores sparse existan en el índice.
-    Exponerlo en /api/health y /api/stats hace visible la degradación.
-
-    Fuerza la carga perezosa del modelo (`_get_bm25()`), así que la primera
-    llamada puede tardar lo que tarde fastembed en inicializarse; a cambio
-    refleja exactamente lo que decidirá `hybrid_search` (antes bastaba con
-    tener fastembed instalado para decir 'hybrid', aunque la carga fallara
-    después). Sin fastembed (`_make_bm25 is None`) no cuesta nada.
-    """
-    return "hybrid" if _get_bm25() is not None else "dense-only"
+    """Modo efectivo, después de verificar el backend sparse configurado."""
+    return "hybrid" if _active_bm25_backend() != "none" else "dense-only"
 
 
 def bm25_backend() -> str:
-    """Implementación del codificador sparse en uso: 'fastembed' o 'none'.
-
-    Separado de `retrieval_mode()` para que /health distinga "no hay BM25"
-    de "hay BM25 pero con otro backend" (la Fase 4 añadirá 'pure').
-    """
-    return "fastembed" if retrieval_mode() == "hybrid" else "none"
+    """Implementación sparse efectiva: qdrant-server, fastembed o none."""
+    return _active_bm25_backend()
 
 
 _server_version: str | None = None
@@ -186,8 +216,15 @@ def collection_count() -> int | None:
         return None
 
 
-def _sparse_vectors_for(texts: list[str]) -> list[models.SparseVector | None]:
-    """Vectores BM25 para una lista de textos; Nones si no hay fastembed."""
+def _sparse_vectors_for(
+    texts: list[str],
+) -> list[models.SparseVector | models.Document | None]:
+    """Representaciones BM25 locales o documentos para inferencia en Qdrant."""
+    backend = _active_bm25_backend()
+    if backend == "qdrant-server":
+        return [models.Document(text=text, model="qdrant/bm25") for text in texts]
+    if backend != "fastembed":
+        return [None] * len(texts)
     model = _get_bm25()
     if model is None:
         return [None] * len(texts)
@@ -214,6 +251,7 @@ _PAYLOAD_KEYS = (
     "page",
     "project_id",
     "document_id",
+    "document_version",
     "section",
     "language",
     "document_type",
@@ -229,8 +267,9 @@ _PAYLOAD_KEYS = (
 def upsert_chunks(chunks: list[dict]) -> int:
     """Upserta chunks (con vector denso precalculado en `chunk["dense"]`).
 
-    Calcula el vector BM25 internamente si fastembed está disponible; si no,
-    los puntos se indexan solo con el vector denso.
+    El vector BM25 se calcula en Qdrant o con FastEmbed, según configuración.
+    Si BM25 está habilitado y la ingesta sparse falla, la operación falla:
+    nunca se degrada silenciosamente un documento nuevo a dense-only.
     """
     if not chunks:
         return 0
@@ -242,7 +281,9 @@ def upsert_chunks(chunks: list[dict]) -> int:
     points: list[models.PointStruct] = []
     for chunk, sv in zip(chunks, sparse):
         vector: dict[str, Any] = {"dense": chunk["dense"]}
-        if sv is not None and len(sv.indices) > 0:
+        if isinstance(sv, models.Document) or (
+            sv is not None and len(sv.indices) > 0
+        ):
             vector["bm25"] = sv
         payload = {key: chunk.get(key) for key in _PAYLOAD_KEYS}
         points.append(
@@ -271,6 +312,36 @@ def delete_by_file(source_file: str) -> None:
                         match=models.MatchValue(value=source_file),
                     )
                 ]
+            )
+        ),
+        wait=True,
+    )
+
+
+def delete_old_versions(source_file: str, keep_version: str) -> None:
+    """Borra versiones anteriores después de insertar la nueva.
+
+    El orden es deliberado: primero se confirma el upsert de la nueva versión
+    y solo entonces se retira la antigua. Un fallo de embeddings o Qdrant no
+    deja al documento sin ninguna versión consultable.
+    """
+    settings = get_settings()
+    get_client().delete(
+        collection_name=settings.qdrant_collection,
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="source_file",
+                        match=models.MatchValue(value=source_file),
+                    )
+                ],
+                must_not=[
+                    models.FieldCondition(
+                        key="document_version",
+                        match=models.MatchValue(value=keep_version),
+                    )
+                ],
             )
         ),
         wait=True,
@@ -365,7 +436,8 @@ async def hybrid_search(
 
     El embedding denso de la query es async (`embed_query`); las llamadas al
     cliente síncrono de Qdrant se ejecutan en un thread con
-    `asyncio.to_thread`. Sin fastembed, cae a búsqueda dense-only.
+    `asyncio.to_thread`. Si el backend sparse falla durante una consulta, se
+    registra la degradación y esa consulta se reintenta dense-only.
     """
     settings = get_settings()
     dense = await embed_query(query)
@@ -376,12 +448,15 @@ async def hybrid_search(
         name = settings.qdrant_collection
         prefetch_limit = max(top_k * 2, 20)
 
-        sparse_query: models.SparseVector | None = None
-        model = _get_bm25()
-        if model is not None:
+        backend = _active_bm25_backend()
+        sparse_query: models.SparseVector | models.Document | None = None
+        if backend == "qdrant-server":
+            sparse_query = models.Document(text=query, model="qdrant/bm25")
+        elif backend == "fastembed":
+            model = _get_bm25()
             try:
-                emb = next(iter(model.query_embed(query)))
-                if len(emb.indices) > 0:
+                emb = next(iter(model.query_embed(query))) if model is not None else None
+                if emb is not None and len(emb.indices) > 0:
                     sparse_query = models.SparseVector(
                         indices=list(emb.indices), values=list(emb.values)
                     )
@@ -390,7 +465,18 @@ async def hybrid_search(
                     "Fallo el embedding BM25 de la query (%s); dense-only.", exc
                 )
 
-        if sparse_query is not None:
+        if sparse_query is None:
+            response = client.query_points(
+                collection_name=name,
+                query=dense,
+                using="dense",
+                query_filter=qfilter,
+                limit=top_k,
+                with_payload=True,
+            )
+            return response.points
+
+        try:
             response = client.query_points(
                 collection_name=name,
                 prefetch=[
@@ -411,7 +497,12 @@ async def hybrid_search(
                 limit=top_k,
                 with_payload=True,
             )
-        else:
+            return response.points
+        except Exception as exc:
+            global _server_bm25_failed
+            if backend == "qdrant-server":
+                _server_bm25_failed = True
+            logger.warning("Búsqueda híbrida falló (%s); reintento dense-only.", exc)
             response = client.query_points(
                 collection_name=name,
                 query=dense,
@@ -420,7 +511,7 @@ async def hybrid_search(
                 limit=top_k,
                 with_payload=True,
             )
-        return response.points
+            return response.points
 
     points = await asyncio.to_thread(_search)
     return [_point_to_chunk(p) for p in points]

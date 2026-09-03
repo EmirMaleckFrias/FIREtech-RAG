@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app.ingest.pipeline import EXIT_ABORTED, discover_files, run_ingest
+from app.ingest.pipeline import EXIT_ABORTED, _inspect_files, discover_files, run_ingest
 
 
 @pytest.fixture
@@ -72,6 +72,15 @@ def test_dry_run_informa_del_coste_y_no_toca_nada(carpeta, capsys, monkeypatch):
     assert "Coste de embeddings:" in salida
     assert "estimado, tarifa asumida" in salida
     assert "Dry-run completado" in salida
+
+
+def test_manifiesto_de_preanalisis_no_retiene_textos_ni_chunks(carpeta):
+    plans, failures = _inspect_files(discover_files([carpeta]))
+
+    assert failures == []
+    assert len(plans) == 3
+    assert all(not hasattr(plan, "text") and not hasattr(plan, "chunk_data") for plan in plans)
+    assert all(plan.sha256 and plan.chunks > 0 and plan.tokens > 0 for plan in plans)
 
 
 def test_el_tope_de_gasto_aborta_antes_de_embeber(carpeta, capsys, monkeypatch):

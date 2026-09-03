@@ -30,13 +30,23 @@ from app.services import openai_client, telemetry
 # tests/test_settings.py), así que esto pisa cualquier valor del .env local.
 TEST_ENV: dict[str, str] = {
     "OPENAI_API_KEY": "test-key",
+    # Vacío a propósito: neutraliza lo que haya en backend/.env para que los
+    # tests no dependan de a qué endpoint apunte la máquina.
+    "OPENAI_BASE_URL": "",
     "OPENAI_MODEL": "gpt-5.4",
     "RERANK_MODEL": "gpt-5.4-mini",
     "QDRANT_URL": "http://qdrant.invalid:6333",
     "QDRANT_API_KEY": "",
+    "QDRANT_BM25_BACKEND": "disabled",
     "SUPABASE_URL": "",
     "SUPABASE_SERVICE_KEY": "",
     "MAX_HOPS": "4",
+    # Los dos, apagados por defecto en tests: añaden una llamada al modelo
+    # y cambiarían la secuencia que cada test tiene en cola. Quien los
+    # prueba los enciende con monotonía explícita (monkeypatch.setenv +
+    # get_settings.cache_clear), como en test_verificador.py.
+    "ENABLE_QUERY_PLANNING": "false",
+    "ENABLE_ANSWER_VERIFICATION": "false",
     "ENVIRONMENT": "local",
 }
 
