@@ -231,3 +231,65 @@ export const reindexarTodo = internalMutation({
     return { agendados, total: docs.length };
   },
 });
+
+/** Borra un documento del corpus de prueba con sus fragmentos y su fichero,
+ *  en lotes (una mutación no debe tocar cientos de fragmentos de 25 KB). Se
+ *  reagenda a sí misma hasta que no quedan fragmentos. Para retirar los
+ *  documentos sintéticos con cifras inventadas antes de que el índice lo use
+ *  una médica. */
+export const borrarDocumentoDePrueba = internalMutation({
+  args: { fileName: v.string() },
+  handler: async (ctx, args) => {
+    const doc = await ctx.db
+      .query("documents")
+      .withIndex("porNombre", (q) => q.eq("fileName", args.fileName))
+      .first();
+    if (!doc) return { estado: "no_existe" };
+    const lote = await ctx.db
+      .query("chunks")
+      .withIndex("porDocumento", (q) => q.eq("documentRef", doc._id))
+      .take(200);
+    for (const c of lote) await ctx.db.delete(c._id);
+    if (lote.length === 200) {
+      await ctx.scheduler.runAfter(0, internal.pruebas.borrarDocumentoDePrueba, { fileName: args.fileName });
+      return { estado: "borrando", borrados: lote.length };
+    }
+    if (doc.storageId) {
+      try {
+        await ctx.storage.delete(doc.storageId);
+      } catch {
+        /* ya no existe */
+      }
+    }
+    await ctx.db.delete(doc._id);
+    return { estado: "borrado", fragmentos: lote.length };
+  },
+});
+
+/** Retira el usuario de pruebas con sus conversaciones, para que el panel de
+ *  administración no muestre las decenas de preguntas de la sesión de estrés
+ *  como si fueran uso real. Los mensajes se borran por lotes con la mutación
+ *  interna de `mensajes`. */
+export const borrarUsuarioDePrueba = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const usuario = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", CORREO_PRUEBAS))
+      .first();
+    if (!usuario) return { estado: "no_existe" };
+    const sesiones = await ctx.db
+      .query("sessions")
+      .withIndex("porUsuario", (q) => q.eq("userId", usuario._id))
+      .collect();
+    for (const s of sesiones) await ctx.db.delete(s._id);
+    const votos = await ctx.db
+      .query("feedback")
+      .withIndex("porUsuarioYMensaje", (q) => q.eq("userId", usuario._id))
+      .collect();
+    for (const f of votos) await ctx.db.delete(f._id);
+    await ctx.scheduler.runAfter(0, internal.mensajes.borrarRestantes, { userId: usuario._id });
+    await ctx.db.delete(usuario._id);
+    return { estado: "borrado", sesiones: sesiones.length, votos: votos.length };
+  },
+});
