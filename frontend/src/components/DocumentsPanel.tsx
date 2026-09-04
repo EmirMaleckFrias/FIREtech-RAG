@@ -52,10 +52,10 @@ import {
 
 const JUST_READY_MS = 1_800;
 const ALLOWED_EXT_RE = /\.(pdf|docx|xlsx|csv|txt|md)$/i;
-/** Mismo valor que `limiteSubidaMb` en convex/lib/config.ts (18: el tope de
- *  una petición HTTP de Convex son 20 MB, con margen para el sobre). Se usa
- *  mientras estadisticas.sistema no anuncia el del despliegue. */
-const DEFAULT_UPLOAD_LIMIT_MB = 18;
+/** Mismo valor que `limiteSubidaMb` en convex/lib/config.ts (100 MB). Es solo el
+ *  valor de reserva mientras no llega el real por `estadisticas.sistema`; la
+ *  subida por URL firmada no limita el tamaño, el techo lo pone la ingesta. */
+const DEFAULT_UPLOAD_LIMIT_MB = 100;
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), a[href], input:not([disabled]):not([type="file"]), ' +

@@ -93,8 +93,7 @@ una URL firmada (`documentos.urlDeSubida`), sube el fichero directo al almacenam
 registra (`documentos.registrar`), que lo deja en `processing` y agenda la ingesta. El listado
 está suscrito: el documento pasa a `ready` o a `failed` con su mensaje sin recargar.
 
-Reglas: extensiones `pdf docx xlsx csv txt md`; tamaño hasta `UPLOAD_LIMIT_MB` (18 MB por
-defecto); nombre saneado a `[A-Za-z0-9._-]`; un nombre ya indexado responde `conflicto` y hay
+Reglas: extensiones `pdf docx xlsx csv txt md`; tamaño hasta `UPLOAD_LIMIT_MB` (100 MB por defecto; la URL firmada no limita el tamaño, el techo es la memoria y el tiempo de la acción de ingesta); nombre saneado a `[A-Za-z0-9._-]`; un nombre ya indexado responde `conflicto` y hay
 que borrarlo antes, salvo que el existente esté en `failed`, en cuyo caso se reutiliza su fila.
 
 ### Reindexar

@@ -33,7 +33,7 @@ está en `frontend/convex/CONTRATO.md`.
 Otras cosas que se ganan por el camino: el fichero original queda guardado, así que reindexar
 no exige volver a subirlo (en Vercel el disco era efímero y el reintento respondía 409
 `file_not_stored`); el límite de subida pasa de 4 MB (tope de 4,5 MB por petición en Vercel) a
-18 MB (20 MB por petición HTTP en Convex) y el fichero va directo al almacenamiento; ya no hay
+100 MB (la URL firmada de Convex no limita el tamaño; el techo es la ingesta) y el fichero va directo al almacenamiento; ya no hay
 que vigilar el tamaño del bundle Python ni el runtime de `.python-version`; ni levantar Qdrant
 en Docker para desarrollar.
 
@@ -104,7 +104,7 @@ en Docker para desarrollar.
   `error`); el frontend acepta también `hybrid` y `dense` por compatibilidad de lectura.
 - **Los campos de las tablas van en camelCase y en español** (`fileName`, `ingestadoEn`,
   `creadoEn`).
-- **Subida en dos pasos**: URL firmada, POST del fichero, `registrar`. Límite 18 MB por defecto.
+- **Subida en dos pasos**: URL firmada, POST del fichero, `registrar`. Límite 100 MB por defecto (`UPLOAD_LIMIT_MB`).
 - **Feedback**: un voto por usuario y mensaje; repetir reemplaza (en Postgres se acumulaban).
 - **Borrar conversación** existe como operación (`sesiones.borrar`); el backend anterior no lo
   tenía como endpoint.

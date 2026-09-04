@@ -129,9 +129,17 @@ export function ajustes(): Ajustes {
     // Convex recorre hasta 1024, así que hay margen de sobra.
     searchTopK: numero("SEARCH_TOP_K", 60),
     dominioPermitido: texto("DOMINIO_PERMITIDO", "airobotix.net"),
-    // 20 MB es el tope de una petición HTTP de Convex, frente a los 4,5 MB de
-    // Vercel. Se deja algo por debajo para el sobre de la petición.
-    limiteSubidaMb: numero("UPLOAD_LIMIT_MB", 18),
+    // 100 MB. La subida va por URL firmada de Convex, que NO limita el tamaño
+    // del fichero (documentado el 4 sep 2026: "the file size is not limited");
+    // lo que la acota es que el POST de subida tiene 2 minutos de tiempo, así
+    // que a 1 MB/s caben unos 120 MB. El techo de verdad es la INGESTA: la
+    // acción de Node dispone de 512 MiB y 10 minutos, carga el fichero entero
+    // en memoria y pdf.js necesita varias veces su tamaño para extraer el
+    // texto. 100 MB deja margen para cualquier artículo o guía; subir de ahí
+    // exigiría partir la ingesta en varias acciones, no cambiar este número.
+    // (Antes 18 MB por confundir la subida con el tope de 20 MB de una
+    // petición HTTP de Convex, que no interviene en este camino.)
+    limiteSubidaMb: numero("UPLOAD_LIMIT_MB", 100),
   };
 }
 

@@ -238,7 +238,7 @@ otro texto vale falso; vacío deja el default.
 | `ENVIRONMENT` | `production` | Etiqueta del entorno. Se lee, pero hoy ningún módulo la consulta. |
 | `PROMPT_VERSION` | `v4` | Se muestra en Ajustes > Sistema. La telemetría del mensaje lleva la constante `VERSION_PROMPT` de `agente/prompt.ts`. |
 | `DOMINIO_PERMITIDO` | `airobotix.net` | Dominio de correo exigido para darse de alta y para entrar. |
-| `UPLOAD_LIMIT_MB` | `18` | Tope por fichero. 20 MB es el tope de una petición HTTP de Convex; se deja margen para el sobre. |
+| `UPLOAD_LIMIT_MB` | `100` | Tope por fichero. La subida por URL firmada no limita el tamaño (el POST tiene 2 minutos); el techo real es la ingesta, que carga el fichero en una acción de Node con 512 MiB y 10 minutos. |
 
 Variables de Convex Auth, también en el despliegue:
 
@@ -274,7 +274,7 @@ Variables de Convex Auth, también en el despliegue:
 | | |
 |---|---|
 | Formatos | `.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md`. `.doc` (Word 97-2003) se rechaza con un mensaje que dice cómo convertirlo. |
-| Tamaño | `UPLOAD_LIMIT_MB`, 18 MB por defecto (20 MB es el tope de una petición HTTP de Convex). El fichero va directo al almacenamiento, no por una función. |
+| Tamaño | `UPLOAD_LIMIT_MB`, 100 MB por defecto. El fichero va directo al almacenamiento por URL firmada (sin límite de tamaño, 2 minutos para subirlo); el techo lo pone la ingesta (512 MiB y 10 minutos por acción). |
 | Fragmentos por documento | Máximo 4000 (`MAX_CHUNKS`); por encima, la ingesta falla pidiendo dividir el archivo. Fragmentos de unos 400 tokens con solape de 60; texto por fragmento recortado a 8000 caracteres. |
 | PDF | Se leen las páginas a dos columnas en orden de lectura. Se descarta la bibliografía por defecto, las marcas de descarga y las cabeceras y pies repetidos. Se extraen título, primer autor, año y DOI para citar como "Autor et al., año". Un PDF escaneado sin texto extraíble se rechaza: no hay OCR. |
 | Word | Párrafos agrupados por sección (encabezado vigente) y una tabla por fragmento, con celdas combinadas resueltas. Sin páginas: se cita por sección o por número de fragmento. |

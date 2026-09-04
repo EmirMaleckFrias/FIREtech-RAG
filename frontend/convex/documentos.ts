@@ -11,7 +11,8 @@
 //   firmada (`urlDeSubida`), sube el fichero directamente al almacenamiento de
 //   Convex y luego registra el `storageId` (`registrar`). En Vercel el cuerpo
 //   de la petición tenía un tope de 4,5 MB y por eso el límite efectivo era de
-//   4 MB; aquí el límite lo pone `UPLOAD_LIMIT_MB` y es bastante más alto.
+//   4 MB; aquí el límite lo pone `UPLOAD_LIMIT_MB` (100 MB): la subida por URL
+//   firmada no acota el tamaño, el techo es la memoria y el tiempo de la ingesta.
 // - **El fichero original queda guardado** (`documents.storageId`). Es lo que
 //   arregla el reindexado: en Vercel el disco era efímero y el reintento
 //   respondía 409 `file_not_stored` pidiendo resubir. Ese caso desaparece.
