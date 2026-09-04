@@ -15,7 +15,7 @@ from typing import AsyncIterator, Literal
 
 from app.config import get_settings
 from app.models import Chunk, SearchFilters, SourceRef
-from app.services import modos, planner, telemetry, verificador
+from app.services import modos, planner, revisor, telemetry, verificador
 from app.services.openai_client import get_async_client, openai_semaphore
 from app.services.qdrant import hybrid_search, index_inventory
 from app.services.reranker import filter_relevant, rerank
@@ -346,6 +346,52 @@ def _sources_payload(accumulated: dict[str, Chunk]) -> list[dict]:
     ]
 
 
+def _registrar_verificacion(
+    informe: verificador.Verificacion,
+    *,
+    revision_previa: bool,
+    revisiones: int = 0,
+    abstencion_segura: bool = False,
+) -> None:
+    """Resumen auditable del dictamen que corresponde al texto publicado."""
+    telemetry.current().set_meta(
+        verificacion={
+            "afirmaciones": len(informe.afirmaciones),
+            "sostenidas": sum(
+                1 for a in informe.afirmaciones
+                if a.veredicto == verificador.SOSTENIDA
+            ),
+            "no_sostenidas": sum(
+                1 for a in informe.afirmaciones
+                if a.veredicto == verificador.NO_SOSTENIDA
+            ),
+            "parciales": sum(
+                1 for a in informe.afirmaciones
+                if a.veredicto == verificador.PARCIAL
+            ),
+            "sin_cita": sum(
+                1 for a in informe.afirmaciones
+                if a.veredicto == verificador.SIN_CITA
+            ),
+            "sin_verificar": sum(
+                1 for a in informe.afirmaciones
+                if a.veredicto == verificador.SIN_VERIFICAR
+            ),
+            "citas_sin_resolver": informe.citas_sin_resolver,
+            "fidelidad": informe.fidelidad,
+            "ok": informe.ok,
+            "revision_previa": revision_previa,
+            "revisiones": revisiones,
+            "abstencion_segura": abstencion_segura,
+        }
+    )
+
+
+def _trozos_para_stream(texto: str, tamano: int = 240) -> list[str]:
+    """Trozos visibles solo DESPUES de aprobar el texto completo."""
+    return [texto[i : i + tamano] for i in range(0, len(texto), tamano)]
+
+
 async def run_agent(
     message: str, history: list[dict], modo: str | None = None
 ) -> AsyncIterator[AgentEvent]:
@@ -363,6 +409,10 @@ async def run_agent(
         )
 
     perfil = modos.resolver(modo, settings)
+    revision_previa = bool(
+        settings.enable_answer_verification
+        and settings.enable_pre_response_review
+    )
 
     client = get_async_client()
     tel = telemetry.current()
@@ -460,6 +510,7 @@ async def run_agent(
             })
         kwargs: dict = {
             "model": settings.openai_model,
+            "temperature": settings.llm_temperature,
             "messages": messages,
             "stream": True,
             # El último chunk del stream trae el `usage` de la ronda (prompt,
@@ -522,7 +573,7 @@ async def run_agent(
                     # call (preámbulo): ese texto entra igualmente al content final,
                     # así lo streameado y lo persistido coinciden. Solo se suprime
                     # contenido que llegue DESPUÉS de deltas de tool_calls.
-                    if not tool_calls:
+                    if not tool_calls and not revision_previa:
                         if not sources_emitted:
                             yield AgentEvent(
                                 "sources", {"sources": _sources_payload(accumulated)}
@@ -676,17 +727,51 @@ async def run_agent(
         # Respuesta final (sin tool calls, o forzada con tool_choice="none").
         # Persistimos exactamente lo emitido (todas las rondas); si nada llegó a
         # emitirse (orden de deltas atípico), cae al contenido de esta ronda.
-        content = "".join(emitted_parts) or "".join(content_parts)
+        content = "".join(content_parts) if revision_previa else (
+            "".join(emitted_parts) or "".join(content_parts)
+        )
+
+        informe_previo: verificador.Verificacion | None = None
+        if revision_previa:
+            requerida = {it.id: it.evidence_needed for it in plan} or None
+            resultado = await revisor.revisar_antes_de_publicar(
+                message,
+                content,
+                messages,
+                list(accumulated.values()),
+                requerida,
+            )
+            content = resultado.contenido
+            informe_previo = resultado.informe
+            if resultado.revisiones:
+                tel.incr("respuestas_revisadas")
+            if resultado.uso_abstencion_segura:
+                tel.incr("abstenciones_seguras")
+            _registrar_verificacion(
+                informe_previo,
+                revision_previa=True,
+                revisiones=resultado.revisiones,
+                abstencion_segura=resultado.uso_abstencion_segura,
+            )
+
         if not sources_emitted:
             yield AgentEvent("sources", {"sources": _sources_payload(accumulated)})
             sources_emitted = True
+
+        # En revision previa el borrador nunca se emitio. Solo ahora, despues
+        # de aprobar o sustituirlo por una abstencion segura, se hace visible.
+        if revision_previa:
+            for trozo in _trozos_para_stream(content):
+                yield AgentEvent("token", {"text": trozo})
 
         # Verificación de atribución. Va DESPUÉS de streamear la respuesta y
         # antes de `final`: el texto ya se leyó, así que verificar no retrasa
         # nada visible, y el veredicto llega como anotación. No reescribe la
         # respuesta ni la censura; la deja auditable. Su fallo no tumba la
         # pregunta, igual que el del reranker.
-        if settings.enable_answer_verification and content:
+        if informe_previo is not None:
+            yield AgentEvent("verificacion", informe_previo.to_payload())
+        elif settings.enable_answer_verification and content:
             requerida = {it.id: it.evidence_needed for it in plan} or None
             try:
                 informe = await verificador.verificar(
@@ -695,42 +780,7 @@ async def run_agent(
             except Exception:
                 logger.exception("La verificación falló; la respuesta se emite sin anotar")
             else:
-                # Resumen escalar a telemetría: es lo que hace la verificación
-                # AUDITABLE y no solo visible. `summary()` ya viaja al evento
-                # `metrics`, a los evals y a la futura columna
-                # chat_messages.metrics, así que persiste por un solo sitio.
-                # El detalle por afirmación se queda en el evento SSE: no tiene
-                # sentido duplicar párrafos de respuesta en las métricas.
-                # Sin tel.mark("fidelidad"): mark() redondea a 1 decimal
-                # porque está pensado para marcas de tiempo en ms, y con un
-                # ratio 0..1 eso pierde precisión (0.667 -> 0.7). El valor
-                # exacto va en meta, que es donde se lee.
-                tel.set_meta(
-                    verificacion={
-                        "afirmaciones": len(informe.afirmaciones),
-                        "sostenidas": sum(
-                            1 for a in informe.afirmaciones
-                            if a.veredicto == verificador.SOSTENIDA
-                        ),
-                        "no_sostenidas": sum(
-                            1 for a in informe.afirmaciones
-                            if a.veredicto == verificador.NO_SOSTENIDA
-                        ),
-                        "parciales": sum(
-                            1 for a in informe.afirmaciones
-                            if a.veredicto == verificador.PARCIAL
-                        ),
-                        "sin_verificar": sum(
-                            1 for a in informe.afirmaciones
-                            if a.veredicto == verificador.SIN_VERIFICAR
-                        ),
-                        # El fallo grave: la respuesta apuntó a una fuente que
-                        # no existe en esta consulta. Se guarda entero.
-                        "citas_sin_resolver": informe.citas_sin_resolver,
-                        "fidelidad": informe.fidelidad,
-                        "ok": informe.ok,
-                    }
-                )
+                _registrar_verificacion(informe, revision_previa=False)
                 yield AgentEvent("verificacion", informe.to_payload())
 
         yield AgentEvent(

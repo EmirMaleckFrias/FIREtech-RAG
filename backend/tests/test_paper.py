@@ -134,6 +134,65 @@ def test_la_fecha_de_descarga_no_se_toma_por_ano_de_publicacion():
     assert meta.anio == "2019"
 
 
+def test_un_rango_de_vigencia_no_se_convierte_en_ano_de_publicacion():
+    texto = "Updated Global Action Plan on AMR 2026-2036"
+
+    meta = paper.extraer_metadatos(_chars(PRIMERA_PAGINA), texto)
+
+    assert meta.anio == ""
+    assert meta.referencia == ""
+
+
+def test_un_ano_futuro_no_se_acepta_como_publicacion():
+    meta = paper.extraer_metadatos(_chars(PRIMERA_PAGINA), "Plan estrategico 2036")
+
+    assert meta.anio == ""
+    assert meta.referencia == ""
+
+
+def test_sin_doi_no_toma_un_ano_del_cuerpo_o_las_referencias():
+    texto = (
+        "Abstract\n"
+        "The cohort was recruited between 2019 and 2024.\n"
+        "References\n"
+        "Smith J. Previous study. 2025.\n"
+    )
+
+    meta = paper.extraer_metadatos(_chars(PRIMERA_PAGINA), texto)
+
+    assert meta.anio == ""
+    assert meta.referencia == ""
+
+
+def test_una_organizacion_no_se_convierte_en_autor_et_al():
+    pagina = [
+        ("Diabetes mellitus tipo 2: diagnostico y control", 16.0, 50.0),
+        ("Organizacion Mundial de la Salud, 2026", 11.0, 80.0),
+        ("Resumen", 12.0, 110.0),
+        ("Documento de sintesis para profesionales sanitarios.", 10.0, 130.0),
+    ]
+
+    meta = paper.extraer_metadatos(_chars(pagina), "OMS 2026\nResumen")
+
+    assert meta.autor == ""
+    assert meta.referencia == ""
+
+
+def test_un_subtitulo_no_se_convierte_en_apellido():
+    pagina = [
+        ("Resistencia a los antimicrobianos", 16.0, 50.0),
+        ("Documentos base principales", 11.0, 80.0),
+        ("Vigilancia y uso responsable con enfoque One Health", 11.0, 100.0),
+        ("Resumen", 12.0, 130.0),
+        ("Sintesis de multiples fuentes internacionales.", 10.0, 150.0),
+    ]
+
+    meta = paper.extraer_metadatos(_chars(pagina), "Plan 2026-2036\nResumen")
+
+    assert meta.autor == ""
+    assert meta.referencia == ""
+
+
 def test_la_referencia_es_autor_y_anio_cuando_se_puede():
     texto = "doi:10.1000/xyz 2024"
 

@@ -47,6 +47,7 @@ TEST_ENV: dict[str, str] = {
     # get_settings.cache_clear), como en test_verificador.py.
     "ENABLE_QUERY_PLANNING": "false",
     "ENABLE_ANSWER_VERIFICATION": "false",
+    "ENABLE_PRE_RESPONSE_REVIEW": "false",
     "ENVIRONMENT": "local",
 }
 
@@ -211,6 +212,29 @@ def make_json_completion(
         object="chat.completion",
         model=model,
         choices=[types.SimpleNamespace(index=0, message=message, finish_reason=finish_reason)],
+        usage=usage,
+    )
+
+
+def make_text_completion(
+    text: str,
+    usage: Any = None,
+    model: str | None = None,
+    finish_reason: str = "stop",
+) -> types.SimpleNamespace:
+    """Completion no-stream de texto libre, usada por el redactor final."""
+    message = types.SimpleNamespace(
+        role="assistant", content=text, tool_calls=None
+    )
+    return types.SimpleNamespace(
+        id="chatcmpl-fake",
+        object="chat.completion",
+        model=model,
+        choices=[
+            types.SimpleNamespace(
+                index=0, message=message, finish_reason=finish_reason
+            )
+        ],
         usage=usage,
     )
 

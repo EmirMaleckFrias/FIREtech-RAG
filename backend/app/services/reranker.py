@@ -29,6 +29,7 @@ async def _json_completion(messages: list[dict], note: str) -> dict:
         async with openai_slot():
             resp = await get_async_client().chat.completions.create(
                 model=model,
+                temperature=settings.llm_temperature,
                 response_format={"type": "json_object"},
                 messages=messages,
             )

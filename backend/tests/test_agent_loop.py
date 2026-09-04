@@ -14,6 +14,7 @@ from app.services.agent import AgentEvent, run_agent
 from tests.conftest import (
     FakeStream,
     make_json_completion,
+    make_text_completion,
     make_text_stream,
     make_tool_call_stream,
     make_usage,
@@ -465,6 +466,38 @@ async def test_la_verificacion_se_emite_antes_del_final(
     assert tipos.index("verificacion") < tipos.index("final")
     # sin citas no se gasta llamada al verificador: solo la del agente
     assert len(fake_openai.calls) == 1
+
+
+async def test_revision_previa_oculta_el_borrador_y_publica_solo_la_correccion(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    monkeypatch.setenv("ENABLE_ANSWER_VERIFICATION", "true")
+    monkeypatch.setenv("ENABLE_PRE_RESPONSE_REVIEW", "true")
+    get_settings.cache_clear()
+    borrador = "El AUC fue 0.99 sin ninguna fuente."
+    correccion = "No encuentro ese dato en los documentos recuperados."
+    fake_openai.queue(
+        make_text_stream(borrador, usage=make_usage(40, 4)),
+        make_text_completion(correccion, usage=make_usage(50, 7)),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("dame el AUC", modo="normal")
+
+    visible = "".join(
+        ev.data["text"] for ev in eventos if ev.type == "token"
+    )
+    assert visible == correccion
+    assert borrador not in visible
+    assert eventos[-1].data["content"] == correccion
+    tipos = _tipos(eventos)
+    assert tipos.index("sources") < tipos.index("token")
+    assert tipos.index("verificacion") < tipos.index("final")
+    assert fake_openai.calls[0]["stream"] is True
+    assert "stream" not in fake_openai.calls[1]
+    meta = tel.summary()["meta"]["verificacion"]
+    assert meta["revision_previa"] is True
+    assert meta["revisiones"] == 1
 
 
 async def test_una_cita_inventada_queda_registrada_en_la_telemetria(

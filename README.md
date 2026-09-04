@@ -83,6 +83,9 @@ arrancarlo.
 - **Telemetría por pregunta**: tokens medidos del `usage` real por componente (agente,
   reranker, embeddings) y coste **estimado** con tarifas asumidas, siempre etiquetado como
   tal. Sale como evento SSE `metrics`.
+- **Revisión previa fail-closed**: la respuesta se redacta en privado, un crítico comprueba
+  cada afirmación contra su cita y, si falla, el redactor la corrige y se vuelve a verificar.
+  El navegador solo recibe una versión aprobada o una abstención segura.
 
 ## 2. Arquitectura
 
@@ -150,6 +153,8 @@ copy .env.example .env
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | **Obligatorias para autenticación real.** Son las que sostienen el login, los roles y toda la persistencia. La service key vive solo en el backend. |
 | `MAX_HOPS` | Techo de búsquedas del despliegue; `0` = manda el modo (normal 2, extendido sin tope). Solo puede apretar el perfil, nunca aflojarlo. |
 | `AGENT_BUDGET_S` / `AGENT_MAX_HOPS_SIN_AVANCE` | Los otros dos techos: 240 s de reloj y 3 búsquedas sin nada nuevo. |
+| `ENABLE_ANSWER_VERIFICATION` / `ENABLE_PRE_RESPONSE_REVIEW` | Activa el crítico de atribución y mantiene el borrador privado hasta aprobarlo. |
+| `PRE_RESPONSE_REVIEW_MAX_REVISIONS` / `PRE_RESPONSE_REVIEW_TIMEOUT_S` | Una corrección y 45 s de presupuesto por defecto; al agotarse, se abstiene. |
 | `RERANK_TOP_K` / `SEARCH_TOP_K` | 12 y 60. |
 | `ENVIRONMENT` | `local` o `production`. Los dos entornos comparten la tabla `documents` pero tienen **Qdrants distintos**, así que el registro se filtra y se escribe por entorno. `ingest.py` lo exige en toda ingesta real. |
 | `CORS_ORIGINS` | `http://localhost:5173` en desarrollo. |

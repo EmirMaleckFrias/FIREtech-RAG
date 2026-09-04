@@ -233,33 +233,46 @@ async def test_un_indice_fuera_de_rango_no_contamina(settings_override, fake_ope
     assert _veredictos(informe) == [SIN_VERIFICAR]
 
 
-async def test_el_tope_de_afirmaciones_deja_las_sobrantes_sin_verificar(
+async def test_una_respuesta_larga_se_verifica_EN_LOTES_sin_dejar_nada_fuera(
     settings_override, fake_openai, monkeypatch
 ):
-    """Una respuesta larguísima no puede disparar el reloj, pero recortar no
-    puede significar aprobar: lo que no se juzga queda declarado como tal."""
+    """El tope acota el tamaño de cada petición, no cuánto se verifica.
+
+    Antes recortaba: lo que excedía el tope quedaba `sin_verificar`, y eso
+    convertía el límite en un agujero silencioso justo en las respuestas
+    largas, que son las que más afirman. Una sesión de estrés midió 34 y 36
+    afirmaciones con 10 y 12 sin juzgar. Se sigue acotando el request porque
+    pedir una lista muy larga de veredictos en un solo JSON degrada el
+    dictamen, pero ahora se manda en varias.
+    """
     monkeypatch.setenv("VERIFIER_MAX_CLAIMS", "2")
     get_settings.cache_clear()
 
     chunks = [_chunk(f"c{i}", f"Dato {i}.", f"doc_{i}.pdf", i + 1) for i in range(4)]
     respuesta = " ".join(f"Afirmación {i} {c.cite()}." for i, c in enumerate(chunks))
+    # dos lotes de dos: el indice `i` de cada respuesta es LOCAL a su lote
     fake_openai.queue(
         make_json_completion(
-            {
-                "veredictos": [
-                    {"i": 0, "veredicto": "sostenida", "motivo": "ok"},
-                    {"i": 1, "veredicto": "sostenida", "motivo": "ok"},
-                ]
-            }
-        )
+            {"veredictos": [
+                {"i": 0, "veredicto": "sostenida", "motivo": "ok"},
+                {"i": 1, "veredicto": "no_sostenida", "motivo": "no consta"},
+            ]}
+        ),
+        make_json_completion(
+            {"veredictos": [
+                {"i": 0, "veredicto": "sostenida", "motivo": "ok"},
+                {"i": 1, "veredicto": "parcial", "motivo": "a medias"},
+            ]}
+        ),
     )
 
     informe = await verificar(respuesta, chunks)
 
-    assert _veredictos(informe) == [SOSTENIDA, SOSTENIDA, SIN_VERIFICAR, SIN_VERIFICAR]
-    # la fidelidad se calcula solo sobre lo juzgado, no sobre el total
-    assert informe.fidelidad == pytest.approx(1.0)
-    assert "tope de 2" in informe.afirmaciones[2].motivo
+    # las CUATRO juzgadas, y cada veredicto en su afirmación correcta
+    assert _veredictos(informe) == [SOSTENIDA, NO_SOSTENIDA, SOSTENIDA, PARCIAL]
+    assert SIN_VERIFICAR not in _veredictos(informe)
+    assert informe.fidelidad == pytest.approx(0.5)
+    assert len(fake_openai.calls) == 2  # dos peticiones, no una gigante
 
 
 async def test_sin_afirmaciones_sostenidas_el_plan_queda_sin_cubrir(
@@ -400,3 +413,84 @@ async def test_una_cita_compartida_por_varios_fragmentos_los_manda_todos(
     assert "La conversion fue del 31.6%." in enviado
     assert "El AUC fue 0.94." in enviado
     assert "FRAGMENTO 1 DE 2" in enviado
+
+
+async def test_una_respuesta_de_inventario_no_es_una_afirmacion_sin_cita(
+    settings_override, fake_openai
+):
+    """Regresión de una sesión de estrés.
+
+    La herramienta de inventario le indica al modelo citar el catálogo como
+    `[inventario del índice]`, que a propósito NO casa con CITATION_RE: no
+    apunta a un fragmento, apunta a un conteo exacto de Qdrant. Al no
+    reconocerla, "tienes 12 documentos indexados y son estos" se leía como una
+    respuesta que afirma sin citar nada -el peor veredicto posible- cuando en
+    realidad citó la única fuente que existe para ese dato.
+    """
+    informe = await verificar(
+        "Hay 12 documentos indexados y 173 fragmentos en total "
+        "[inventario del índice].",
+        [],
+    )
+
+    assert informe.ok is True
+    assert informe.afirmaciones == []
+    assert informe.fidelidad is None
+    assert "inventario del índice" in informe.nota
+    assert fake_openai.calls == []
+
+
+async def test_la_cita_de_inventario_se_reconoce_sin_tilde_ni_mayusculas(
+    settings_override, fake_openai
+):
+    """El modelo copia la cita, pero no se puede confiar en que respete la
+    tilde: fallar por eso devolvería el falso positivo por la puerta de atrás."""
+    for variante in (
+        "Hay 3 documentos [inventario del indice].",
+        "Hay 3 documentos [Inventario del Índice].",
+    ):
+        informe = await verificar(variante, [])
+        assert informe.ok is True, variante
+        assert informe.afirmaciones == [], variante
+
+
+async def test_citar_el_inventario_no_blanquea_una_respuesta_de_contenido(
+    settings_override, fake_openai
+):
+    """Lo que NO puede pasar: que mencionar el inventario sirva de comodín. Si
+    la respuesta trae citas de fragmentos, esas se auditan igual."""
+    ch = _chunk("c1", "La conversion fue del 31.6%.", "e.pdf", 3)
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "no_sostenida", "motivo": "no consta"}]}
+        )
+    )
+
+    informe = await verificar(
+        f"Hay 3 documentos [inventario del índice]. El AUC fue 0.99 {ch.cite()}.",
+        [ch],
+    )
+
+    assert [a.veredicto for a in informe.afirmaciones] == [NO_SOSTENIDA]
+    assert informe.fidelidad == 0.0
+
+
+async def test_una_afirmacion_despues_de_la_ultima_cita_no_desaparece(
+    settings_override, fake_openai
+):
+    ch = _chunk("c1", "El AUC fue 0.94.", "e.pdf", 3)
+    fake_openai.queue(
+        make_json_completion({
+            "veredictos": [
+                {"i": 0, "veredicto": "sostenida", "motivo": "coincide"}
+            ]
+        })
+    )
+
+    informe = await verificar(
+        f"El AUC fue 0.94 {ch.cite()}. La cohorte tuvo 900 pacientes.",
+        [ch],
+    )
+
+    assert [a.veredicto for a in informe.afirmaciones] == [SOSTENIDA, SIN_CITA]
+    assert informe.ok is False

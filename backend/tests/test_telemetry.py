@@ -203,3 +203,59 @@ def test_summary_es_serializable_y_coherente():
     assert s["marks"] == {"primer_token": 123.5}
     assert s["meta"] == {"prompt_version": "v1", "model": "gpt-5.4"}
     assert len(s["rounds"]) == 5 and s["rounds"][0]["finish_reason"] == "tool_calls"
+
+
+# ---------------------------------------------------------------------------
+# Precios con los nombres del AI Gateway de Vercel
+# ---------------------------------------------------------------------------
+def test_el_prefijo_de_proveedor_no_rompe_la_tarifa():
+    """Regresión de una sesión de estrés donde las diez preguntas reportaron
+    `usd=0.0`.
+
+    El AI Gateway de Vercel nombra los modelos `openai/gpt-5.4`, y con eso
+    ninguna clave de la tabla casaba: el coste salía 0.00 siempre y con él
+    dejaban de frenar `--max-usd` de la ingesta y el `cost_usd` de los evals.
+    """
+    from app.services.telemetry import price_for
+
+    assert price_for("openai/gpt-5.4") == price_for("gpt-5.4")
+    assert price_for("openai/gpt-5.4-mini") == price_for("gpt-5.4-mini")
+    assert price_for("openai/text-embedding-3-large") == price_for("text-embedding-3-large")
+
+
+def test_sigue_ganando_la_clave_mas_larga_con_prefijo():
+    """El desempate por clave más larga tiene que sobrevivir al prefijo: si no,
+    `openai/gpt-5.4-mini` cobraría la tarifa del modelo grande."""
+    from app.services.telemetry import price_for
+
+    assert price_for("openai/gpt-5.4-mini") != price_for("openai/gpt-5.4")
+
+
+def test_un_snapshot_con_prefijo_tambien_resuelve():
+    from app.services.telemetry import price_for
+
+    assert price_for("openai/gpt-5.4-2026-03-01") == price_for("gpt-5.4")
+
+
+def test_un_modelo_desconocido_sigue_sin_tarifa():
+    """Devolver None es lo que hace que aparezca en `unknown_models`: inventar
+    una tarifa sería peor que no tenerla."""
+    from app.services.telemetry import price_for
+
+    assert price_for("anthropic/claude-x") is None
+    assert price_for("modelo-inventado") is None
+
+
+def test_el_coste_de_una_ronda_por_el_gateway_no_es_cero():
+    """La prueba de extremo a extremo del fallo: una ronda real con el nombre
+    prefijado tenía que dejar de costar 0."""
+    from app.services import telemetry
+
+    tel = telemetry.Telemetry()
+    tel.record(
+        "agente", "openai/gpt-5.4",
+        types.SimpleNamespace(prompt_tokens=1000, completion_tokens=500, total_tokens=1500),
+    )
+    resumen = tel.summary()
+    assert resumen["cost_usd"] > 0
+    assert resumen["unknown_models"] == []

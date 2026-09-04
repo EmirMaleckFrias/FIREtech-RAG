@@ -43,6 +43,7 @@ async def plan_question(question: str, max_items: int = 5) -> list[PlanItem]:
         async with openai_slot():
             response = await get_async_client().chat.completions.create(
                 model=model,
+                temperature=settings.llm_temperature,
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": _SYSTEM},

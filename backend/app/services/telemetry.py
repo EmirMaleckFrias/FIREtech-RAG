@@ -36,10 +36,19 @@ COMPONENTS = ("agente", "reranker", "embeddings", "juez")
 
 def price_for(model: str) -> tuple[float, float, float] | None:
     """Tarifa del modelo (acepta snapshots tipo 'gpt-5.4-2026-03-01'):
-    gana la clave más larga que sea prefijo del nombre."""
+    gana la clave más larga que sea prefijo del nombre.
+
+    Se quita antes un prefijo de proveedor `algo/`, porque el AI Gateway de
+    Vercel nombra los modelos como `openai/gpt-5.4` y con eso NINGUNA clave de
+    la tabla casaba: el coste salía 0.00 en todas las peticiones y con él
+    dejaban de frenar `--max-usd` de la ingesta y el `cost_usd` de los evals.
+    Se descubrió en una sesión de estrés donde las diez preguntas reportaron
+    `usd=0.0`.
+    """
+    nombre = model.split("/", 1)[1] if "/" in model else model
     best: str | None = None
     for key in ASSUMED_PRICES:
-        if model == key or model.startswith(key + "-"):
+        if nombre == key or nombre.startswith(key + "-"):
             if best is None or len(key) > len(best):
                 best = key
     return ASSUMED_PRICES[best] if best else None

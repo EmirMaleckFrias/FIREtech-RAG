@@ -26,8 +26,8 @@ Cómo funciona:
 Tres decisiones de diseño que conviene no revertir sin pensarlo:
 
 - **El veredicto por defecto es "sin verificar", nunca "sostenida".** Si el
-  modelo falla, si el JSON viene malformado o si la respuesta excede
-  `verifier_max_claims`, las afirmaciones quedan sin verificar. Un verificador
+  modelo falla o si el JSON viene malformado, las afirmaciones quedan sin
+  verificar. Un verificador
   que ante la duda aprueba es peor que no tener verificador, porque produce
   una garantía falsa.
 - **No reescribe ni censura la respuesta.** El usuario ya la leyó mientras
@@ -96,6 +96,15 @@ _FIN_DE_FRASE = re.compile(r"(?<=[.;:!?])\s+")
 # Una "frase" sin ninguna letra ni digito no afirma nada: es puntuacion
 # suelta, una viñeta o un separador.
 _TIENE_CONTENIDO = re.compile(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]")
+
+# La herramienta de inventario le dice al modelo que cite el catálogo del
+# índice así (ver `_execute_inventory` en app/services/agent.py). NO casa con
+# CITATION_RE, y con razón: no apunta a un fragmento, apunta a un conteo exacto
+# de Qdrant. Pero hay que reconocerla, porque si no una respuesta de inventario
+# -"tienes 12 documentos indexados y son estos"- se leía como una respuesta que
+# afirma sin citar nada, o sea el peor veredicto posible, cuando en realidad
+# citó la única fuente que existe para ese dato.
+_CITA_INVENTARIO = re.compile(r"\[inventario del [ií]ndice\]", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -182,7 +191,26 @@ def _trocear(answer: str) -> list[tuple[str, str]]:
                 continue
             if not _TIENE_CONTENIDO.search(frase):
                 continue
+            # Una frase que YA trae su cita de inventario está atribuida: no se
+            # le puede colgar la cita de fragmento que venga después. Sin esto,
+            # "hay 12 documentos indexados [inventario del índice]" se juzgaba
+            # contra un fragmento de un paper, y salía no sostenida con razón.
+            if _CITA_INVENTARIO.search(frase):
+                continue
             salida.append((frase, m.group(0)))
+
+    # Lo que aparece DESPUES de la ultima cita no puede quedar invisible para
+    # la auditoria. Antes, "dato correcto [fuente]. Ademas, AUC 0.99" daba
+    # fidelidad 1.0 porque la segunda afirmacion nunca entraba al informe.
+    cola = answer[ultimo_fin:].strip()
+    if ultimo_fin > 0 and cola:
+        for frase in _FIN_DE_FRASE.split(cola):
+            frase = frase.strip()
+            if not frase or frase.endswith(":") or not _TIENE_CONTENIDO.search(frase):
+                continue
+            if _CITA_INVENTARIO.search(frase) or _parece_abstencion(frase):
+                continue
+            salida.append((frase, ""))
     return salida
 
 
@@ -237,6 +265,7 @@ async def _dictaminar(
         async with openai_slot():
             resp = await get_async_client().chat.completions.create(
                 model=model,
+                temperature=settings.llm_temperature,
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": _SYSTEM},
@@ -304,6 +333,17 @@ async def verificar(
                 ok=True,
                 nota="la respuesta se abstiene y no cita: correcto, nada que atribuir",
             )
+        if _CITA_INVENTARIO.search(answer):
+            # Respuesta de inventario: cita el catálogo del índice, que es la
+            # fuente correcta y exacta para "cuántos documentos hay". No hay
+            # fragmento contra el que dictaminar, y no haberlo no es un fallo.
+            return Verificacion(
+                ok=True,
+                nota=(
+                    "la respuesta cita el inventario del índice: es un conteo "
+                    "exacto, no una atribución a un fragmento"
+                ),
+            )
         # Afirma cosas y no respalda ninguna. En investigación médica esto no
         # es un aviso, es la respuesta inutilizable: no se puede rastrear nada
         # hasta su fuente. Se reporta como una afirmación no citada que abarca
@@ -332,7 +372,19 @@ async def verificar(
     pendientes: list[tuple[int, Afirmacion, list[Chunk]]] = []
     citas_sin_resolver: list[str] = []
 
+    hay_sin_cita = False
     for texto, cita in troceado:
+        if not cita:
+            hay_sin_cita = True
+            afirmaciones.append(
+                Afirmacion(
+                    texto=texto,
+                    cita="",
+                    veredicto=SIN_CITA,
+                    motivo="afirmacion posterior a la ultima cita, sin fuente propia",
+                )
+            )
+            continue
         clave = " ".join(cita.casefold().split())
         chs = indice.get(clave)
         if not chs:
@@ -345,20 +397,27 @@ async def verificar(
             )
             continue
         af = Afirmacion(texto=texto, cita=cita, fragmento_id=chs[0].cite())
-        if len(pendientes) < settings.verifier_max_claims:
-            pendientes.append((len(afirmaciones), af, chs))
-        else:
-            af = Afirmacion(
-                texto=texto, cita=cita, fragmento_id=chs[0].cite(),
-                motivo=f"por encima del tope de {settings.verifier_max_claims} afirmaciones",
-            )
+        pendientes.append((len(afirmaciones), af, chs))
         afirmaciones.append(af)
 
     nota = ""
-    ok = True
+    ok = not hay_sin_cita
     if pendientes:
         try:
-            fallos = await _dictaminar(pendientes)
+            # En LOTES de verifier_max_claims, no recortando a ese tope. Antes
+            # las afirmaciones que lo excedían quedaban `sin_verificar`, y eso
+            # convertía el tope en un agujero silencioso justo en las
+            # respuestas largas, que son las que más afirman: una sesión de
+            # estrés midió 34 y 36 afirmaciones en respuestas donde 10 y 12
+            # se quedaron sin juzgar. El tope sigue existiendo, pero ahora
+            # acota el TAMAÑO DE CADA PETICIÓN (una lista larga en un solo
+            # JSON degrada el dictamen), no cuánto se verifica.
+            fallos = {}
+            lote = max(1, settings.verifier_max_claims)
+            for i in range(0, len(pendientes), lote):
+                trozo = pendientes[i : i + lote]
+                for local, veredicto in (await _dictaminar(trozo)).items():
+                    fallos[i + local] = veredicto
         except Exception as exc:
             # Se conserva lo determinista (las citas que no resuelven) y se
             # deja constancia de que el juicio del modelo no llegó.

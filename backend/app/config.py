@@ -30,6 +30,22 @@ class Settings(BaseSettings):
     # Vacío = usa openai_model (comportamiento antiguo, hay que pedirlo).
     rerank_model: str = "gpt-5.4-mini"
 
+    # Temperatura de TODAS las llamadas a modelo. 0.0 a propósito: esto es una
+    # herramienta de investigación y la consistencia vale más que la variedad
+    # de redacción. Sin fijarla se usaba el default de la API (1.0) en las
+    # cinco llamadas de la cadena -planner, agente, reranker, filtro de
+    # relevancia y verificador-, y eran cinco fuentes de azar independientes
+    # que se multiplicaban: medido, la misma pregunta daba entre 6 y 10
+    # búsquedas y una fidelidad entre 0.33 y 1.00.
+    #
+    # Medido también su efecto real, con 10 repeticiones de una ordenación:
+    # el default daba 4 salidas distintas de 10 y con 0.0 bajan a 2. Ayuda
+    # claramente, pero NO da determinismo: la familia gpt-5 conserva
+    # aleatoriedad residual y `seed` no cambió nada (2/10 con y sin él). Para
+    # eliminar la variación de verdad hay que sacar decisiones de manos del
+    # modelo, no bajar la temperatura.
+    llm_temperature: float = 0.0
+
     # Cliente OpenAI único (app/services/openai_client.py): timeout por
     # request, reintentos del SDK y llamadas concurrentes máximas al API.
     openai_timeout_s: float = 120.0
@@ -83,11 +99,24 @@ class Settings(BaseSettings):
     # lo dicho es un fallo grave en investigación médica. Se puede apagar como
     # rollback operativo; entonces el sistema se comporta como antes.
     enable_answer_verification: bool = True
+    # Si esta activo, el texto del agente se mantiene privado hasta que el
+    # verificador lo aprueba. Los fallos vuelven al redactor para corregirse y
+    # solo entonces comienza el stream visible. Es la barrera de fidelidad del
+    # flujo medico; se puede apagar como rollback para recuperar el streaming
+    # optimista anterior.
+    enable_pre_response_review: bool = True
+    pre_response_review_max_revisions: int = 1
+    # Presupuesto total de critico + correcciones. Debe dejar margen dentro del
+    # limite de la funcion serverless aun cuando la busqueda use casi todo su
+    # propio presupuesto.
+    pre_response_review_timeout_s: float = 45.0
     # Modelo del verificador. Vacío = hereda rerank_model_resolved.
     verifier_model: str = ""
-    # Tope de afirmaciones que se verifican en una respuesta. Existe para que
-    # una respuesta muy larga no dispare el coste ni el reloj; las que exceden
-    # el tope quedan declaradas como no verificadas, nunca como sostenidas.
+    # Afirmaciones por PETICIÓN al verificador. No es un recorte: si la
+    # respuesta trae más, se verifican en varios lotes (ver
+    # app/services/verificador.py). Acota el tamaño de cada request porque
+    # pedir una lista muy larga de veredictos en un solo JSON degrada el
+    # dictamen y arriesga respuestas truncadas.
     verifier_max_claims: int = 24
     # Fragmentos que llegan al modelo por búsqueda, y candidatos que salen de
     # Qdrant antes de reordenar.

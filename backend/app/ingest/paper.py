@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import date
 
 # Secciones canónicas de un artículo, con sus formas en inglés y español. La
 # clave es el nombre canónico interno; los valores, cómo aparecen escritas.
@@ -84,7 +85,24 @@ _RUIDO_AUTORES = (
     "university", "universidad", "department", "departamento", "hospital",
     "institute", "instituto", "school", "facultad", "abstract", "resumen",
     "keywords", "palabras clave", "@", "correspondence",
+    # Instituciones, guias y encabezados de monografias no son personas. La
+    # heuristica anterior tomaba la ultima palabra ("Salud", "Health") y
+    # fabricaba citas como "Salud et al.".
+    "organization", "organizacion", "world health", "salud mundial",
+    "ministry", "ministerio", "association", "asociacion", "society",
+    "sociedad", "foundation", "fundacion", "committee", "comite",
+    "initiative", "iniciativa", "consortium", "consorcio", "agency",
+    "agencia", "guideline", "guia", "documentos base", "fuentes",
 )
+
+# Siglas institucionales frecuentes en el corpus medico. Aunque una de ellas
+# sea autora real de un informe, no se le puede aplicar "et al.": esa forma es
+# exclusiva de autorias personales. Sin metadatos bibliograficos estructurados
+# es mas fiel caer al nombre del archivo que inventar una autoria.
+_SIGLAS_INSTITUCIONALES = {
+    "oms", "who", "gina", "gold", "kdigo", "cdc", "nih", "niddk",
+    "aha", "esc", "fao", "unep", "woah",
+}
 
 
 # Marcas de agua y avisos legales que las revistas estampan en cada página. No
@@ -205,22 +223,53 @@ def _extraer_anio(texto: str, doi: str) -> str:
     if not texto:
         return ""
 
+    def candidatos(fragmento: str) -> list[tuple[str, int]]:
+        salida: list[tuple[str, int]] = []
+        rangos = [
+            (m.start(), m.end())
+            for m in re.finditer(
+                r"\b(?:19[5-9]\d|20[0-4]\d)\s*[-\u2013\u2014]\s*"
+                r"(?:19[5-9]\d|20[0-4]\d)\b",
+                fragmento,
+            )
+        ]
+        for match in _ANIO.finditer(fragmento):
+            anio = match.group(1)
+            # Un extremo de "2026-2036" es la vigencia de un plan, no un ano
+            # de publicacion. Tambien se rechazan anos futuros: el bug llego a
+            # guardar literalmente "Health et al., 2036".
+            if any(inicio <= match.start() and match.end() <= fin for inicio, fin in rangos):
+                continue
+            if int(anio) > date.today().year:
+                continue
+            salida.append((anio, match.start()))
+        return salida
+
     if doi:
         pos = texto.find(doi)
         if pos >= 0:
             ventana = texto[max(0, pos - 120): pos + len(doi) + 120]
-            cerca = _ANIO.findall(ventana)
+            cerca = candidatos(ventana)
             if cerca:
-                return max(cerca)
+                doi_local = min(120, pos)
+                return min(cerca, key=lambda item: abs(item[1] - doi_local))[0]
 
-    candidatos: list[str] = []
+    encontrados: list[str] = []
     for linea in texto.splitlines():
         bajo = _sin_acentos(linea).lower()
         if any(r in bajo for r in _RUIDO_ANIO):
             continue
-        candidatos.extend(_ANIO.findall(linea))
-    if candidatos:
-        return max(candidatos)
+        # Sin DOI solo se inspecciona la cabecera bibliografica. Los anos que
+        # aparecen ya dentro del resumen, cuerpo o lista de referencias pueden
+        # pertenecer a otros estudios y no identifican esta obra.
+        if detectar_seccion(linea) is not None:
+            break
+        encontrados.extend(anio for anio, _ in candidatos(linea))
+    if encontrados:
+        # En una cabecera bien formada el primer ano es el del trabajo. Elegir
+        # el mayor fue precisamente lo que convertia rangos y bibliografia en
+        # una supuesta fecha de publicacion.
+        return encontrados[0]
     return ""
 
 
@@ -458,8 +507,19 @@ def _extraer_autor(
         bajo = _sin_acentos(texto).lower()
         if any(r in bajo for r in _RUIDO_AUTORES):
             continue
+        palabras_normales = set(re.findall(r"[a-z]+", bajo))
+        if palabras_normales & _SIGLAS_INSTITUCIONALES:
+            continue
         if tamano_titulo and tam > tamano_titulo + 0.6:
             continue
+
+        # Una linea de autores tiene que parecer realmente una autoria, no el
+        # primer subtitulo o frase capitalizada que siga al titulo. Se aceptan
+        # "Nombre Apellido" y el formato bibliografico "Apellido, N.".
+        formato_apellido_inicial = re.match(
+            r"^\s*[A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]{2,}\s*,\s*[A-Z](?:\.|\b)",
+            texto,
+        )
 
         # Primer autor: hasta la primera coma, "and" o "y".
         primero = re.split(r",|\band\b|\by\b|&|;", texto)[0]
@@ -467,6 +527,13 @@ def _extraer_autor(
         primero = re.sub(r"[\d\*†‡§¶#]+", " ", primero)
         tokens = [t for t in re.split(r"\s+", primero.strip()) if len(t) > 1]
         if not tokens:
+            continue
+        tokens_nombre = [
+            t.strip(".,") for t in tokens
+            if t.strip(".,").replace("-", "").replace("'", "").isalpha()
+            and t.strip(".,")[0].isupper()
+        ]
+        if not formato_apellido_inicial and len(tokens_nombre) < 2:
             continue
         apellido = tokens[-1].strip(".,")
         if len(apellido) >= 3 and apellido[0].isupper() and apellido.replace("-", "").isalpha():

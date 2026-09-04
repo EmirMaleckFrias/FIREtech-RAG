@@ -55,6 +55,11 @@ def _runtime_config() -> dict:
         "bm25_backend": bm25_backend(),
         "model": settings.openai_model,
         "rerank_model": settings.rerank_model_resolved,
+        "verifier_model": settings.verifier_model_resolved,
+        "pre_response_review": bool(
+            settings.enable_answer_verification
+            and settings.enable_pre_response_review
+        ),
         # A qué endpoint se habla de verdad. Con un gateway compatible por
         # delante, los nombres de modelo van prefijados y el coste se factura
         # en otro sitio: verlo aquí evita diagnosticar a ciegas.

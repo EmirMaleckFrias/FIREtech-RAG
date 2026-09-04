@@ -58,6 +58,10 @@ variables del proyecto en Vercel en producción.
 | `MAX_HOPS` | `0` | local `.env` y Vercel | Techo de búsquedas del despliegue. **0 = manda el perfil del modo** (normal 2, extendido sin tope). Estas tres variables son el techo de quien opera: solo pueden APRETAR el modo, nunca aflojarlo, para que un valor alto no convierta el modo normal en extendido sin que nadie lo pida |
 | `AGENT_BUDGET_S` | `240` | local `.env` y Vercel | Segundos de reloj antes de forzar la respuesta final. No es un capricho: la función de Vercel muere a los 300 s y sin este corte la respuesta no se acorta, se pierde entera. 0 = sin límite, solo sensato fuera de serverless |
 | `AGENT_MAX_HOPS_SIN_AVANCE` | `3` | local `.env` y Vercel | Búsquedas seguidas sin traer ni un fragmento nuevo antes de responder con lo que hay. Buscar más de lo mismo no acerca a la respuesta. 0 = desactivado |
+| `ENABLE_ANSWER_VERIFICATION` | `true` | local `.env` y Vercel | Activa el crítico que contrasta afirmaciones y citas |
+| `ENABLE_PRE_RESPONSE_REVIEW` | `true` | local `.env` y Vercel | Mantiene el borrador oculto hasta aprobarlo; `false` recupera la anotación posterior |
+| `PRE_RESPONSE_REVIEW_MAX_REVISIONS` | `1` | local `.env` y Vercel | Correcciones antes de abstenerse |
+| `PRE_RESPONSE_REVIEW_TIMEOUT_S` | `45` | local `.env` y Vercel | Presupuesto total del crítico y corrección; al agotarse se abstiene |
 | `RERANK_TOP_K` | `12` | local `.env` y Vercel | Fragmentos que llegan al agente tras el rerank |
 | `SEARCH_TOP_K` | `60` | local `.env` y Vercel | Candidatos que salen de Qdrant antes del rerank |
 | `ENVIRONMENT` | `local` | local `.env` (`local`) y Vercel (`production`) | Separa el registro de `documents` por entorno; también lo exige `ingest.py` |

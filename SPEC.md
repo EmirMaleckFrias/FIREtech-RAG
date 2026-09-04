@@ -119,6 +119,9 @@ Respuesta: `text/event-stream`, eventos:
   `chunk_type`, `snippet` y `score` (antes de los tokens; puede re-emitirse durante el
   stream: el frontend usa el ÚLTIMO evento recibido)
 - `event: token` → `data: {"text": "..."}` (delta de texto de la respuesta)
+- Antes del primer `token`, si la revisión previa está activa, el borrador completo se mantiene
+  privado: verificador → corrección por el redactor → segunda verificación. Solo se emite una
+  versión aprobada; timeout, fallo del crítico o corrección inválida producen abstención segura.
 - `event: metrics` → `data: telemetry.summary()` (aditivo, justo antes de `done`; el frontend
   lo ignora hoy). Payload: `ms_total`, `rounds_total`, `agent_rounds`,
   `tokens {prompt, cached, completion, reasoning}` (medidos, del `usage` real),
@@ -401,6 +404,10 @@ QDRANT_BM25_BACKEND=server # server | fastembed | auto | disabled; cambiar exige
 SUPABASE_URL=
 SUPABASE_SERVICE_KEY=
 MAX_HOPS=4
+ENABLE_ANSWER_VERIFICATION=true
+ENABLE_PRE_RESPONSE_REVIEW=true
+PRE_RESPONSE_REVIEW_MAX_REVISIONS=1
+PRE_RESPONSE_REVIEW_TIMEOUT_S=45
 RERANK_TOP_K=8
 SEARCH_TOP_K=30
 ENVIRONMENT=local        # 'production' en Vercel
