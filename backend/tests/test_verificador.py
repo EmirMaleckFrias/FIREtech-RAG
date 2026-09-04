@@ -494,3 +494,427 @@ async def test_una_afirmacion_despues_de_la_ultima_cita_no_desaparece(
 
     assert [a.veredicto for a in informe.afirmaciones] == [SOSTENIDA, SIN_CITA]
     assert informe.ok is False
+
+
+# ---------------------------------------------------------------------------
+# Declaraciones de ausencia: no son afirmaciones sobre una fuente
+# ---------------------------------------------------------------------------
+async def test_una_frase_de_abstencion_pegada_a_una_cita_no_se_audita(
+    settings_override, fake_openai
+):
+    """Regresión de la sesión de estrés. "No encuentro la mortalidad a 90 días
+    en los documentos" iba delante de una frase citada, quedaba adosada a esa
+    cita, el juez la dictaminaba no_sostenida (el fragmento no habla de
+    mortalidad, claro), y ese bloqueante tumbaba la respuesta en abstención
+    segura. Es la conducta que el prompt del agente PIDE, castigada."""
+    ch = _chunk("c1", "La conversion fue del 31.6%.", "e.pdf", 3)
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "consta"}]}
+        )
+    )
+
+    informe = await verificar(
+        "No encuentro la mortalidad a 90 dias en los documentos. "
+        f"La conversion fue del 31.6% {ch.cite()}.",
+        [ch],
+    )
+
+    assert [a.texto for a in informe.afirmaciones] == ["La conversion fue del 31.6%"]
+    assert _veredictos(informe) == [SOSTENIDA]
+    assert informe.ok is True
+    # y la declaracion no viajo al juez
+    enviado = fake_openai.calls[0]["messages"][-1]["content"]
+    assert "mortalidad" not in enviado
+
+
+async def test_una_frase_de_abstencion_tras_la_ultima_cita_no_es_sin_cita(
+    settings_override, fake_openai
+):
+    ch = _chunk("c1", "El AUC fue 0.94.", "e.pdf", 3)
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "coincide"}]}
+        )
+    )
+
+    informe = await verificar(
+        f"El AUC fue 0.94 {ch.cite()}. Los documentos no mencionan la "
+        "especificidad.",
+        [ch],
+    )
+
+    assert _veredictos(informe) == [SOSTENIDA]
+    assert informe.ok is True
+
+
+async def test_una_frase_de_abstencion_con_su_propia_cita_es_una_abstencion(
+    settings_override, fake_openai
+):
+    """Con cita al lado tampoco se audita: declarar ausencia no es atribuir.
+    Si es lo unico que hay, la respuesta entera es una abstencion."""
+    ch = _chunk("c1", "El AUC fue 0.94.", "e.pdf", 3)
+
+    informe = await verificar(
+        f"No encuentro la especificidad en los documentos {ch.cite()}.", [ch]
+    )
+
+    assert informe.afirmaciones == []
+    assert informe.ok is True
+    assert "se abstiene" in informe.nota
+    assert fake_openai.calls == []
+
+
+async def test_una_abstencion_no_blanquea_la_afirmacion_sin_cita_que_la_sigue(
+    settings_override, fake_openai
+):
+    """Lo que NO puede pasar: que meter una frase de abstencion en medio sirva
+    de comodin para colar una cifra sin fuente detras de la ultima cita."""
+    ch = _chunk("c1", "El AUC fue 0.94.", "e.pdf", 3)
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "coincide"}]}
+        )
+    )
+
+    informe = await verificar(
+        f"El AUC fue 0.94 {ch.cite()}. No encuentro la especificidad en los "
+        "documentos. La cohorte tuvo 900 pacientes.",
+        [ch],
+    )
+
+    assert _veredictos(informe) == [SOSTENIDA, SIN_CITA]
+    assert informe.afirmaciones[1].texto == "La cohorte tuvo 900 pacientes."
+    assert informe.ok is False
+
+
+# ---------------------------------------------------------------------------
+# Trazabilidad por fragmento y cobertura por punto del plan
+# ---------------------------------------------------------------------------
+def _hermanos() -> tuple[Chunk, Chunk]:
+    a = Chunk(id="c1", text="La conversion fue del 31.6%.", source_file="e.pdf",
+              page=4, document_type="pdf", citation="Allegri et al., 2023")
+    b = Chunk(id="c2", text="El AUC fue 0.94.", source_file="e.pdf",
+              page=4, document_type="pdf", citation="Allegri et al., 2023")
+    return a, b
+
+
+async def test_fragmentos_lleva_todos_los_hermanos_y_sobrevive_al_veredicto(
+    settings_override, fake_openai
+):
+    a, b = _hermanos()
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "parcial", "motivo": "generaliza"}]}
+        )
+    )
+
+    informe = await verificar(f"La conversion fue del 31.6% {a.cite()}.", [a, b])
+
+    af = informe.afirmaciones[0]
+    assert af.veredicto == PARCIAL
+    assert af.fragmentos == ["c1", "c2"]
+    assert af.fragmento_id == a.cite()  # compatibilidad
+
+
+def _plan_de_cuatro():
+    """e1 cubierto, e2 parcial, e3 evidencia sin usar, e4 sin resultados."""
+    c1 = _chunk("c1", "Dato uno.", "uno.pdf", 1)
+    c2 = _chunk("c2", "Dato dos.", "dos.pdf", 2)
+    c3 = _chunk("c3", "Dato tres.", "tres.pdf", 3)
+    c3b = _chunk("c3b", "Dato tres bis.", "tres_bis.pdf", 7)
+    evidencia = {
+        "e0": "respuesta directa a la pregunta tal como la formulo quien pregunta",
+        "e1": "la conversion",
+        "e2": "el AUC",
+        "e3": "la mortalidad",
+        "e4": "los efectos adversos",
+    }
+    mapa = {"c1": {"e1"}, "c2": {"e2"}, "c3": {"e3"}, "c3b": {"e3"}}
+    return [c1, c2, c3, c3b], evidencia, mapa
+
+
+async def test_cobertura_distingue_los_cuatro_estados_y_excluye_e0(
+    settings_override, fake_openai
+):
+    import json
+
+    chunks, evidencia, mapa = _plan_de_cuatro()
+    c1, c2, c3, _ = chunks
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [
+                {"i": 0, "veredicto": "sostenida", "motivo": "ok"},
+                {"i": 1, "veredicto": "parcial", "motivo": "generaliza"},
+            ]}
+        )
+    )
+
+    informe = await verificar(
+        f"Uno {c1.cite()}. Dos {c2.cite()}.", chunks, evidencia, mapa_plan=mapa
+    )
+
+    assert [c["id"] for c in informe.cobertura] == ["e1", "e2", "e3", "e4"]
+    por_id = {c["id"]: c for c in informe.cobertura}
+    assert por_id["e1"]["estado"] == "cubierto"
+    assert por_id["e1"]["afirmaciones"] == [0]
+    assert por_id["e1"]["documentos"] == ["uno.pdf"]
+    assert por_id["e2"]["estado"] == "parcial"
+    assert por_id["e2"]["afirmaciones"] == [1]
+    assert por_id["e3"]["estado"] == "evidencia_no_usada"
+    assert por_id["e3"]["n_fragmentos"] == 2
+    assert por_id["e3"]["documentos"] == ["tres.pdf", "tres_bis.pdf"]
+    assert por_id["e3"]["afirmaciones"] == []
+    assert por_id["e4"]["estado"] == "sin_resultados"
+    assert por_id["e4"]["n_fragmentos"] == 0
+    assert por_id["e4"]["documentos"] == []
+    assert por_id["e1"]["evidence_needed"] == "la conversion"
+    # sin_cubrir = SOLO los evidencia_no_usada: un punto sin resultados en el
+    # indice no es un fallo del redactor, y ponerlo aqui llevaria a rellenarlo
+    assert informe.evidencia_sin_cubrir == ["e3"]
+    # y viaja por SSE
+    plano = json.loads(json.dumps(informe.to_payload()))
+    assert plano["cobertura"][3]["estado"] == "sin_resultados"
+
+
+async def test_sobrecobertura_ambigua_cubre_ambos_puntos(settings_override, fake_openai):
+    """Un fragmento traido por e1 y e3 cubre los dos. Se acepta antes que un
+    falso "sin cubrir", que mandaria al redactor a rellenar lo ya respondido."""
+    c1 = _chunk("c1", "Dato.", "uno.pdf", 1)
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "ok"}]}
+        )
+    )
+
+    informe = await verificar(
+        f"Dato {c1.cite()}.", [c1],
+        {"e0": "pregunta", "e1": "a", "e3": "b"},
+        mapa_plan={"c1": {"e1", "e3"}},
+    )
+
+    assert [(c["id"], c["estado"]) for c in informe.cobertura] == [
+        ("e1", "cubierto"), ("e3", "cubierto"),
+    ]
+    assert informe.evidencia_sin_cubrir == []
+
+
+async def test_una_afirmacion_no_sostenida_no_cubre_su_punto(
+    settings_override, fake_openai
+):
+    """Citar el fragmento del punto diciendo algo que no dice no es usar la
+    evidencia: el punto queda evidencia_no_usada para que la critica pida
+    incorporarlo bien o descartarlo explicitamente."""
+    c1 = _chunk("c1", "El AUC fue 0.94.", "uno.pdf", 1)
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "no_sostenida", "motivo": "dice 0.94"}]}
+        )
+    )
+
+    informe = await verificar(
+        f"El AUC fue 0.99 {c1.cite()}.", [c1],
+        {"e0": "pregunta", "e1": "el AUC"}, mapa_plan={"c1": {"e1"}},
+    )
+
+    assert informe.cobertura[0]["estado"] == "evidencia_no_usada"
+    assert informe.cobertura[0]["afirmaciones"] == [0]
+    assert informe.evidencia_sin_cubrir == ["e1"]
+
+
+async def test_una_afirmacion_sin_verificar_deja_su_punto_en_parcial(
+    settings_override, fake_openai
+):
+    """Si el juez no llego, la respuesta SI uso esa evidencia (esta citada y es
+    trazable); decir "no la usa" seria falso y mandaria al redactor a
+    incorporar lo que ya esta. Parcial es el estado que dice "usada, no
+    confirmada", y no entra en evidencia_sin_cubrir."""
+    c1 = _chunk("c1", "Dato.", "uno.pdf", 1)
+    fake_openai.queue(RuntimeError("API caida"))
+
+    informe = await verificar(
+        f"Dato {c1.cite()}.", [c1],
+        {"e0": "pregunta", "e1": "a"}, mapa_plan={"c1": {"e1"}},
+    )
+
+    assert _veredictos(informe) == [SIN_VERIFICAR]
+    assert informe.cobertura[0]["estado"] == "parcial"
+    assert informe.evidencia_sin_cubrir == []
+
+
+async def test_una_abstencion_completa_con_mapa_devuelve_cobertura(
+    settings_override, fake_openai
+):
+    """Cuando el sistema se abstiene la medica tiene que ver igual que puntos
+    tenian evidencia recuperada y cuales no."""
+    chunks, evidencia, mapa = _plan_de_cuatro()
+
+    informe = await verificar(
+        "No encuentro esa informacion en los documentos.", chunks, evidencia,
+        mapa_plan=mapa,
+    )
+
+    assert informe.ok is True
+    assert [(c["id"], c["estado"]) for c in informe.cobertura] == [
+        ("e1", "evidencia_no_usada"), ("e2", "evidencia_no_usada"),
+        ("e3", "evidencia_no_usada"), ("e4", "sin_resultados"),
+    ]
+    assert informe.evidencia_sin_cubrir == ["e1", "e2", "e3"]
+    assert fake_openai.calls == []
+
+
+async def test_una_respuesta_sin_citas_con_mapa_usa_la_cobertura_por_punto(
+    settings_override, fake_openai
+):
+    """Con mapa, el sin_cubrir de la respuesta sin citas ya no es "todo el
+    plan": e0 queda fuera y un punto sin resultados no se le reprocha."""
+    chunks, evidencia, mapa = _plan_de_cuatro()
+
+    informe = await verificar(
+        "Los tres estudios coinciden.", chunks, evidencia, mapa_plan=mapa
+    )
+
+    assert _veredictos(informe) == [SIN_CITA]
+    assert informe.evidencia_sin_cubrir == ["e1", "e2", "e3"]
+    assert informe.cobertura[-1]["estado"] == "sin_resultados"
+
+
+async def test_sin_mapa_se_conserva_el_todo_o_nada(settings_override, fake_openai):
+    """Compatibilidad: quien no pasa mapa recibe lo de siempre, sin cobertura."""
+    c1 = _chunk("c1", "Dato.", "uno.pdf", 1)
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "ok"}]}
+        )
+    )
+
+    informe = await verificar(
+        f"Dato {c1.cite()}.", [c1], {"e0": "pregunta", "e1": "a", "e2": "b"}
+    )
+
+    assert informe.cobertura == []
+    assert informe.evidencia_sin_cubrir == []
+
+
+def test_cobertura_es_pura_y_no_necesita_modelo():
+    """La funcion se puede llamar sin settings ni cliente: es codigo."""
+    c1 = _chunk("c1", "Dato.", "uno.pdf", 1)
+    afs = [
+        verificador.Afirmacion(
+            texto="Dato", cita=c1.cite(), veredicto=SOSTENIDA, fragmentos=["c1"]
+        )
+    ]
+    cob = verificador._cobertura(
+        {"e0": "x", "e1": "a", "e2": "b"}, {"c1": {"e1"}}, afs, {"c1": c1}
+    )
+    assert [(c["id"], c["estado"]) for c in cob] == [
+        ("e1", "cubierto"), ("e2", "sin_resultados"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Lotes en paralelo: uno caido no tira el resto; todos caidos = sin señal
+# ---------------------------------------------------------------------------
+async def test_un_lote_caido_conserva_los_veredictos_de_los_demas(
+    settings_override, fake_openai, monkeypatch
+):
+    """Antes una sola excepcion vaciaba `fallos`: todo sin_verificar, o sea
+    sin señal, o sea abstencion segura por un 500 en UN lote."""
+    monkeypatch.setenv("VERIFIER_MAX_CLAIMS", "2")
+    get_settings.cache_clear()
+    chunks = [_chunk(f"c{i}", f"Dato {i}.", f"doc_{i}.pdf", i + 1) for i in range(4)]
+    respuesta = " ".join(f"Afirmación {i} {c.cite()}." for i, c in enumerate(chunks))
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [
+                {"i": 0, "veredicto": "sostenida", "motivo": "ok"},
+                {"i": 1, "veredicto": "no_sostenida", "motivo": "no consta"},
+            ]}
+        ),
+        RuntimeError("500 en el segundo lote"),
+    )
+
+    informe = await verificar(respuesta, chunks)
+
+    assert _veredictos(informe) == [SOSTENIDA, NO_SOSTENIDA, SIN_VERIFICAR, SIN_VERIFICAR]
+    assert informe.fidelidad == pytest.approx(0.5)
+    # no es "sin señal": hay veredictos con los que corregir
+    assert informe.ok is True
+    assert "1 de 2 lotes" in informe.nota
+    assert "afirmaciones 2-3" in informe.nota
+    assert "500 en el segundo lote" in informe.nota
+    assert len(fake_openai.calls) == 2
+
+
+async def test_todos_los_lotes_caidos_es_sin_senal(
+    settings_override, fake_openai, monkeypatch
+):
+    from app.services import revisor
+
+    monkeypatch.setenv("VERIFIER_MAX_CLAIMS", "1")
+    get_settings.cache_clear()
+    a = _chunk("c1", "Uno.", "a.pdf", 1)
+    b = _chunk("c2", "Dos.", "b.pdf", 2)
+    fake_openai.queue(RuntimeError("caido 1"), RuntimeError("caido 2"))
+
+    informe = await verificar(f"Uno {a.cite()}. Dos {b.cite()}.", [a, b])
+
+    assert _veredictos(informe) == [SIN_VERIFICAR, SIN_VERIFICAR]
+    assert informe.ok is False
+    assert "no pudo dictaminar" in informe.nota
+    assert revisor.sin_senal(informe) is True
+
+
+async def test_los_lotes_se_ejecutan_en_paralelo(
+    settings_override, fake_openai, monkeypatch
+):
+    """Prueba directa de concurrencia: cada lote espera a que el OTRO tambien
+    este en vuelo. Si fueran secuenciales, el primero se quedaria esperando
+    solo, la barrera venceria por timeout y los dos lotes "caerian"."""
+    import asyncio
+
+    monkeypatch.setenv("VERIFIER_MAX_CLAIMS", "1")
+    get_settings.cache_clear()
+    barrera = asyncio.Barrier(2)
+
+    async def dictaminar_con_barrera(pendientes):
+        await asyncio.wait_for(barrera.wait(), timeout=1.0)
+        return {0: ("sostenida", "ok")}
+
+    monkeypatch.setattr(verificador, "_dictaminar", dictaminar_con_barrera)
+    a = _chunk("c1", "Uno.", "a.pdf", 1)
+    b = _chunk("c2", "Dos.", "b.pdf", 2)
+
+    informe = await verificar(f"Uno {a.cite()}. Dos {b.cite()}.", [a, b])
+
+    assert _veredictos(informe) == [SOSTENIDA, SOSTENIDA]
+    assert informe.nota == ""
+
+
+async def test_el_juez_recibe_razonamiento_y_cabecera_por_fragmento(
+    settings_override, fake_openai
+):
+    from app.services import openai_client
+
+    openai_client._reset_razonamiento()
+    tabla = Chunk(
+        id="t1", text="Fila: AUC 0.94", source_file="tab.xlsx", page=3,
+        document_type="xlsx", chunk_type="table", section="Resultados",
+        citation="Allegri et al., 2023",
+    )
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "ok"}]}
+        )
+    )
+
+    await verificar(f"El AUC fue 0.94 {tabla.cite()}.", [tabla])
+
+    llamada = fake_openai.calls[0]
+    assert llamada["reasoning_effort"] == settings_override.verifier_reasoning_effort
+    assert llamada["temperature"] == settings_override.llm_temperature
+    enviado = llamada["messages"][-1]["content"]
+    assert "fuente: Allegri et al., 2023" in enviado
+    assert "sección: Resultados" in enviado
+    assert "tipo: tabla" in enviado
+    assert "FRAGMENTO 1 DE 1" in enviado

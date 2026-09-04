@@ -97,3 +97,8 @@ class SourceRef(BaseModel):
     citation: str = ""
     doi: str = ""
     locator: str = ""
+    # Trazabilidad del pipeline de evidencia: qué puntos del plan recuperaron
+    # este fragmento ("extra" si lo trajo una búsqueda del modelo) y el grado
+    # que le dio el calificador ("directa", "parcial" o vacío = sin calificar).
+    plan_items: list[str] = Field(default_factory=list)
+    grado: str = ""

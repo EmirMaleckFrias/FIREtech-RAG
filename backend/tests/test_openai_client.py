@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from openai import AsyncOpenAI, OpenAI
 
 from app.config import get_settings
@@ -115,3 +117,85 @@ async def test_openai_slot_ocupa_y_libera_una_plaza(settings_override, monkeypat
     async with openai_client.openai_slot():
         assert sem.locked()
     assert not sem.locked()
+
+
+# ---------------------------------------------------------------------------
+# Razonamiento: kwargs y fallback ante un 400 que lo rechace
+# ---------------------------------------------------------------------------
+
+
+def _bad_request(mensaje: str):
+    """Un BadRequestError como el que devuelve el SDK, sin red."""
+    import httpx
+    from openai import BadRequestError
+
+    req = httpx.Request("POST", "https://ai-gateway.vercel.sh/v1/chat/completions")
+    resp = httpx.Response(400, request=req, json={"error": {"message": mensaje}})
+    return BadRequestError(mensaje, response=resp, body={"error": {"message": mensaje}})
+
+
+def test_razonamiento_devuelve_kwargs_o_nada(settings_override):
+    openai_client._reset_razonamiento()
+    assert openai_client.razonamiento("high") == {"reasoning_effort": "high"}
+    assert openai_client.razonamiento(" Medium ") == {"reasoning_effort": "medium"}
+    assert openai_client.razonamiento("none") == {}
+    assert openai_client.razonamiento("") == {}
+    assert openai_client.razonamiento(None) == {}
+
+
+async def test_un_400_por_reasoning_reintenta_sin_el_y_lo_apaga_un_rato(
+    settings_override, fake_openai
+):
+    """El 2 sep 2026 un 400 por reasoning_effort tumbó el modo extendido
+    entero. Ahora el mismo 400 cuesta un reintento: la segunda llamada va sin
+    el parámetro, y las siguientes ya ni lo intentan hasta que pase el
+    plazo."""
+    from app.services import telemetry
+    from tests.conftest import make_text_completion
+
+    openai_client._reset_razonamiento()
+    fake_openai.queue(
+        _bad_request(
+            "Unsupported parameter: 'reasoning_effort' is not supported with "
+            "function tools on this endpoint"
+        ),
+        make_text_completion("ok"),
+    )
+    tel = telemetry.start()
+    kwargs = {"model": "m", "messages": [], "reasoning_effort": "high"}
+    resp = await openai_client.crear_completion(fake_openai, kwargs)
+    assert resp.choices[0].message.content == "ok"
+    assert len(fake_openai.calls) == 2
+    assert fake_openai.calls[0]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in fake_openai.calls[1]
+    assert tel.summary()["counters"]["razonamiento_rechazado"] == 1
+    # Y mientras dure el rechazo, `razonamiento` deja de proponerlo.
+    assert openai_client.razonamiento_rechazado()
+    assert openai_client.razonamiento("high") == {}
+    openai_client._reset_razonamiento()
+    assert openai_client.razonamiento("high") == {"reasoning_effort": "high"}
+
+
+async def test_un_400_por_otra_cosa_sube_tal_cual(settings_override, fake_openai):
+    """El fallback es SOLO para reasoning_effort: un 400 por otro motivo (un
+    mensaje mal formado, un modelo inexistente) no debe reintentarse ni, peor,
+    apagar el razonamiento."""
+    from openai import BadRequestError
+
+    openai_client._reset_razonamiento()
+    fake_openai.queue(_bad_request("Invalid 'messages[2].role': 'tool' without tool_calls"))
+    with pytest.raises(BadRequestError):
+        await openai_client.crear_completion(
+            fake_openai, {"model": "m", "messages": [], "reasoning_effort": "high"}
+        )
+    assert len(fake_openai.calls) == 1
+    assert not openai_client.razonamiento_rechazado()
+
+
+async def test_sin_reasoning_en_los_kwargs_un_400_no_se_reintenta(settings_override, fake_openai):
+    from openai import BadRequestError
+
+    fake_openai.queue(_bad_request("reasoning is not supported"))
+    with pytest.raises(BadRequestError):
+        await openai_client.crear_completion(fake_openai, {"model": "m", "messages": []})
+    assert len(fake_openai.calls) == 1

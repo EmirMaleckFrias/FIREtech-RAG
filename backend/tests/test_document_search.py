@@ -138,8 +138,27 @@ async def test_las_fuentes_llevan_la_cita_ya_montada(settings_override):
         "source_file", "page", "project_id", "document_id", "section",
         "language", "document_type", "source_pages", "snippet", "score",
         "chunk_type", "title", "citation", "doi", "locator",
+        # Trazabilidad del pipeline de evidencia (contrato F, evento sources).
+        "plan_items", "grado",
     }
     assert payload[0]["locator"] == "pág. 1"
+    # Sin mapa ni grados (bucle antiguo) van vacíos, no ausentes: el frontend
+    # no tiene que distinguir mensajes de antes y de después.
+    assert payload[0]["plan_items"] == []
+    assert payload[0]["grado"] == ""
+
+
+async def test_las_fuentes_llevan_su_punto_del_plan_y_su_grado(settings_override):
+    """Con el pipeline, cada fuente dice qué puntos del plan la trajeron y qué
+    grado le dio el calificador. Los ids van ordenados para que dos corridas
+    iguales produzcan el mismo payload."""
+    chunk = _chunks(1)[0]
+    payload = agent._sources_payload(
+        {"f0": chunk}, mapa={"f0": {"e2", "e0"}}, grados={"f0": "directa"}
+    )
+
+    assert payload[0]["plan_items"] == ["e0", "e2"]
+    assert payload[0]["grado"] == "directa"
 
 
 async def test_un_filtro_que_no_casa_no_deja_la_busqueda_a_cero(

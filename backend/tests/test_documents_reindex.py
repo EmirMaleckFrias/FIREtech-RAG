@@ -56,3 +56,55 @@ def test_una_fecha_sin_zona_se_asume_utc_y_no_revienta():
     TypeError y tumbaría el endpoint."""
     ingenua = (datetime.now(timezone.utc) - timedelta(minutes=60)).replace(tzinfo=None)
     assert _processing_rancio({"ingested_at": ingenua.isoformat()}) is True
+
+
+# ---------------------------------------------------------------------------
+# El endpoint, ejecutado de verdad: que renueve la fecha al marcar processing
+# ---------------------------------------------------------------------------
+async def test_el_reindex_renueva_ingested_at_o_la_guarda_se_salta_a_si_misma(
+    settings_override, monkeypatch, tmp_path
+):
+    """Regresión de un fallo que se anulaba solo.
+
+    `_processing_rancio` mide la antigüedad con `ingested_at`, pero
+    `upsert_document_status` NO lo actualiza (solo lo escribe
+    `register_document`). Así que al reindexar, el registro heredaba la fecha
+    vieja, se consideraba abandonado de inmediato, y un segundo reindex
+    concurrente pasaba el guarda: dos ingestas a la vez duplicando fragmentos.
+    """
+    from fastapi import BackgroundTasks
+
+    from app.api import documents as mod
+    from app.services.auth import AuthUser
+
+    antiguo = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    monkeypatch.setattr(
+        mod.supabase_db, "list_documents",
+        lambda: [{"file_name": "x.pdf", "status": "failed",
+                  "ingested_at": antiguo, "id": "doc-1"}],
+    )
+    llamadas: list[dict] = []
+    monkeypatch.setattr(
+        mod.supabase_db, "upsert_document_status",
+        lambda fn, st, err=None, **kw: llamadas.append(
+            {"file": fn, "status": st, **kw}) or True,
+    )
+    # el archivo tiene que existir para no salir por el 409 de file_not_stored
+    monkeypatch.setattr(mod, "UPLOADS_DIR", tmp_path)
+    (tmp_path / "x.pdf").write_bytes(b"%PDF-1.4 fake")
+    # camino local: la ingesta se encola y no corre dentro del test
+    monkeypatch.setattr(mod, "IS_SERVERLESS", False)
+
+    tareas = BackgroundTasks()
+    await mod.reindex_document(
+        "x.pdf", tareas, user=AuthUser(id="u1", email="a@airobotix.net", role="admin")
+    )
+
+    assert len(llamadas) == 1
+    marcada = llamadas[0]
+    assert marcada["status"] == "processing"
+    assert "ingested_at" in marcada, "sin renovar la fecha, la guarda se anula sola"
+    # y la fecha nueva NO puede parecer rancia
+    assert _processing_rancio({"ingested_at": marcada["ingested_at"]}) is False
+    # con la fecha vieja sí lo parecía: eso era el bug
+    assert _processing_rancio({"ingested_at": antiguo}) is True

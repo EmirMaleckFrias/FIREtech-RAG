@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Callable
 
 from qdrant_client import QdrantClient, models
@@ -65,6 +66,14 @@ _collection_checked = False
 _bm25_failed = False
 _server_bm25_checked = False
 _server_bm25_failed = False
+# Cuándo falló, para poder reintentar. Antes el fallo era PERMANENTE: un
+# timeout puntual de Qdrant Cloud en una sola búsqueda dejaba el proceso
+# entero en dense-only hasta el siguiente despliegue, degradando la
+# recuperación de todas las preguntas siguientes por un incidente de un
+# segundo. Cinco minutos es holgado para un blip de red y corto para no
+# arrastrar la degradación.
+_server_bm25_failed_at: float | None = None
+_BM25_REINTENTO_S = 300.0
 
 
 def _configured_bm25_backend() -> str:
@@ -189,9 +198,19 @@ def ensure_collection() -> None:
 
 def _server_bm25_available() -> bool:
     """Comprueba una vez que el cluster acepta inferencia BM25 nativa."""
-    global _server_bm25_checked, _server_bm25_failed
+    global _server_bm25_checked, _server_bm25_failed, _server_bm25_failed_at
     if _server_bm25_checked:
-        return not _server_bm25_failed
+        if not _server_bm25_failed:
+            return True
+        # Falló antes: se reintenta pasado el plazo en vez de darlo por muerto.
+        if (
+            _server_bm25_failed_at is not None
+            and time.monotonic() - _server_bm25_failed_at < _BM25_REINTENTO_S
+        ):
+            return False
+        logger.info("Reintentando el BM25 nativo tras un fallo anterior.")
+        _server_bm25_failed = False
+        _server_bm25_failed_at = None
     _server_bm25_checked = True
     settings = get_settings()
     try:
@@ -205,6 +224,7 @@ def _server_bm25_available() -> bool:
         return True
     except Exception as exc:
         _server_bm25_failed = True
+        _server_bm25_failed_at = time.monotonic()
         logger.warning("BM25 nativo de Qdrant no disponible (%s).", exc)
         return False
 
@@ -542,9 +562,10 @@ async def hybrid_search(
             )
             return response.points
         except Exception as exc:
-            global _server_bm25_failed
+            global _server_bm25_failed, _server_bm25_failed_at
             if backend == "qdrant-server":
                 _server_bm25_failed = True
+                _server_bm25_failed_at = time.monotonic()
             logger.warning("Búsqueda híbrida falló (%s); reintento dense-only.", exc)
             response = client.query_points(
                 collection_name=name,

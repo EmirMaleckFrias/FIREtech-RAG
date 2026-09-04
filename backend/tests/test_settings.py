@@ -50,3 +50,21 @@ def test_cambiar_un_valor_dentro_del_test(settings_override, monkeypatch):
     monkeypatch.setenv("MAX_HOPS", "1")
     get_settings.cache_clear()
     assert get_settings().max_hops == 1
+
+
+def test_el_pipeline_de_evidencia_viene_encendido_con_sus_topes(settings_override):
+    """Defaults del pipeline (app/services/evidencia.py). Encendido por
+    defecto: es la medida contra la variación medida entre corridas; apagarlo
+    es el rollback operativo. El prompt sube a v4 porque el flujo cambió y dos
+    mediciones solo se comparan con el mismo prompt."""
+    s = settings_override
+    assert s.enable_evidence_pipeline is True
+    assert s.evidence_candidates_per_item == 30
+    assert s.evidence_prefetch_timeout_s == 45.0
+    assert s.prompt_version == "v4"
+
+
+def test_el_pipeline_se_apaga_por_entorno(settings_override, monkeypatch):
+    monkeypatch.setenv("ENABLE_EVIDENCE_PIPELINE", "false")
+    get_settings.cache_clear()
+    assert get_settings().enable_evidence_pipeline is False

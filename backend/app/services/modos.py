@@ -5,13 +5,21 @@ verdad se le exige. Las reglas de fidelidad (responder solo con lo recuperado,
 citar cada afirmación, decir cuando algo no está) son idénticas en los dos: un
 modo rápido que además miente no sirve para nada.
 
-- normal: una o dos búsquedas y respuesta. Es el modo para la pregunta directa,
-  "qué dice el documento X sobre Y". Sigue usando el modelo grande, el reranker
-  y el filtro de relevancia, así que la respuesta es igual de fiable; lo único
-  que no hace es dar vueltas.
-- extendido: sin tope de búsquedas, presupuesto de tiempo largo, más fragmentos
-  por búsqueda y esfuerzo de razonamiento alto. Es el modo para la pregunta que
-  hay que descomponer: comparar estudios, cruzar cifras, buscar contradicciones.
+- normal: la evidencia de la pregunta literal llega ya recuperada (pipeline
+  de evidencia, app/services/evidencia.py) y el modelo tiene UNA búsqueda
+  extra para rellenar un hueco. Es el modo para la pregunta directa, "qué
+  dice el documento X sobre Y". Usa el mismo modelo grande y el mismo
+  calificador, así que la respuesta es igual de fiable; lo único que no hace
+  es descomponer.
+- extendido: la pregunta se descompone en un plan (planner.py), el pipeline
+  ejecuta todos los puntos en paralelo, hay más fragmentos por punto, hasta
+  dos búsquedas extra y esfuerzo de razonamiento alto. Es el modo para la
+  pregunta que hay que descomponer: comparar estudios, cruzar cifras, buscar
+  contradicciones.
+
+Con `Settings.enable_evidence_pipeline` apagado (rollback) rige el bucle
+anterior: el modelo decide qué buscar, con `max_hops` como tope y
+`instruccion_legacy` como coda.
 """
 from __future__ import annotations
 
@@ -27,8 +35,15 @@ class Modo:
 
     nombre: Nombre
     etiqueta: str
-    # 0 = sin tope de búsquedas.
+    # Tope de búsquedas del bucle ANTIGUO (pipeline apagado). 0 = sin tope.
     max_hops: int
+    # Búsquedas que el modelo puede pedir ADEMÁS de las del plan cuando el
+    # pipeline de evidencia está encendido. Es un tope duro: medido, dejar
+    # que el modelo decidiera cuántas búsquedas hacía daba 6-10 para la misma
+    # pregunta y una fidelidad de 0.33 a 1.00 entre corridas. Las extra
+    # existen solo para rellenar un punto sin resultados o comprobar una
+    # discrepancia, no para explorar.
+    max_hops_extra: int
     # Segundos de reloj antes de forzar la respuesta final.
     budget_s: float
     # Búsquedas seguidas sin nada nuevo antes de responder con lo que hay.
@@ -44,23 +59,36 @@ class Modo:
     planifica: bool
     # `reasoning_effort` de la API. None = no se envía el parámetro.
     #
-    # OJO, medido contra la API el 2 sep 2026: gpt-5.4 en /v1/chat/completions
-    # RECHAZA con 400 cualquier reasoning_effort distinto de 'none' cuando la
-    # peticion lleva function tools ("To use function tools, use /v1/responses
-    # or set reasoning_effort to 'none'"). El agente vive de las tools, asi que
-    # hoy este campo tiene que quedarse en None: se dejo puesto en el perfil
-    # extendido sin probarlo contra la API y rompio el modo entero en
-    # produccion. Para subir la deliberacion de verdad hay que migrar el bucle
-    # a /v1/responses, que es trabajo aparte.
+    # Historia, porque ya mordió dos veces. El 2 sep 2026 gpt-5.4 en
+    # /v1/chat/completions rechazaba con 400 cualquier reasoning_effort
+    # distinto de 'none' junto a function tools, y dejarlo puesto sin probar
+    # tumbó el modo extendido entero en producción; se apagó. El 4 sep 2026 se
+    # volvió a medir contra el gateway de Vercel con los kwargs EXACTOS del
+    # bucle (temperature=0, stream, stream_options, tools, tool_choice auto y
+    # none, parallel_tool_calls=False) y con esfuerzo medium y high: todo
+    # 200, con 76-338 tokens de razonamiento por ronda. Y el efecto es el que
+    # se buscaba: ante una pregunta comparativa, sin razonamiento el modelo
+    # pedía UNA búsqueda; con high pedía tres, una por término.
+    #
+    # Para que un cambio de la API no vuelva a romper el modo, el parámetro
+    # no se manda a ciegas: `openai_client.crear_completion` captura el 400
+    # que lo nombra, reintenta sin él y lo deja apagado un rato. Así el peor
+    # caso es volver a la conducta anterior, no perder la respuesta.
     esfuerzo: str | None
-    # Coda que se añade al system prompt para explicar cómo trabajar.
+    # Coda que se añade al system prompt para explicar cómo trabajar (con el
+    # pipeline de evidencia encendido).
     instruccion: str
+    # La misma coda para el bucle anterior (pipeline apagado): ahí el modelo
+    # sí decide qué buscar, y decirle que la evidencia "ya está arriba" sería
+    # mentirle. Se conserva para que el rollback sea completo.
+    instruccion_legacy: str = ""
 
 
 NORMAL = Modo(
     nombre="normal",
     etiqueta="Pensamiento normal",
     max_hops=2,
+    max_hops_extra=1,
     budget_s=60.0,
     # Si la primera búsqueda no trae nada nuevo, la segunda tampoco lo hará por
     # insistir: se responde con lo que haya.
@@ -74,8 +102,21 @@ NORMAL = Modo(
     max_hops_sin_avance=2,
     fragmentos=8,
     planifica=False,
-    esfuerzo=None,
+    # medium y no high: en normal la respuesta debe llegar en segundos y el
+    # razonamiento se gasta sobre todo en elegir bien la única o las dos
+    # búsquedas, que es donde medium ya cambia la conducta.
+    esfuerzo="medium",
     instruccion=(
+        "MODO ACTIVO: pensamiento normal, el que eligió quien pregunta. Ve al "
+        "grano. La evidencia de la pregunta ya está recuperada arriba; léela y "
+        "responde con ella. Tienes UNA búsqueda extra como máximo, y solo para "
+        "rellenar un hueco concreto que la evidencia no cubra, no para "
+        "explorar. Si la pregunta resulta ser más compleja de lo que cabe "
+        "aquí, responde con lo que tengas y dile al usuario que en "
+        "pensamiento extendido puedes descomponerla y profundizar. Las reglas "
+        "de fidelidad y de citas se cumplen igual: rápido no significa laxo."
+    ),
+    instruccion_legacy=(
         "MODO ACTIVO: pensamiento normal, el que eligió quien pregunta. Ve al "
         "grano. Con una búsqueda bien formulada "
         "suele bastar, y tienes dos como máximo, así que úsalas para cubrir la "
@@ -90,13 +131,33 @@ EXTENDIDO = Modo(
     nombre="extendido",
     etiqueta="Pensamiento extendido",
     max_hops=0,
-    budget_s=240.0,
+    max_hops_extra=2,
+    # 180 y no 240: el presupuesto del bucle tiene que dejar sitio a la
+    # barrera de revisión (verificar, corregir, volver a verificar; hasta
+    # pre_response_review_timeout_s) DENTRO de los 300 s de la función
+    # serverless. Con 240 + 45 de revisión ya se rozaba el límite, y al
+    # encender el razonamiento la revisión necesita más margen, no menos. En
+    # la sesión de estrés ninguna pregunta extendida pasó de 80 s de bucle,
+    # así que 180 no recorta nada real.
+    budget_s=180.0,
     max_hops_sin_avance=3,
     fragmentos=12,
     planifica=True,
-    # Ver la nota del campo: con tools, la API lo rechaza con 400.
-    esfuerzo=None,
+    # Ver la nota del campo. high: este modo existe para deliberar.
+    esfuerzo="high",
     instruccion=(
+        "MODO ACTIVO: pensamiento extendido, el que eligió quien pregunta. "
+        "Tómate el trabajo en serio. La pregunta ya se descompuso en puntos y "
+        "la evidencia de cada uno está recuperada arriba, con su estado: tu "
+        "trabajo es LEERLA entera, cruzar lo que dicen los distintos documentos "
+        "y redactar por puntos. Tienes hasta dos búsquedas extra, y solo para "
+        "rellenar un punto sin resultados o comprobar una discrepancia entre "
+        "documentos. Cuando la pregunta admite comparación, contrasta la "
+        "evidencia de varios documentos antes de concluir y di explícitamente "
+        "si se contradicen. Antes de dar la respuesta final, repasa si algún "
+        "punto quedó sin evidencia y dilo en vez de rellenarlo."
+    ),
+    instruccion_legacy=(
         "MODO ACTIVO: pensamiento extendido, el que eligió quien pregunta. "
         "Tómate el trabajo en serio. Descompón la "
         "pregunta en las partes que la componen y busca cada una por separado, "
@@ -133,7 +194,8 @@ def resolver(nombre: str | None, settings=None) -> Modo:
     en el modo normal, que es el que menos supone.
 
     Con `settings`, los topes del despliegue (MAX_HOPS, AGENT_BUDGET_S,
-    AGENT_MAX_HOPS_SIN_AVANCE) se aplican encima del perfil.
+    AGENT_MAX_HOPS_SIN_AVANCE) se aplican encima del perfil; MAX_HOPS acota
+    tanto `max_hops` (bucle antiguo) como `max_hops_extra` (pipeline).
     """
     base = POR_DEFECTO
     if nombre:
@@ -143,9 +205,23 @@ def resolver(nombre: str | None, settings=None) -> Modo:
 
     from dataclasses import replace
 
+    # Techo del operador sobre el razonamiento: vacío = manda el modo; "none"
+    # lo apaga; cualquier otro valor sustituye al del modo (es el interruptor
+    # para bajar a medium/low en el despliegue sin tocar código).
+    esfuerzo = base.esfuerzo
+    techo_esfuerzo = str(getattr(settings, "agent_reasoning_effort", "") or "").strip().lower()
+    if techo_esfuerzo:
+        esfuerzo = None if techo_esfuerzo == "none" else techo_esfuerzo
+
+    techo_hops = getattr(settings, "max_hops", 0) or 0
     return replace(
         base,
-        max_hops=int(_techo(base.max_hops, getattr(settings, "max_hops", 0) or 0)),
+        esfuerzo=esfuerzo,
+        max_hops=int(_techo(base.max_hops, techo_hops)),
+        # El mismo techo del operador acota las búsquedas extra del pipeline:
+        # MAX_HOPS=1 en el despliegue significa "una búsqueda del modelo como
+        # mucho", sea cual sea el bucle que esté encendido.
+        max_hops_extra=int(_techo(base.max_hops_extra, techo_hops)),
         budget_s=_techo(base.budget_s, getattr(settings, "agent_budget_s", 0.0) or 0.0),
         max_hops_sin_avance=int(
             _techo(

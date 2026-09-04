@@ -249,3 +249,61 @@ def test_si_no_hay_indices_que_falten_no_se_crea_ninguno(settings_override, fake
     qdrant.ensure_collection()
 
     assert fake_qdrant.calls_to("create_payload_index") == []
+
+
+# ---------------------------------------------------------------------------
+# El fallo del BM25 nativo tiene que ser RECUPERABLE
+# ---------------------------------------------------------------------------
+def test_un_fallo_reciente_de_bm25_no_se_reintenta_de_inmediato(
+    settings_override, fake_qdrant, monkeypatch
+):
+    """Reintentar en cada búsqueda anularía el sentido del corte: si el cluster
+    está tosiendo, hay que dejarlo respirar."""
+    import time as _t
+
+    from app.services import qdrant
+
+    monkeypatch.setenv("QDRANT_BM25_BACKEND", "server")
+    get_settings.cache_clear()
+    qdrant._server_bm25_checked = True
+    qdrant._server_bm25_failed = True
+    qdrant._server_bm25_failed_at = _t.monotonic()
+
+    assert qdrant._server_bm25_available() is False
+    assert fake_qdrant.calls_to("query_points") == []  # no re-sondeó
+
+
+def test_pasado_el_plazo_el_bm25_se_reintenta(settings_override, fake_qdrant, monkeypatch):
+    """Regresión: el fallo era PERMANENTE. Un timeout puntual de Qdrant Cloud
+    en una sola búsqueda dejaba el proceso entero en dense-only hasta el
+    siguiente despliegue, degradando todas las preguntas siguientes por un
+    incidente de un segundo.
+    """
+    import time as _t
+
+    from app.services import qdrant
+
+    monkeypatch.setenv("QDRANT_BM25_BACKEND", "server")
+    get_settings.cache_clear()
+    qdrant._server_bm25_checked = True
+    qdrant._server_bm25_failed = True
+    qdrant._server_bm25_failed_at = _t.monotonic() - qdrant._BM25_REINTENTO_S - 1
+
+    assert qdrant._server_bm25_available() is True
+    assert qdrant._server_bm25_failed is False
+    assert len(fake_qdrant.calls_to("query_points")) == 1  # volvió a sondear
+
+
+def test_el_reintento_no_revienta_por_falta_de_import(settings_override, fake_qdrant, monkeypatch):
+    """El camino del reintento solo se ejecuta cuando ya hubo un fallo, así que
+    un `time` sin importar habría pasado desapercibido: el `and` cortocircuita
+    mientras la marca de hora es None y solo revienta con una fecha puesta."""
+    from app.services import qdrant
+
+    monkeypatch.setenv("QDRANT_BM25_BACKEND", "server")
+    get_settings.cache_clear()
+    qdrant._server_bm25_checked = True
+    qdrant._server_bm25_failed = True
+    qdrant._server_bm25_failed_at = 12345.0  # fuerza la evaluación de time.monotonic()
+
+    qdrant._server_bm25_available()  # no debe lanzar NameError

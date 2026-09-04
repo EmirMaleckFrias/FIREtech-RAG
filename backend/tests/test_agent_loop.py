@@ -25,6 +25,18 @@ INVENTARIO = "listar_documentos"
 SIN_RESULTADOS = "sin resultados"
 
 
+@pytest.fixture(autouse=True)
+def pipeline_apagado(settings_override, monkeypatch):
+    """Los tests de este módulo prueban la MECÁNICA del bucle antiguo (rondas,
+    kwargs, repeticiones, topes) y son el contrato del rollback operativo:
+    con `enable_evidence_pipeline=false` todo esto debe seguir igual. Los
+    tests del pipeline (más abajo) lo encienden explícitamente."""
+    monkeypatch.setenv("ENABLE_EVIDENCE_PIPELINE", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def catalogo_falso(monkeypatch):
     """Sustituye `_execute_document_search` por un stub que registra los args
@@ -560,3 +572,593 @@ async def test_el_inventario_no_gasta_el_freno_de_busquedas_sin_avance(
     assert _tipos(eventos).count("hop") == 2
     # y la búsqueda real llegó a ejecutarse con tool_choice libre
     assert fake_openai.calls[1]["tool_choice"] == "auto"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline de evidencia (enable_evidence_pipeline=true)
+# ---------------------------------------------------------------------------
+from app.models import Chunk  # noqa: E402
+from app.services import evidencia, planner, revisor  # noqa: E402
+
+
+def _chunk_de(item_id: str, n: int, doc: str = "a.pdf") -> Chunk:
+    return Chunk(
+        id=f"{item_id}-c{n}", text=f"evidencia {item_id} {n}", source_file=doc,
+        page=n, document_type="pdf", section="Results",
+    )
+
+
+def _punto(
+    item: planner.PlanItem, chunks: list[Chunk], relevancia: bool = True
+) -> evidencia.PuntoEvidencia:
+    return evidencia.PuntoEvidencia(
+        id=item.id, query=item.query, query_en=item.query_en,
+        evidence_needed=item.evidence_needed, fragmentos=list(chunks),
+        documentos_revisados=[c.fuente() for c in chunks] or ["revisado.pdf"],
+        estado="cubierto" if chunks else "sin_resultados",
+        relevancia_verificada=relevancia, recuperacion="hybrid", ms=1.5,
+        grados={c.id: "directa" for c in chunks}, n_candidatos=len(chunks) or 3,
+    )
+
+
+def _evidencia_de(puntos: list[evidencia.PuntoEvidencia]) -> evidencia.EvidenciaPlan:
+    ev = evidencia.EvidenciaPlan(puntos=puntos)
+    for p in puntos:
+        for c in p.fragmentos:
+            ev.mapa.setdefault(c.id, set()).add(p.id)
+            ev.acumulado.setdefault(c.id, c)
+            ev.grados.setdefault(c.id, p.grados.get(c.id, ""))
+    return ev
+
+
+@pytest.fixture
+def pipeline_encendido(settings_override, monkeypatch):
+    """Enciende el pipeline y sustituye sus dos entradas a Qdrant por falsos
+    controlables: `ejecutar_plan` fabrica un punto por item del plan (por
+    defecto, un fragmento cada uno; `estado["sin"]` deja ids sin resultados)
+    y `buscar_y_calificar` registra las búsquedas extra."""
+    monkeypatch.setenv("ENABLE_EVIDENCE_PIPELINE", "true")
+    get_settings.cache_clear()
+    estado: dict = {"planes": [], "sin": set(), "extra": [], "extra_chunks": [], "deadlines": []}
+
+    async def _ejecutar_plan(plan, perfil, filtros, deadline_monotonic=None):
+        estado["planes"].append(list(plan))
+        estado["deadlines"].append(deadline_monotonic)
+        puntos = [
+            _punto(it, [] if it.id in estado["sin"] else [_chunk_de(it.id, i + 1)])
+            for i, it in enumerate(plan)
+        ]
+        return _evidencia_de(puntos)
+
+    async def _buscar_y_calificar(query, evidence_needed, punto, perfil, filtros=None):
+        estado["extra"].append({"query": query, "punto": punto, "evidence_needed": evidence_needed})
+        item = planner.PlanItem(punto or evidencia.EXTRA, query, evidence_needed)
+        return _punto(item, list(estado["extra_chunks"]))
+
+    monkeypatch.setattr(evidencia, "ejecutar_plan", _ejecutar_plan)
+    monkeypatch.setattr(evidencia, "buscar_y_calificar", _buscar_y_calificar)
+    return estado
+
+
+def _plan_json(*pares: tuple[str, str]) -> dict:
+    return {
+        "items": [
+            {"query": q, "query_en": f"{q} en", "evidence_needed": e} for q, e in pares
+        ]
+    }
+
+
+async def test_con_pipeline_los_hops_son_el_plan_mas_extras_acotadas(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    """La medida contra la variación: el plan lo ejecuta código y el modelo
+    solo puede añadir `max_hops_extra` búsquedas (2 en extendido). El modelo
+    de este test insiste en buscar y se le corta con tool_choice none."""
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+    fake_openai.queue(
+        make_json_completion(_plan_json(("auc p-tau217", "el AUC"), ("cohorte", "la cohorte"))),
+        make_tool_call_stream(TOOL, {"semantico": "extra uno", "punto": "e1"}, call_id="x1", usage=make_usage(80, 8)),
+        make_tool_call_stream(TOOL, {"semantico": "extra dos"}, call_id="x2", usage=make_usage(80, 8)),
+        # Tercera petición de búsqueda: no llega a existir, la ronda ya va forzada.
+        make_text_stream("Respuesta [a.pdf, pág. 2].", usage=make_usage(90, 9)),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("compara p-tau217 entre cohortes", modo="extendido")
+
+    tipos = _tipos(eventos)
+    assert tipos[0] == "plan"
+    assert tipos.count("hop") == 3 + modos_extra("extendido")
+    assert eventos[-1].type == "final"
+    # El planificador usa el modelo grande con razonamiento alto y JSON.
+    planificador = fake_openai.calls[0]
+    assert planificador["model"] == settings_override.openai_model
+    assert planificador["reasoning_effort"] == settings_override.planner_reasoning_effort
+    assert planificador["response_format"] == {"type": "json_object"}
+    # Rondas del agente: dos con herramienta libre, la tercera forzada.
+    assert [c["tool_choice"] for c in fake_openai.calls[1:]] == ["auto", "auto", "none"]
+    assert "tope de 2 búsquedas extra" in fake_openai.calls[3]["messages"][-1]["content"]
+    # La herramienta lleva el parámetro `punto` y se describe como excepción.
+    tool = fake_openai.calls[1]["tools"][0]["function"]
+    assert "punto" in tool["parameters"]["properties"]
+    assert "EXTRA" in tool["description"]
+    # Contadores: plan y extra por separado.
+    assert tel.counters["hops_plan"] == 3
+    assert tel.counters["hops_extra"] == 2
+    assert tel.counters["hops"] == 5
+    assert len(tel.meta["huella_evidencia"]) == 64
+    # La extra que dice rellenar e1 queda trazada a e1; la otra, a "extra".
+    assert [x["punto"] for x in pipeline_encendido["extra"]] == ["e1", ""]
+    assert pipeline_encendido["extra"][0]["evidence_needed"] == "el AUC"
+    assert pipeline_encendido["extra"][1]["evidence_needed"] == "extra dos"
+
+
+def modos_extra(nombre: str) -> int:
+    from app.services import modos
+
+    return modos.resolver(nombre, get_settings()).max_hops_extra
+
+
+async def test_el_evento_plan_va_antes_del_primer_hop_y_los_hops_traen_el_contrato(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+    pipeline_encendido["sin"] = {"e2"}
+    fake_openai.queue(
+        make_json_completion(_plan_json(("uno", "dato uno"), ("dos", "dato dos"))),
+        make_text_stream("Listo.", usage=make_usage(10, 1)),
+    )
+
+    eventos = await _correr("pregunta", modo="extendido")
+
+    plan = eventos[0]
+    assert plan.type == "plan"
+    assert plan.data["items"] == [
+        {"id": "e0", "query": "pregunta", "query_en": "",
+         "evidence_needed": planner.ANCLA_EVIDENCE_NEEDED},
+        {"id": "e1", "query": "uno", "query_en": "uno en", "evidence_needed": "dato uno"},
+        {"id": "e2", "query": "dos", "query_en": "dos en", "evidence_needed": "dato dos"},
+    ]
+    hops = [ev.data for ev in eventos if ev.type == "hop"]
+    assert [h["n"] for h in hops] == [1, 2, 3]
+    assert set(hops[0]) >= {
+        "n", "query", "origen", "plan_item", "evidence_needed", "resultados",
+        "documentos", "estado", "recuperacion", "relevancia_verificada", "ms",
+    }
+    assert [h["origen"] for h in hops] == ["plan"] * 3
+    assert [h["plan_item"] for h in hops] == ["e0", "e1", "e2"]
+    assert hops[1] == {
+        "n": 2, "query": "uno", "origen": "plan", "plan_item": "e1",
+        "evidence_needed": "dato uno", "resultados": 1, "documentos": ["a.pdf"],
+        "estado": "cubierto", "recuperacion": "hybrid", "relevancia_verificada": True,
+        "ms": 1.5,
+        # enriquecido en el final (mismo objeto): sin verificación, nadie citó
+        "estado_final": "evidencia_no_usada", "usado_en_respuesta": False,
+    }
+    assert hops[2]["estado"] == "sin_resultados"
+    assert hops[2]["documentos"] == ["revisado.pdf"]
+    assert hops[2]["resultados"] == 0
+    # El orden de los eventos: plan, hops del plan, y solo después la ronda.
+    assert _tipos(eventos)[:4] == ["plan", "hop", "hop", "hop"]
+
+
+async def test_el_final_enriquece_los_hops_del_plan_con_cobertura(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    """Los hops se persisten como JSON con el mensaje: `estado_final` y
+    `usado_en_respuesta` permiten reconstruir la cobertura de un mensaje
+    antiguo sin migración. Sin verificador, "usado" es que la cita literal
+    del fragmento aparece en la respuesta."""
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+    pipeline_encendido["sin"] = {"e2"}
+    fake_openai.queue(
+        make_json_completion(_plan_json(("uno", "dato uno"), ("dos", "dato dos"))),
+        # cita el fragmento de e1 (página 2) y no el de e0 (página 1)
+        make_text_stream("El dato es 0.94 [a.pdf, pág. 2].", usage=make_usage(10, 1)),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("pregunta", modo="extendido")
+
+    final = eventos[-1].data
+    por_id = {h["plan_item"]: h for h in final["hops"]}
+    assert (por_id["e0"]["estado_final"], por_id["e0"]["usado_en_respuesta"]) == ("evidencia_no_usada", False)
+    assert (por_id["e1"]["estado_final"], por_id["e1"]["usado_en_respuesta"]) == ("cubierto", True)
+    assert (por_id["e2"]["estado_final"], por_id["e2"]["usado_en_respuesta"]) == ("sin_resultados", False)
+    assert tel.counters["puntos_sin_resultados"] == 1
+    assert tel.counters["puntos_no_usados"] == 1
+    assert tel.meta["cobertura"] == []  # sin verificador no hay informe
+    # Las fuentes llevan su punto y su grado.
+    fuentes = {f["snippet"]: f for f in final["sources"]}
+    assert fuentes["evidencia e1 2"]["plan_items"] == ["e1"]
+    assert fuentes["evidencia e1 2"]["grado"] == "directa"
+
+
+async def test_con_verificador_la_cobertura_manda_sobre_la_heuristica(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    """Cuando el informe trae `cobertura` (contrato D), el estado final de
+    cada hop sale de ahí, y una afirmación sostenida marca sus fragmentos
+    como usados aunque el texto haya sido corregido."""
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    monkeypatch.setenv("ENABLE_ANSWER_VERIFICATION", "true")
+    get_settings.cache_clear()
+    from app.services import verificador
+
+    capturado: dict = {}
+
+    async def _verificar(answer, chunks, evidencia_requerida=None, mapa_plan=None):
+        capturado["mapa_plan"] = mapa_plan
+        capturado["requerida"] = evidencia_requerida
+        return verificador.Verificacion(
+            afirmaciones=[
+                verificador.Afirmacion(
+                    texto="x", cita="[a.pdf, pág. 1]", veredicto=verificador.SOSTENIDA,
+                    fragmento_id="[a.pdf, pág. 1]", fragmentos=["e0-c1"],
+                )
+            ],
+            cobertura=[
+                {"id": "e1", "evidence_needed": "dato uno", "estado": "parcial",
+                 "n_fragmentos": 1, "documentos": ["a.pdf"], "afirmaciones": [0]},
+            ],
+        )
+
+    monkeypatch.setattr(verificador, "verificar", _verificar)
+    fake_openai.queue(
+        make_json_completion(_plan_json(("uno", "dato uno"))),
+        make_text_stream("Texto sin citas literales.", usage=make_usage(10, 1)),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("pregunta", modo="extendido")
+
+    assert capturado["mapa_plan"] == {"e0-c1": {"e0"}, "e1-c2": {"e1"}}
+    assert set(capturado["requerida"]) == {"e0", "e1"}
+    por_id = {h["plan_item"]: h for h in eventos[-1].data["hops"]}
+    assert por_id["e1"]["estado_final"] == "parcial"
+    assert por_id["e1"]["usado_en_respuesta"] is True
+    # e0 no está en cobertura (el contrato lo excluye): se reconstruye desde
+    # las afirmaciones sostenidas, que sí citan su fragmento.
+    assert por_id["e0"]["estado_final"] == "cubierto"
+    assert por_id["e0"]["usado_en_respuesta"] is True
+    assert tel.meta["cobertura"][0]["id"] == "e1"
+
+
+async def test_el_modo_normal_ejecuta_e0_sin_llamar_al_planner(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+    fake_openai.queue(make_text_stream("Respondo.", usage=make_usage(10, 1)))
+
+    eventos = await _correr("algo directo", modo="normal")
+
+    assert len(fake_openai.calls) == 1  # ni una llamada al planificador
+    assert eventos[0].type == "plan"
+    assert [it["id"] for it in eventos[0].data["items"]] == ["e0"]
+    assert eventos[0].data["items"][0]["query"] == "algo directo"
+    assert _tipos(eventos).count("hop") == 1
+    assert [it.id for it in pipeline_encendido["planes"][0]] == ["e0"]
+    # La evidencia entra como una tool call sintética tras el usuario, sin
+    # mensaje de estructura (un solo punto no tiene partes).
+    mensajes = fake_openai.calls[0]["messages"]
+    assert mensajes[2] == {"role": "user", "content": "algo directo"}
+    assert mensajes[3]["role"] == "assistant"
+    assert mensajes[3]["tool_calls"][0]["id"] == "call_plan_e0"
+    assert mensajes[4]["role"] == "tool" and mensajes[4]["tool_call_id"] == "call_plan_e0"
+    assert mensajes[4]["content"].startswith("PUNTO e0 (")
+    assert len(mensajes) == 5
+
+
+async def test_planner_caido_deja_el_plan_en_e0_sin_checklist_obligatorio(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+    fake_openai.queue(
+        RuntimeError("planner caído"),
+        make_text_stream("Respondo.", usage=make_usage(10, 1)),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("compara ambos", modo="extendido")
+
+    assert [it["id"] for it in eventos[0].data["items"]] == ["e0"]
+    assert _tipos(eventos).count("hop") == 1
+    todo = json.dumps(fake_openai.calls[1]["messages"], ensure_ascii=False)
+    assert "PLAN DE EVIDENCIA OBLIGATORIO" not in todo
+    assert "ESTRUCTURA DE LA RESPUESTA" not in todo
+    assert "call_plan_e0" in todo
+    fallo = [r for r in tel.rounds if r.component == "planner"]
+    assert len(fallo) == 1 and fallo[0].ok is False
+
+
+async def test_con_plan_de_varios_puntos_va_la_estructura_tras_la_evidencia(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    get_settings.cache_clear()
+    fake_openai.queue(
+        make_json_completion(_plan_json(("uno", "dato uno"), ("dos", "dato dos"))),
+        make_text_stream("Respondo.", usage=make_usage(10, 1)),
+    )
+
+    await _correr("pregunta", modo="extendido")
+
+    mensajes = fake_openai.calls[1]["messages"]
+    roles = [m["role"] for m in mensajes]
+    assert roles == ["system", "system", "user", "assistant", "tool", "tool", "tool", "system"]
+    estructura = mensajes[-1]["content"]
+    assert estructura.startswith("ESTRUCTURA DE LA RESPUESTA")
+    assert "- dato uno" in estructura and "- dato dos" in estructura
+    assert "e0" not in estructura and "PLAN DE EVIDENCIA OBLIGATORIO" not in estructura
+    # El historial le llega al planificador para las repreguntas.
+    fake_openai.calls.clear()
+    fake_openai.queue(
+        make_json_completion(_plan_json(("otra", "dato"))),
+        make_text_stream("Respondo.", usage=make_usage(10, 1)),
+    )
+    await _correr(
+        "y en la otra cohorte?", history=[
+            {"role": "user", "content": "AUC de p-tau217"},
+            {"role": "assistant", "content": "0.94 en la cohorte clínica"},
+        ], modo="extendido",
+    )
+    peticion = fake_openai.calls[0]["messages"][-1]["content"]
+    assert "Historial reciente" in peticion
+    assert "AUC de p-tau217" in peticion and "y en la otra cohorte?" in peticion
+
+
+async def test_repetir_una_consulta_del_plan_no_gasta_una_extra(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    """Las consultas del plan cuentan como ya ejecutadas: si el modelo pide la
+    misma con la herramienta (aunque añada `punto`), recibe el aviso de
+    repetición y no consume su presupuesto de extras."""
+    fake_openai.queue(
+        make_tool_call_stream(TOOL, {"semantico": "algo directo", "punto": "e0"}, call_id="r1", usage=make_usage(80, 8)),
+        make_tool_call_stream(TOOL, {"semantico": "otra cosa"}, call_id="r2", usage=make_usage(80, 8)),
+        make_text_stream("Respondo.", usage=make_usage(10, 1)),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("algo directo", modo="normal")
+
+    assert tel.counters.get("llamadas_repetidas") == 1
+    assert tel.counters.get("hops_extra") == 1
+    assert _tipos(eventos).count("hop") == 2  # e0 + la extra real
+    assert [x["query"] for x in pipeline_encendido["extra"]] == ["otra cosa"]
+    tools_ronda3 = _mensajes_tool(fake_openai.calls[2])
+    assert "IDÉNTICA" in tools_ronda3[-2]["content"]
+    assert tools_ronda3[-1]["content"].startswith("BÚSQUEDA EXTRA (otra cosa): sin resultados")
+    # Y tras agotar la única extra del modo normal, la siguiente ronda va forzada.
+    assert fake_openai.calls[2]["tool_choice"] == "none"
+
+
+async def test_la_extra_que_trae_evidencia_queda_trazada_y_en_las_fuentes(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    pipeline_encendido["extra_chunks"] = [_chunk_de("x", 7, doc="b.pdf")]
+    fake_openai.queue(
+        make_tool_call_stream(TOOL, {"semantico": "b", "punto": "e0"}, call_id="r1", usage=make_usage(80, 8)),
+        make_text_stream("Respondo [b.pdf, pág. 7].", usage=make_usage(10, 1)),
+    )
+
+    eventos = await _correr("pregunta", modo="normal")
+
+    hops = [ev.data for ev in eventos if ev.type == "hop"]
+    extra = hops[1]
+    assert extra["origen"] == "extra" and extra["plan_item"] == "e0"
+    assert extra["resultados"] == 1 and extra["documentos"] == ["b.pdf"]
+    assert extra["estado"] == "cubierto" and extra["nuevos"] == 1
+    assert "estado_final" not in extra  # solo los hops del plan se enriquecen
+    fuentes = {f["source_file"]: f for f in eventos[-1].data["sources"]}
+    assert fuentes["b.pdf"]["plan_items"] == ["e0"]
+    assert fuentes["b.pdf"]["grado"] == "directa"
+    # e0 se da por usado porque la respuesta cita evidencia trazada a e0.
+    assert hops[0]["usado_en_respuesta"] is True
+
+
+async def test_la_revision_recibe_el_mapa_y_el_tiempo_que_queda(
+    settings_override, fake_openai, pipeline_encendido, monkeypatch
+):
+    """Contrato G: un reloj por pregunta. La revisión recibe (budget_s +
+    margen) - transcurrido, nunca más de 270 s en total."""
+    monkeypatch.setenv("ENABLE_ANSWER_VERIFICATION", "true")
+    monkeypatch.setenv("ENABLE_PRE_RESPONSE_REVIEW", "true")
+    get_settings.cache_clear()
+    from app.services import verificador
+
+    capturado: dict = {}
+
+    async def _revisar(pregunta, borrador, mensajes, chunks, evidencia_requerida=None,
+                       mapa_plan=None, tiempo_disponible_s=None):
+        capturado.update(mapa_plan=mapa_plan, tiempo=tiempo_disponible_s, requerida=evidencia_requerida)
+        return revisor.ResultadoRevision(borrador, verificador.Verificacion())
+
+    monkeypatch.setattr(revisor, "revisar_antes_de_publicar", _revisar)
+    fake_openai.queue(make_text_stream("Borrador.", usage=make_usage(10, 1)))
+
+    await _correr("pregunta", modo="normal")
+
+    assert capturado["mapa_plan"] == {"e0-c1": {"e0"}}
+    assert capturado["requerida"] == {"e0": planner.ANCLA_EVIDENCE_NEEDED}
+    s = get_settings()
+    from app.services import modos
+
+    tope = modos.NORMAL.budget_s + s.pre_response_review_timeout_s
+    assert tope - 5 < capturado["tiempo"] <= tope
+    assert capturado["tiempo"] <= 270.0
+    # Y el pipeline recibió un deadline del mismo reloj.
+    assert pipeline_encendido["deadlines"][0] is not None
+
+
+async def test_con_el_pipeline_apagado_no_se_ejecuta_ningun_plan(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """El rollback: con el interruptor en false ni se llama a `ejecutar_plan`
+    ni cambia el prompt. El resto de este módulo (arriba) es la prueba de que
+    el bucle antiguo sigue igual."""
+    llamado = []
+
+    async def _no(*a, **k):
+        llamado.append(True)
+        raise AssertionError("no debía ejecutarse")
+
+    monkeypatch.setattr(evidencia, "ejecutar_plan", _no)
+    fake_openai.queue(make_text_stream("ok", usage=make_usage(10, 1)))
+
+    eventos = await _correr("hola", modo="normal")
+
+    assert llamado == []
+    assert _tipos(eventos) == ["sources", "token", "final"]
+    assert fake_openai.calls[0]["messages"][0]["content"] == agent.SYSTEM_PROMPT_LEGACY
+    assert "punto" not in fake_openai.calls[0]["tools"][0]["function"]["parameters"]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# Planificador (post-proceso determinista)
+# ---------------------------------------------------------------------------
+async def test_el_planner_deduplica_renumera_y_acota(settings_override, fake_openai):
+    fake_openai.queue(
+        make_json_completion({
+            "items": [
+                {"id": "e7", "query": "AUC p-tau217", "query_en": "AUC p-tau217", "evidence_needed": "el AUC"},
+                {"id": "e1", "query": "auc  P-TAU217", "evidence_needed": "repetida"},
+                {"query": "", "evidence_needed": "sin consulta"},
+                "basura",
+                {"query": "cohorte", "query_en": "cohort", "evidence_needed": ""},
+                {"query": "una pregunta literal", "evidence_needed": "igual que e0"},
+                {"query": "sobra", "evidence_needed": "por el tope"},
+            ]
+        })
+    )
+    items = await planner.plan_question("una pregunta literal", max_items=3)
+
+    # El tope cuenta items VÁLIDOS (los repetidos, vacíos o iguales a la
+    # pregunta no gastan hueco), y los ids salen por posición, no del modelo.
+    assert [(it.id, it.query, it.query_en) for it in items] == [
+        ("e1", "AUC p-tau217", ""),  # query_en igual a query se vacía
+        ("e2", "cohorte", "cohort"),
+        ("e3", "sobra", ""),
+    ]
+    assert items[1].evidence_needed == "evidencia para esta subpregunta"
+
+    fake_openai.queue(
+        make_json_completion({"items": [{"query": f"q{i}", "evidence_needed": "d"} for i in range(6)]})
+    )
+    assert [it.id for it in await planner.plan_question("p", max_items=4)] == ["e1", "e2", "e3", "e4"]
+
+
+async def test_el_planner_falla_a_lista_vacia_y_con_ancla_pone_e0(settings_override, fake_openai):
+    fake_openai.queue(make_json_completion({"items": "no es lista"}))
+    assert await planner.plan_question("p") == []
+    fake_openai.queue(make_json_completion({"items": []}))
+    assert await planner.plan_question("p") == []
+    fake_openai.queue(RuntimeError("caído"))
+    assert await planner.plan_question("p") == []
+
+    plan = planner.con_ancla("  Pregunta literal ", [])
+    assert [(it.id, it.query) for it in plan] == [("e0", "Pregunta literal")]
+    assert plan[0].evidence_needed == planner.ANCLA_EVIDENCE_NEEDED
+
+    # Un item equivalente al ancla se descarta y el resto se renumera.
+    items = [
+        planner.PlanItem("e1", "pregunta  LITERAL", "dup"),
+        planner.PlanItem("e2", "otra", "d2", query_en="other"),
+        planner.PlanItem("e3", "otra", "d3"),
+    ]
+    plan = planner.con_ancla("Pregunta literal", items)
+    assert [(it.id, it.query, it.query_en) for it in plan] == [
+        ("e0", "Pregunta literal", ""), ("e1", "otra", "other"),
+    ]
+    assert planner.format_checklist(plan[:1]) == ""
+    assert "- d2" in planner.format_checklist(plan)
+
+
+# ---------------------------------------------------------------------------
+# De punta a punta: agente + planner + evidencia + verificador reales, con
+# Qdrant y OpenAI falsos. Es la prueba de que las piezas encajan entre sí, no
+# solo con sus dobles.
+# ---------------------------------------------------------------------------
+async def test_punta_a_punta_con_el_pipeline_real_y_los_falsos(
+    settings_override, fake_openai, fake_qdrant, monkeypatch
+):
+    import types
+
+    monkeypatch.setenv("ENABLE_EVIDENCE_PIPELINE", "true")
+    monkeypatch.setenv("ENABLE_QUERY_PLANNING", "true")
+    monkeypatch.setenv("ENABLE_ANSWER_VERIFICATION", "true")
+    monkeypatch.setenv("ENABLE_PRE_RESPONSE_REVIEW", "true")
+    get_settings.cache_clear()
+
+    def _point(id, doc, page, text, section="Results"):
+        return types.SimpleNamespace(
+            id=id, score=0.5,
+            payload={"text": text, "source_file": doc, "page": page, "section": section,
+                     "document_type": "pdf", "chunk_type": "text"},
+        )
+
+    puntos = [
+        _point("c1", "a.pdf", 3, "El AUC de p-tau217 fue 0.94 en la cohorte clínica."),
+        _point("c2", "b.pdf", 5, "El AUC fue 0.91 en la cohorte de validación."),
+        _point("c3", "a.pdf", 9, "Smith J, et al. 2021.", section="References"),
+    ]
+    fake_qdrant.set_response("query_points", lambda kw: types.SimpleNamespace(points=list(puntos)))
+
+    respuesta = "El AUC fue 0.94 [a.pdf, pág. 3]."
+    fake_openai.queue(
+        # planner (1 item con query_en -> e1 lanza dos búsquedas)
+        make_json_completion(_plan_json(("AUC en la validación", "AUC de validación"))),
+        # calificador pointwise (reranker.calificar_evidencia), una llamada por
+        # punto, en paralelo: dos candidatos tras podar la bibliografía
+        make_json_completion({"fragmentos": [{"i": 0, "grado": "directa"}, {"i": 1, "grado": "parcial"}]}),
+        make_json_completion({"fragmentos": [{"i": 0, "grado": "directa"}, {"i": 1, "grado": "parcial"}]}),
+        # redactor
+        make_text_stream(respuesta, usage=make_usage(300, 30)),
+        # verificador: una afirmación, sostenida
+        make_json_completion({"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "ok"}]}),
+    )
+    tel = telemetry.start()
+
+    eventos = await _correr("¿Cuál es el AUC de p-tau217?", modo="extendido")
+
+    tipos = _tipos(eventos)
+    assert tipos[:3] == ["plan", "hop", "hop"]
+    assert tipos[-1] == "final"
+    assert "verificacion" in tipos and tipos.index("verificacion") < tipos.index("final")
+    assert fake_openai.pending == 0  # se consumió exactamente lo previsto
+
+    final = eventos[-1].data
+    assert final["content"] == respuesta
+    # Dos documentos en las fuentes, la bibliografía fuera, cada fuente con
+    # sus puntos (los dos puntos recuperaron lo mismo) y su grado.
+    fuentes = {f["source_file"]: f for f in final["sources"]}
+    assert set(fuentes) == {"a.pdf", "b.pdf"}
+    assert fuentes["a.pdf"]["plan_items"] == ["e0", "e1"]
+    assert fuentes["a.pdf"]["grado"] == "directa"
+    assert fuentes["b.pdf"]["grado"] == "parcial"
+    # Hops del plan enriquecidos: la respuesta citó a.pdf pág. 3 (c1), que
+    # ambos puntos trajeron, así que ambos quedan cubiertos y usados.
+    for hop in final["hops"]:
+        assert hop["origen"] == "plan"
+        assert hop["estado"] == "cubierto"
+        assert hop["recuperacion"] == "dense"  # BM25 desactivado en tests
+        assert hop["relevancia_verificada"] is True
+        assert hop["estado_final"] == "cubierto" and hop["usado_en_respuesta"] is True
+    # 3 búsquedas a Qdrant: e0 una, e1 dos (query y query_en).
+    assert len(fake_qdrant.calls_to("query_points")) == 3
+    # El mensaje del punto que vio el redactor lleva la cabecera y las citas.
+    tools = _mensajes_tool(fake_openai.calls[3])
+    assert tools[0]["content"].startswith("PUNTO e0 (")
+    assert "cubierto, 2 fragmentos de: a.pdf; b.pdf" in tools[0]["content"]
+    assert "cita: [a.pdf, pág. 3]" in tools[0]["content"]
+    assert "Smith J" not in tools[0]["content"]
+    # Telemetría de la pregunta.
+    assert tel.counters["hops_plan"] == 2 and "hops_extra" not in tel.counters
+    assert len(tel.meta["huella_evidencia"]) == 64
+    assert tel.meta["verificacion"]["sostenidas"] == 1
+    assert tel.meta["verificacion"]["revision_previa"] is True

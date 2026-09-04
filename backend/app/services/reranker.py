@@ -5,6 +5,7 @@ mantiene el orden original de Qdrant, cortado a top_k.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -13,36 +14,51 @@ from dataclasses import dataclass
 from app.config import get_settings
 from app.models import Chunk
 from app.services import telemetry
-from app.services.openai_client import get_async_client, openai_slot
+from app.services.openai_client import (
+    crear_completion,
+    get_async_client,
+    openai_slot,
+    razonamiento,
+)
 
 logger = logging.getLogger(__name__)
 
 
-async def _json_completion(messages: list[dict], note: str) -> dict:
+async def _json_completion(
+    messages: list[dict], note: str, componente: str = "reranker"
+) -> dict:
     """Una llamada JSON al modelo de rerank, bajo el semáforo y con usage
-    registrado en la telemetría del request (componente `reranker`)."""
+    registrado en la telemetría del request.
+
+    `componente` es el nombre bajo el que se agrega en telemetría: `reranker`
+    para rerank/filter_relevant y `grader` para el calificador pointwise, que
+    hace varias llamadas por pregunta y hay que poder medirlo aparte."""
     settings = get_settings()
     model = settings.rerank_model_resolved
     tel = telemetry.current()
     t0 = time.perf_counter()
     try:
         async with openai_slot():
-            resp = await get_async_client().chat.completions.create(
-                model=model,
-                temperature=settings.llm_temperature,
-                response_format={"type": "json_object"},
-                messages=messages,
+            resp = await crear_completion(
+                get_async_client(),
+                {
+                    "model": model,
+                    "temperature": settings.llm_temperature,
+                    "response_format": {"type": "json_object"},
+                    "messages": messages,
+                    **razonamiento(settings.rerank_reasoning_effort),
+                },
             )
     except Exception as exc:
         tel.record(
-            "reranker", model, None, ms=(time.perf_counter() - t0) * 1000.0,
+            componente, model, None, ms=(time.perf_counter() - t0) * 1000.0,
             ok=False, note=f"{note}: {str(exc)[:120]}",
         )
         raise
     choice = resp.choices[0] if resp.choices else None
     content = getattr(getattr(choice, "message", None), "content", None)
     tel.record(
-        "reranker", getattr(resp, "model", None) or model, getattr(resp, "usage", None),
+        componente, getattr(resp, "model", None) or model, getattr(resp, "usage", None),
         ms=(time.perf_counter() - t0) * 1000.0, ok=bool(content),
         finish_reason=getattr(choice, "finish_reason", None),
         note=note if content else f"{note}: respuesta sin contenido",
@@ -82,7 +98,12 @@ _FILTER_SYSTEM_PROMPT = (
     "algo, inclúyelo."
 )
 
-_FILTER_TRUNCATE_CHARS = 450
+# Antes eran 450 caracteres (~28% de un fragmento típico de 1.600): el filtro
+# descartaba fragmentos cuya cifra clave estaba al final porque nunca la veía.
+# Es el camino de rollback cuando el pipeline de evidencia está apagado, así
+# que se sube el corte sin cambiar la forma del prompt. Con 60 candidatos son
+# unos 18k tokens de entrada, dentro de lo que el modelo de rerank admite.
+_FILTER_TRUNCATE_CHARS = 1200
 
 
 @dataclass(frozen=True)
@@ -208,3 +229,195 @@ async def rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]:
             "Reranker LLM falló (%s); se mantiene el orden de Qdrant.", exc
         )
         return chunks[:top_k]
+
+
+# --- Calificación por punto del plan ----------------------------------------
+#
+# Por qué pointwise y con el texto completo: la selección de evidencia pasaba
+# por un rerank LISTWISE (permutar 60 fragmentos en un JSON, medido 2/10
+# permutaciones distintas a temperatura 0) y por un filtro binario que solo
+# veía 450 caracteres de cada fragmento y descartaba los que tenían la cifra
+# clave al final. Un juicio por fragmento sobre el texto entero es la salida
+# más estable que puede dar un modelo, y con la sección en la cabecera puede
+# distinguir un dato de Resultados de una mención de pasada en Introducción.
+
+GRADOS = ("directa", "parcial", "no")
+
+# Tamaño máximo de lote. Por encima, los lotes van en paralelo bajo el
+# semáforo de OpenAI y se unen por índice global.
+_GRADER_LOTE = 20
+
+_GRADER_SYSTEM_PROMPT = (
+    "Eres un evaluador de evidencia para investigación médica. Recibes una "
+    "pregunta, la descripción de la evidencia que se necesita para responderla "
+    "y una lista de fragmentos numerados de documentos, cada uno con una "
+    "cabecera (fuente, sección, tipo, cita) y su texto completo. Juzga CADA "
+    "fragmento POR SÍ SOLO, sin compararlo con los demás, y asígnale un grado:\n"
+    '- "directa": el fragmento contiene el dato, la cifra, la definición, el '
+    "método o el resultado que pide la evidencia necesaria, en la población o "
+    "el contexto por el que se pregunta.\n"
+    '- "parcial": habla del tema y aporta algo útil, pero sin el dato exacto, o '
+    "lo aporta en otra población o contexto, o solo lo interpreta o lo comenta "
+    "sin darlo.\n"
+    '- "no": trata otro tema, o es portada, índice, bibliografía o cabecera sin '
+    "contenido, o menciona el tema de pasada sin decir nada de él.\n"
+    "Fíjate en la sección: un dato en Resultados o en una tabla vale como "
+    "evidencia; la misma frase en Introducción suele ser contexto de otros "
+    'trabajos. Ante la duda entre "parcial" y "no", elige "parcial": que '
+    "alguien pierda una cifra por un descarte es peor que un fragmento de más. "
+    "Devuelve SOLO un objeto JSON con la forma "
+    '{"fragmentos": [{"i": <índice tal como aparece en la cabecera>, '
+    '"grado": "directa"|"parcial"|"no", "motivo": "<una frase>"}]} con una '
+    "entrada por cada fragmento recibido, usando exactamente el índice de su "
+    "cabecera. Sin texto adicional."
+)
+
+
+@dataclass(frozen=True)
+class Calificacion:
+    """Grado de cada fragmento como evidencia para un punto del plan.
+
+    `grados` va por índice del fragmento en la lista de entrada. Mismos tres
+    estados que `RelevanceOutcome`: `verificado=False` significa que el
+    calificador no se pudo aplicar (API caída, JSON roto) en al menos un lote
+    y NADIE debe concluir nada de un grado ausente. Los grados de los lotes que
+    sí respondieron se devuelven igual.
+    """
+
+    grados: dict[int, str]
+    verificado: bool
+    motivo: str
+
+
+def _cabecera(i: int, ch: Chunk) -> str:
+    """Cabecera de un fragmento en el prompt del calificador. El índice es el
+    GLOBAL de la lista de entrada aunque el fragmento vaya en el segundo lote:
+    así el modelo solo tiene que copiarlo y nadie reindexa nada."""
+    tipo = "tabla" if ch.chunk_type == "table" else "texto"
+    return (
+        f"[{i}] fuente: {ch.fuente()} · seccion: {ch.section or 'desconocida'} "
+        f"· tipo: {tipo} · cita: {ch.cite()}"
+    )
+
+
+def _parsear_grados(data: object, offset: int, n: int) -> dict[int, str]:
+    """Lee {"fragmentos": [{"i", "grado", ...}]} con la misma tolerancia que
+    `_apply_ranking`: entradas que no son objetos, índices fuera de
+    [offset, offset+n), booleanos o repetidos y grados fuera de GRADOS se
+    ignoran uno a uno. Solo la ausencia de la lista es un fallo del lote."""
+    if not isinstance(data, dict):
+        raise ValueError("respuesta JSON que no es un objeto")
+    raw = data.get("fragmentos")
+    if not isinstance(raw, list):
+        raise ValueError("respuesta sin lista 'fragmentos'")
+    grados: dict[int, str] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        i, g = item.get("i"), item.get("grado")
+        if isinstance(i, bool) or not isinstance(g, str):
+            continue
+        try:
+            idx = int(i)
+        except (TypeError, ValueError):
+            continue
+        grado = g.strip().lower()
+        if not (offset <= idx < offset + n) or idx in grados or grado not in GRADOS:
+            continue
+        grados[idx] = grado
+    return grados
+
+
+async def _calificar_lote(
+    query: str,
+    evidence_needed: str,
+    lote: list[Chunk],
+    offset: int,
+    n_total: int,
+    k: int,
+    n_lotes: int,
+) -> dict[int, str]:
+    """Una llamada por lote. Devuelve grados ya en índice global."""
+    fragmentos = "\n\n".join(
+        f"{_cabecera(offset + j, ch)}\n{ch.text}" for j, ch in enumerate(lote)
+    )
+    user_prompt = (
+        f"Pregunta: {query}\n"
+        f"Evidencia necesaria: {evidence_needed}\n\n"
+        f"Fragmentos ({len(lote)}, índices {offset} a {offset + len(lote) - 1}):\n\n"
+        f"{fragmentos}\n\n"
+        'Responde con el JSON {"fragmentos": [{"i": índice, "grado": '
+        '"directa"|"parcial"|"no", "motivo": "..."}]}, una entrada por '
+        "fragmento."
+    )
+    data = await _json_completion(
+        [
+            {"role": "system", "content": _GRADER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        note=f"calificar n={n_total} lote={k + 1}/{n_lotes}",
+        componente="grader",
+    )
+    return _parsear_grados(data, offset, len(lote))
+
+
+async def calificar_evidencia(
+    query: str, evidence_needed: str, chunks: list[Chunk]
+) -> Calificacion:
+    """Califica cada fragmento COMPLETO como evidencia directa, parcial o no.
+
+    Pointwise: cada fragmento se juzga por sí solo frente a `query` con el
+    objetivo `evidence_needed`, con cabecera fuente/sección/tipo/cita y el
+    texto sin truncar. Más de `_GRADER_LOTE` fragmentos se parten en lotes
+    que corren en paralelo (cada llamada ocupa su plaza del semáforo). Un lote
+    caído no tumba los demás: sus índices quedan sin grado y `verificado`
+    pasa a False con el recuento en `motivo`.
+    """
+    if not chunks:
+        return Calificacion({}, True, "sin candidatos")
+
+    lotes = [chunks[i : i + _GRADER_LOTE] for i in range(0, len(chunks), _GRADER_LOTE)]
+    resultados = await asyncio.gather(
+        *(
+            _calificar_lote(
+                query, evidence_needed, lote, k * _GRADER_LOTE, len(chunks), k, len(lotes)
+            )
+            for k, lote in enumerate(lotes)
+        ),
+        return_exceptions=True,
+    )
+
+    grados: dict[int, str] = {}
+    fallidos = 0
+    for k, r in enumerate(resultados):
+        if isinstance(r, BaseException):
+            if not isinstance(r, Exception):
+                # CancelledError y compañía no son un fallo del lote: se propagan.
+                raise r
+            fallidos += 1
+            logger.warning(
+                "calificar_evidencia: lote %d/%d falló (%s); sus fragmentos quedan sin calificar.",
+                k + 1, len(lotes), r,
+            )
+            continue
+        grados.update(r)
+    # Orden estable por índice: gather ya respeta el orden de los lotes, pero
+    # así el dict no depende de en qué orden respondió el modelo dentro de uno.
+    grados = dict(sorted(grados.items()))
+
+    conteo = {g: sum(1 for v in grados.values() if v == g) for g in GRADOS}
+    resumen = (
+        f"{conteo['directa']} directa, {conteo['parcial']} parcial, {conteo['no']} no "
+        f"de {len(chunks)} fragmentos"
+    )
+    sin_calificar = len(chunks) - len(grados)
+    if fallidos:
+        return Calificacion(
+            grados,
+            False,
+            f"{fallidos} de {len(lotes)} lotes fallaron; {sin_calificar} fragmentos "
+            f"sin calificar; {resumen}",
+        )
+    if sin_calificar:
+        resumen += f"; {sin_calificar} sin calificar por el modelo"
+    return Calificacion(grados, True, resumen)

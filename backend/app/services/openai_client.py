@@ -19,12 +19,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import threading
-from typing import AsyncIterator
+import time
+from typing import Any, AsyncIterator
 
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, BadRequestError, OpenAI
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 # Un cliente por event loop: el pool de httpx queda ligado al loop que lo
 # creó y reutilizarlo desde otro (tests, scripts) rompe con "Event loop is
@@ -118,3 +122,76 @@ def reset_clients() -> None:
     _async_override = None
     with _sync_lock:
         _sync_client = None
+
+
+# --- Razonamiento -----------------------------------------------------------
+#
+# Hasta el 4 sep 2026 el backend mandaba CERO tokens de razonamiento: una
+# nota del 2 sep decía que gpt-5.4 rechazaba `reasoning_effort` junto a
+# function tools en /v1/chat/completions, y se apagó en todos los modos. Se
+# volvió a medir contra el gateway de Vercel con los kwargs exactos del bucle
+# y funciona (ver app/services/modos.py). Pero como ya rompió el modo
+# extendido una vez, el parámetro no se manda a ciegas: si la API lo rechaza
+# con un 400 que lo nombra, `crear_completion` reintenta sin él y lo deja
+# apagado un rato, así el peor caso es volver a la conducta anterior y no
+# perder la respuesta.
+_razonamiento_rechazado_hasta: float = 0.0
+_RAZONAMIENTO_REINTENTO_S = 600.0
+
+
+def razonamiento(esfuerzo: str | None) -> dict[str, Any]:
+    """kwargs de razonamiento para `chat.completions.create`.
+
+    Vacío si el componente no lo pide ("", None o "none") o si la API lo
+    rechazó hace menos de `_RAZONAMIENTO_REINTENTO_S` segundos.
+    """
+    if not esfuerzo or str(esfuerzo).strip().lower() == "none":
+        return {}
+    if time.monotonic() < _razonamiento_rechazado_hasta:
+        return {}
+    return {"reasoning_effort": str(esfuerzo).strip().lower()}
+
+
+def _es_rechazo_de_razonamiento(exc: BaseException) -> bool:
+    return isinstance(exc, BadRequestError) and "reasoning" in str(exc).lower()
+
+
+def razonamiento_rechazado() -> bool:
+    """Si el razonamiento está apagado por un rechazo reciente de la API."""
+    return time.monotonic() < _razonamiento_rechazado_hasta
+
+
+def _reset_razonamiento() -> None:
+    """Solo tests."""
+    global _razonamiento_rechazado_hasta
+    _razonamiento_rechazado_hasta = 0.0
+
+
+async def crear_completion(client: Any, kwargs: dict[str, Any]) -> Any:
+    """`client.chat.completions.create(**kwargs)` con el fallback de razonamiento.
+
+    Si la petición lleva `reasoning_effort` y la API la rechaza con un 400
+    que lo nombra, se anota el rechazo, se reintenta UNA vez sin el parámetro
+    y se cuenta en telemetría (`razonamiento_rechazado`). Cualquier otro
+    error sube tal cual. No ocupa plaza del semáforo: eso lo hace el llamador,
+    que sabe si la plaza debe durar todo el stream o solo la petición.
+    """
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except BadRequestError as exc:
+        if "reasoning_effort" not in kwargs or not _es_rechazo_de_razonamiento(exc):
+            raise
+        global _razonamiento_rechazado_hasta
+        _razonamiento_rechazado_hasta = time.monotonic() + _RAZONAMIENTO_REINTENTO_S
+        logger.warning(
+            "La API rechazó reasoning_effort=%r (%s); se reintenta sin él y "
+            "queda apagado %d s.",
+            kwargs.get("reasoning_effort"), str(exc)[:160], int(_RAZONAMIENTO_REINTENTO_S),
+        )
+        # Import tardío: telemetry no depende de este módulo, pero se evita
+        # crear un ciclo si algún día lo hace.
+        from app.services import telemetry
+
+        telemetry.current().incr("razonamiento_rechazado")
+        sin = {k: v for k, v in kwargs.items() if k != "reasoning_effort"}
+        return await client.chat.completions.create(**sin)

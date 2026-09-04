@@ -43,19 +43,60 @@ class Settings(BaseSettings):
     # claramente, pero NO da determinismo: la familia gpt-5 conserva
     # aleatoriedad residual y `seed` no cambió nada (2/10 con y sin él). Para
     # eliminar la variación de verdad hay que sacar decisiones de manos del
-    # modelo, no bajar la temperatura.
+    # modelo, no bajar la temperatura. Esa medida es el pipeline de evidencia
+    # (`enable_evidence_pipeline`, app/services/evidencia.py): las búsquedas
+    # las decide el plan y las ejecuta código determinista, y el modelo solo
+    # lee la evidencia y redacta. La temperatura se queda en 0.0 para lo que
+    # sigue en manos del modelo (planner, calificador, redacción).
     llm_temperature: float = 0.0
 
     # Cliente OpenAI único (app/services/openai_client.py): timeout por
     # request, reintentos del SDK y llamadas concurrentes máximas al API.
-    openai_timeout_s: float = 120.0
+    # 60 y no 120: en serverless una sola llamada colgada se comía la mitad
+    # del presupuesto de la pregunta. Una ronda del agente con razonamiento
+    # alto y respuesta larga se midió en 11-12 s; 60 deja margen de sobra.
+    openai_timeout_s: float = 60.0
     openai_max_retries: int = 2
-    openai_concurrency: int = 3
+    # 6 y no 3: el pipeline de evidencia lanza las consultas del plan en
+    # paralelo (embedding + calificación por punto) y con 3 plazas el
+    # "paralelo" era nominal: cinco puntos hacían cola de a tres. Cada
+    # petición serverless es un proceso aparte, así que esto es concurrencia
+    # por pregunta, no global.
+    openai_concurrency: int = 6
+
+    # Esfuerzo de razonamiento (`reasoning_effort`) por componente. Hasta el
+    # 4 sep 2026 NADIE razonaba: una nota decía que la API lo rechazaba junto
+    # a tools y se apagó en todo el backend; medido de nuevo contra el
+    # gateway, funciona (ver app/services/modos.py y
+    # openai_client.crear_completion, que además reintenta sin él si un día
+    # vuelve a rechazarlo). Valores: none | low | medium | high.
+    #
+    # El del agente lo decide el MODO (normal medium, extendido high); este
+    # ajuste solo existe como techo del operador: vacío = manda el modo,
+    # "none" lo apaga en los dos.
+    agent_reasoning_effort: str = ""
+    # El planner es UNA llamada por pregunta y de su descomposición depende
+    # toda la evidencia: high.
+    planner_reasoning_effort: str = "high"
+    # El calificador corre una vez por punto del plan, en paralelo: medium
+    # equilibra juicio y latencia.
+    rerank_reasoning_effort: str = "medium"
+    # El verificador es el juez de la barrera; sus falsos positivos abstienen
+    # y sus falsos negativos dejan pasar atribuciones falsas. medium, porque
+    # va en lotes de hasta 24 afirmaciones y high sobre listas largas tarda
+    # más de lo que la revisión puede esperar.
+    verifier_reasoning_effort: str = "medium"
+    # El revisor redacta la corrección con toda la evidencia delante: high.
+    revisor_reasoning_effort: str = "high"
 
     # Versión del prompt del agente. Viaja en /api/health, /api/stats, en la
     # telemetría de cada respuesta y en los resultados de evals para que dos
     # mediciones solo se comparen si usaron el mismo prompt.
-    prompt_version: str = "v3"
+    # v4: la evidencia llega ya recuperada por el pipeline y el prompt le
+    # pide al modelo leerla y redactar con una estructura fija (respuesta
+    # directa, evidencia por punto con su sección, contradicciones, ausencias
+    # con la fórmula literal que reconoce el verificador).
+    prompt_version: str = "v4"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
@@ -93,6 +134,25 @@ class Settings(BaseSettings):
     # de redactar. Se puede apagar como rollback operativo sin cambiar código.
     enable_query_planning: bool = True
     planner_max_queries: int = 5
+    # Pipeline de evidencia (app/services/evidencia.py). Antes el agente
+    # decidía libremente cuántas búsquedas hacía (medido: 6-10 para la misma
+    # pregunta), el plan solo se le SUGERÍA como texto, ningún fragmento sabía
+    # qué punto del plan lo había traído y un paper largo podía ocupar los 12
+    # huecos. Resultado medido: misma pregunta, fidelidad 0.33-1.00 entre
+    # corridas. Con el pipeline la evidencia es una función determinista de
+    # (pregunta, índice): el plan se ejecuta por código, en paralelo, con
+    # calificación por punto y cuotas por documento, y el modelo la recibe ya
+    # recuperada. Apagarlo devuelve el bucle anterior tal cual (rollback).
+    enable_evidence_pipeline: bool = True
+    # Candidatos por punto del plan que pasan al calificador tras fusionar,
+    # podar y deduplicar. 30 y no 60: el calificador lee el texto COMPLETO de
+    # cada fragmento y con 60 la petición se hacía demasiado larga para un
+    # dictamen fiable; 30 con cuota por documento cubre varios papers.
+    evidence_candidates_per_item: int = 30
+    # Tope de reloj para recuperar y calificar TODOS los puntos del plan (van
+    # en paralelo). Un punto que no llega a tiempo queda "sin_resultados" con
+    # recuperación "error"; el resto sigue.
+    evidence_prefetch_timeout_s: float = 45.0
     # Verificación de la respuesta final, afirmación por afirmación, contra los
     # fragmentos recuperados (app/services/verificador.py). Es el requisito
     # central del proyecto: una respuesta fluida con una cita que no sostiene
@@ -109,7 +169,12 @@ class Settings(BaseSettings):
     # Presupuesto total de critico + correcciones. Debe dejar margen dentro del
     # limite de la funcion serverless aun cuando la busqueda use casi todo su
     # propio presupuesto.
-    pre_response_review_timeout_s: float = 45.0
+    # 90 y no 45: con razonamiento en el verificador y el revisor, verificar +
+    # corregir + volver a verificar no cabe en 45 s y la barrera acababa en
+    # abstención segura por reloj, no por fidelidad. Cabe porque el bucle del
+    # modo extendido bajó a 180 s (modos.py) y el reloj es UNO por pregunta:
+    # el agente recorta este tope al tiempo que de verdad quede.
+    pre_response_review_timeout_s: float = 90.0
     # Modelo del verificador. Vacío = hereda rerank_model_resolved.
     verifier_model: str = ""
     # Afirmaciones por PETICIÓN al verificador. No es un recorte: si la

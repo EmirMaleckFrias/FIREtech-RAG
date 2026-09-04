@@ -16,7 +16,12 @@ from dataclasses import dataclass
 from app.config import get_settings
 from app.models import Chunk
 from app.services import telemetry, verificador
-from app.services.openai_client import get_async_client, openai_slot
+from app.services.openai_client import (
+    crear_completion,
+    get_async_client,
+    openai_slot,
+    razonamiento,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +71,10 @@ def sin_senal(informe: verificador.Verificacion) -> bool:
     """El verificador no pudo dictaminar NADA: no hay con qué corregir.
 
     Distinto de que alguna afirmacion quede sin veredicto, que es normal y solo
-    significa que esa no se comprobo.
+    significa que esa no se comprobo. Con los lotes en paralelo del
+    verificador esto solo ocurre si caen TODOS los lotes: uno caido deja sus
+    afirmaciones `sin_verificar` y conserva el resto, asi que sigue habiendo
+    señal con la que corregir.
     """
     if not informe.afirmaciones:
         return False
@@ -94,9 +102,21 @@ def aprobada(informe: verificador.Verificacion) -> bool:
     la respuesta entera. Ademas VIAJA a la interfaz marcado en ambar, asi que
     lo ve.
 
-    Lo que no se relaja es la garantia: una atribucion falsa nunca sale.
+    `evidencia_sin_cubrir` TAMPOCO bloquea. Bloqueaba, y con la cobertura por
+    punto del plan eso habria sido letal: cualquier pregunta con un punto cuya
+    evidencia recuperada la respuesta no usara habria acabado en abstencion
+    segura tras gastar el presupuesto entero (medido: 280 s para no decir
+    nada), y un punto que el redactor decide no usar porque no responde a la
+    pregunta es una decision editorial, no una atribucion falsa. La cobertura
+    es INFORMACION para la medica (que ve por punto que hubo y que no) y
+    CRITICA para el redactor (que en la ronda de correccion recibe punto por
+    punto que incorporar o que declarar ausente); no es motivo de abstencion.
+
+    Lo que sigue sin salir nunca es la atribucion falsa: una cita que no
+    resuelve, una afirmacion que su fragmento no sostiene, o una respuesta
+    factual sin una sola cita.
     """
-    if informe.citas_sin_resolver or informe.evidencia_sin_cubrir:
+    if informe.citas_sin_resolver:
         return False
     # Sin ninguna comprobacion no se aprueba, aunque no haya bloqueantes: no
     # haberlos es lo que pasa cuando NADA se comprobo. Al relajar la puerta
@@ -111,7 +131,14 @@ def aprobada(informe: verificador.Verificacion) -> bool:
 
 def _critica(informe: verificador.Verificacion) -> str:
     lineas: list[str] = []
-    if not informe.ok:
+    hay_sin_verificar = any(
+        a.veredicto == verificador.SIN_VERIFICAR for a in informe.afirmaciones
+    )
+    # La nota del verificador se muestra si la comprobacion no fue
+    # concluyente, y tambien si un lote cayo dejando afirmaciones sin
+    # verificar aunque `ok` siga en True: el redactor debe saber que esas no
+    # estan aprobadas, solo sin juzgar.
+    if not informe.ok or (informe.nota and hay_sin_verificar):
         lineas.append(f"- La comprobacion no fue concluyente: {informe.nota}")
     for afirmacion in informe.afirmaciones:
         if afirmacion.veredicto == verificador.SOSTENIDA:
@@ -121,8 +148,33 @@ def _critica(informe: verificador.Verificacion) -> str:
         lineas.append(
             f"- {afirmacion.veredicto}: {afirmacion.texto!r} ({cita}); {motivo}"
         )
-    for punto in informe.evidencia_sin_cubrir:
-        lineas.append(f"- Evidencia requerida sin cubrir: {punto}")
+    # Cobertura por punto del plan. Al redactor se le dice EXACTAMENTE que
+    # hacer con cada punto, porque "evidencia sin cubrir: e2" no le sirve: no
+    # sabe si e2 es algo que debe buscar en los fragmentos que ya tiene o
+    # algo que el indice no tiene y debe declarar ausente. Confundir los dos
+    # casos es lo que lleva a rellenar con conocimiento propio.
+    for punto in informe.cobertura:
+        estado = punto.get("estado")
+        pid = punto.get("id", "?")
+        necesidad = punto.get("evidence_needed", "")
+        if estado == verificador.EVIDENCIA_NO_USADA:
+            docs = ", ".join(punto.get("documentos") or []) or "los documentos recuperados"
+            lineas.append(
+                f"- Punto {pid} ({necesidad}): se recuperaron "
+                f"{punto.get('n_fragmentos', 0)} fragmentos de {docs} y la "
+                "respuesta no los usa ni los descarta: incorporalos con su cita "
+                "o di explicitamente por que no responden al punto"
+            )
+        elif estado == verificador.SIN_RESULTADOS:
+            lineas.append(
+                f"- Punto {pid} ({necesidad}): el indice no tiene evidencia; "
+                "declaralo con la formula 'No encuentro ... en los documentos', "
+                "no lo rellenes"
+            )
+    if not informe.cobertura:
+        # Sin mapa fragmento→punto solo existe la lectura antigua, todo o nada.
+        for punto in informe.evidencia_sin_cubrir:
+            lineas.append(f"- Evidencia requerida sin cubrir: {punto}")
     if not lineas:
         lineas.append("- El borrador no supero la barrera de fidelidad.")
     # Corregir no siempre es posible: si el fragmento no dice lo que la
@@ -162,12 +214,20 @@ async def _corregir(
             },
         ]
     )
+    # Misma temperatura que el redactor original (la correccion no debe
+    # variar entre corridas mas que el borrador) y razonamiento alto: la
+    # ronda de correccion es UNA y tiene que resolver a la vez bloqueantes,
+    # puntos sin usar y puntos ausentes sin inventar. `crear_completion`
+    # reintenta sin razonamiento si la API lo rechaza.
+    kwargs = {
+        "model": model,
+        "messages": mensajes,
+        "temperature": settings.llm_temperature,
+        **razonamiento(settings.revisor_reasoning_effort),
+    }
     try:
         async with openai_slot():
-            response = await get_async_client().chat.completions.create(
-                model=model,
-                messages=mensajes,
-            )
+            response = await crear_completion(get_async_client(), kwargs)
     except BaseException as exc:
         telemetry.current().record(
             "revisor", model, None,
@@ -195,22 +255,40 @@ async def revisar_antes_de_publicar(
     mensajes_con_evidencia: list[dict],
     chunks: list[Chunk],
     evidencia_requerida: dict[str, str] | None = None,
+    mapa_plan: dict[str, set[str]] | None = None,
+    tiempo_disponible_s: float | None = None,
 ) -> ResultadoRevision:
-    """Verifica, corrige y vuelve a verificar antes de liberar texto."""
+    """Verifica, corrige y vuelve a verificar antes de liberar texto.
+
+    `tiempo_disponible_s` es lo que queda del reloj ÚNICO de la pregunta: la
+    revisión no puede gastar más que eso aunque su tope propio sea mayor,
+    porque la función serverless muere a los 300 s y una revisión que llega
+    tarde no es una respuesta más corta, es ninguna. `mapa_plan` viaja a las
+    tres verificaciones para que el informe de cobertura exista también
+    cuando se abstiene.
+    """
     settings = get_settings()
+    # La abstencion segura tambien informa cobertura, pero SOLO cuando hay
+    # mapa: sin el, pasarle el plan produciria la lectura antigua ("todo sin
+    # cubrir") sobre un texto que por definicion no cubre nada, ruido que
+    # antes no existia.
+    plan_para_abstencion = evidencia_requerida if mapa_plan is not None else None
     if not borrador.strip():
         informe_vacio = await verificador.verificar(
-            ABSTENCION_SEGURA, chunks, evidencia_requerida=None
+            ABSTENCION_SEGURA, chunks, plan_para_abstencion, mapa_plan=mapa_plan
         )
         return ResultadoRevision(
             ABSTENCION_SEGURA,
             informe_vacio,
             uso_abstencion_segura=True,
         )
+    tope = float(settings.pre_response_review_timeout_s)
+    if tiempo_disponible_s is not None:
+        tope = min(tope, float(tiempo_disponible_s))
     try:
-        async with asyncio.timeout(max(1.0, settings.pre_response_review_timeout_s)):
+        async with asyncio.timeout(max(1.0, tope)):
             informe = await verificador.verificar(
-                borrador, chunks, evidencia_requerida
+                borrador, chunks, evidencia_requerida, mapa_plan=mapa_plan
             )
             if aprobada(informe):
                 return ResultadoRevision(borrador, informe)
@@ -234,7 +312,7 @@ async def revisar_antes_de_publicar(
                     pregunta, actual, mensajes_con_evidencia, informe
                 )
                 informe = await verificador.verificar(
-                    actual, chunks, evidencia_requerida
+                    actual, chunks, evidencia_requerida, mapa_plan=mapa_plan
                 )
                 if aprobada(informe):
                     return ResultadoRevision(actual, informe, revisiones=ronda)
@@ -242,7 +320,7 @@ async def revisar_antes_de_publicar(
         logger.warning("Revision previa no disponible; abstencion segura (%s).", exc)
 
     informe_seguro = await verificador.verificar(
-        ABSTENCION_SEGURA, chunks, evidencia_requerida=None
+        ABSTENCION_SEGURA, chunks, plan_para_abstencion, mapa_plan=mapa_plan
     )
     return ResultadoRevision(
         ABSTENCION_SEGURA,

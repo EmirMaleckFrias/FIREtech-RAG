@@ -384,8 +384,19 @@ async def reindex_document(
 
     # A 'processing' ANTES de encolar, igual que en upload: así el listado
     # refleja el reintento al instante y el frontend puede hacer polling.
+    #
+    # Se renueva `ingested_at`, y no es cosmético: es el campo con el que
+    # `_processing_rancio` mide la antigüedad. Sin renovarlo, el reintento
+    # heredaba la fecha vieja, se consideraba abandonado de inmediato y un
+    # segundo reindex concurrente pasaba el guarda: dos ingestas a la vez
+    # duplicando fragmentos. La guarda se saltaba a sí misma.
     await run_in_threadpool(
-        supabase_db.upsert_document_status, file_name, "processing", None
+        lambda: supabase_db.upsert_document_status(
+            file_name,
+            "processing",
+            None,
+            ingested_at=datetime.now(timezone.utc).isoformat(),
+        )
     )
     document_id = row.get("id")
 
