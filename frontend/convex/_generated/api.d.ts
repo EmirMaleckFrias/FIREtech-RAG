@@ -47,6 +47,7 @@ import type * as notion_admin from "../notion/admin.js";
 import type * as notion_api from "../notion/api.js";
 import type * as notion_datos from "../notion/datos.js";
 import type * as notion_markdown from "../notion/markdown.js";
+import type * as notion_oauth from "../notion/oauth.js";
 import type * as notion_sync from "../notion/sync.js";
 import type * as permisos from "../permisos.js";
 import type * as pruebas from "../pruebas.js";
@@ -104,6 +105,7 @@ declare const fullApi: ApiFromModules<{
   "notion/api": typeof notion_api;
   "notion/datos": typeof notion_datos;
   "notion/markdown": typeof notion_markdown;
+  "notion/oauth": typeof notion_oauth;
   "notion/sync": typeof notion_sync;
   permisos: typeof permisos;
   pruebas: typeof pruebas;

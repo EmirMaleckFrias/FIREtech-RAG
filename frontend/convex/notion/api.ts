@@ -113,6 +113,25 @@ export interface Adjunto {
   url: string;
 }
 
+/** Una base de datos tal como la devuelve `POST /search` (lo que se lee). */
+interface BaseCruda {
+  object: string;
+  id: string;
+  title?: TextoRico[];
+  last_edited_time?: string;
+  archived?: boolean;
+  in_trash?: boolean;
+}
+
+/** Una base de datos que la integración puede ver, para el desplegable de la
+ *  administradora. El id va normalizado (32 hex) porque es la clave con la
+ *  que se guarda la elección. */
+export interface BaseNotion {
+  id: string;
+  titulo: string;
+  ultimaEdicion: string;
+}
+
 // ---------------------------------------------------------------------------
 // Cliente
 // ---------------------------------------------------------------------------
@@ -212,6 +231,32 @@ export class ClienteNotion {
       );
       paginas.push(...r.results);
       if (!r.has_more || !r.next_cursor) return paginas;
+      cursor = r.next_cursor;
+    }
+  }
+
+  /** Las bases de datos que la integración puede ver, siguiendo
+   *  `next_cursor`. Con OAuth son exactamente las páginas y bases que la
+   *  usuaria marcó al autorizar; una base archivada no se ofrece. Sin título
+   *  se llama "Sin título", que es lo que enseña Notion. */
+  async buscarBases(): Promise<BaseNotion[]> {
+    const bases: BaseNotion[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const r = await this.json<Paginado<BaseCruda>>("POST", "/search", {
+        filter: { value: "database", property: "object" },
+        page_size: 100,
+        ...(cursor ? { start_cursor: cursor } : {}),
+      });
+      for (const b of r.results) {
+        if (b.object !== "database" || b.archived || b.in_trash) continue;
+        bases.push({
+          id: normalizarId(b.id),
+          titulo: textoPlano(b.title).trim() || "Sin título",
+          ultimaEdicion: b.last_edited_time ?? "",
+        });
+      }
+      if (!r.has_more || !r.next_cursor) return bases;
       cursor = r.next_cursor;
     }
   }

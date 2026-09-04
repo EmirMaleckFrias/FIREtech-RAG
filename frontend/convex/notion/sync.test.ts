@@ -683,8 +683,17 @@ describe("admin", () => {
     await sincronizar(t);
     const admin = await alta(t, "admin@airobotix.net", "admin");
     const e = await admin.query(api.notion.admin.estado, {});
-    expect(e).toMatchObject({ configurado: true, periodicaMinutos: 60, paginas: 2, paginasConError: 0, documentos: 2 });
+    expect(e).toMatchObject({
+      porEntorno: true,
+      base: { id: DB, elegidaEnApp: false },
+      periodicaMinutos: 60,
+      paginas: 2,
+      paginasConError: 0,
+      documentos: 2,
+      enCurso: null,
+    });
     expect(e.ultimas).toHaveLength(1);
+    expect(e.ultimas[0]).toMatchObject({ estado: "ok", paginas: 2, nuevos: 2 });
     expect(JSON.stringify(e)).not.toContain(TOKEN);
   });
 });

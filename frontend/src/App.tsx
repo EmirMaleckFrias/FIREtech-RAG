@@ -29,7 +29,9 @@ import { avisarSiEsFatal, onSalidaForzada, useAcceso, type MotivoSalida } from '
 import { codigoDeError, mensajeDeError } from './lib/errores';
 import type { CitationRef } from './lib/markdown';
 import { mensajeDesdeDoc, type MensajeDoc } from './lib/mensajes';
+import { leerAvisoNotion, urlSinAvisoNotion } from './lib/notion';
 import type {
+  AvisoNotion,
   ChatMessage,
   EstadoConexion,
   Me,
@@ -293,9 +295,22 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
     () => typeof window === 'undefined' || window.matchMedia('(min-width: 1101px)').matches,
   );
 
+  // Vuelta de la pantalla de Notion: el servidor devuelve a la usuaria a
+  // `/?notion=conectado|cancelado|error`. Se lee UNA vez al montar (si hacía
+  // falta entrar, la pantalla de acceso conservó la URL y se lee al montar
+  // después), se abre el panel de documentos con el aviso, y se limpia la
+  // URL para que una recarga no lo repita.
+  const [notionAviso, setNotionAviso] = useState<AvisoNotion | null>(() =>
+    typeof window === 'undefined' ? null : leerAvisoNotion(window.location.search),
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined' || leerAvisoNotion(window.location.search) === null) return;
+    window.history.replaceState(window.history.state, '', urlSinAvisoNotion(window.location.href));
+  }, []);
+
   // Slide-overs de gestión (siempre overlay, desde la derecha). Comparten
   // sitio y scrim, así que nunca están abiertos los dos a la vez.
-  const [docsOpen, setDocsOpen] = useState(false);
+  const [docsOpen, setDocsOpen] = useState(() => notionAviso !== null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const selectSession = useCallback(
@@ -598,7 +613,13 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
       {docsOpen && (
         <div className="scrim scrim-docs" onClick={closeDocuments} aria-hidden="true" />
       )}
-      <DocumentsPanel open={docsOpen} onClose={closeDocuments} canManage={me?.rol === 'admin'} />
+      <DocumentsPanel
+        open={docsOpen}
+        onClose={closeDocuments}
+        canManage={me?.rol === 'admin'}
+        notionAviso={notionAviso}
+        onNotionAvisoVisto={() => setNotionAviso(null)}
+      />
 
       {settingsOpen && (
         <div className="scrim scrim-docs" onClick={closeSettings} aria-hidden="true" />

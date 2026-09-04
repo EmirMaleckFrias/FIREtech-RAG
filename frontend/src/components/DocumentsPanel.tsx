@@ -18,6 +18,11 @@
 // - Focus trap ligero: Tab cicla dentro del panel, Escape cierra (o cancela
 //   la confirmación de borrado si está abierta) y el foco vuelve al botón
 //   que abrió el panel.
+// - Notion (solo admin) es un bloque propio, `NotionBloque`: la administradora
+//   conecta su espacio con UN botón (OAuth), elige la base en un desplegable y
+//   ve la sincronización avanzar en vivo por la suscripción a
+//   `notion.admin.estado`. Quien lo usa es una médica: aquí no se habla de
+//   tokens, variables ni ids, y los textos viven en lib/notion.ts.
 
 import {
   Fragment,
@@ -30,17 +35,26 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from 'react';
-import { useMutation, useQuery } from 'convex/react';
+import { useAction, useMutation, useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import type { Id } from '../../convex/_generated/dataModel';
 import { avisarSiEsFatal } from '../lib/auth';
 import { mensajeDeError } from '../lib/errores';
+import {
+  describirCorrida,
+  describirProgreso,
+  fraccionProgreso,
+  iconoEsImagen,
+  plural,
+  textoDeAviso,
+} from '../lib/notion';
 import { sha256De, subirFichero } from '../lib/subida';
 import { useSheetDrag } from '../lib/useSheetDrag';
-import type { DocumentInfo, DocumentStatus } from '../types';
+import type { AvisoNotion, BaseNotion, DocumentInfo, DocumentStatus, EstadoNotion } from '../types';
 import {
   IconAlert,
   IconCheck,
+  IconChevronDown,
   IconDocument,
   IconLock,
   IconRefresh,
@@ -70,6 +84,10 @@ interface DocumentsPanelProps {
    * el rol: se asume el menor permiso.
    */
   canManage: boolean;
+  /** Con qué volvió la usuaria de la pantalla de Notion (`?notion=` en la
+   *  URL, leído por App al montar). null si no viene de ahí. */
+  notionAviso: AvisoNotion | null;
+  onNotionAvisoVisto: () => void;
 }
 
 /** Lo que el frontend lee de un registro de `documents`. Tipo estructural,
@@ -106,58 +124,6 @@ function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
   };
 }
 
-/** Lo que el panel lee de `notion.admin.estado`. Estructural, como DocumentoDoc. */
-interface EstadoNotion {
-  configurado: boolean;
-  periodicaMinutos: number;
-  paginas: number;
-  paginasConError: number;
-  documentos: number;
-  ultimas: Array<{
-    empezadoEn: number;
-    terminadoEn: number | null;
-    estado: 'running' | 'ok' | 'error';
-    paginas: number;
-    nuevos: number;
-    actualizados: number;
-    borrados: number;
-    errores: string[];
-  }>;
-}
-
-function haceCuanto(ms: number): string {
-  const diff = Math.max(0, Date.now() - ms);
-  const min = Math.round(diff / 60_000);
-  if (min < 1) return 'hace un momento';
-  if (min < 60) return `hace ${min} min`;
-  const h = Math.round(min / 60);
-  if (h < 48) return `hace ${h} h`;
-  return `hace ${Math.round(h / 24)} días`;
-}
-
-/** Una frase de estado para el bloque de Notion. */
-function describirNotion(n: EstadoNotion): string {
-  const ultima = n.ultimas[0];
-  const partes: string[] = [];
-  if (ultima === undefined) {
-    partes.push('Sin sincronizar todavía');
-  } else if (ultima.estado === 'running') {
-    partes.push(`Sincronizando desde ${haceCuanto(ultima.empezadoEn)}`);
-  } else {
-    partes.push(
-      `Última sincronización ${haceCuanto(ultima.terminadoEn ?? ultima.empezadoEn)}` +
-        (ultima.estado === 'error' ? ' con errores' : ''),
-    );
-  }
-  partes.push(`${n.paginas.toLocaleString('es')} ${n.paginas === 1 ? 'página' : 'páginas'}`);
-  partes.push(`${n.documentos.toLocaleString('es')} ${n.documentos === 1 ? 'documento' : 'documentos'}`);
-  if (n.paginasConError > 0) {
-    partes.push(`${n.paginasConError} con error`);
-  }
-  if (n.periodicaMinutos <= 0) partes.push('periódica apagada');
-  return partes.join(' · ');
-}
-
 type FaseSubida = 'subiendo' | 'registrando';
 
 interface UploadState {
@@ -188,7 +154,501 @@ function ingestedTitle(ms: number): string | undefined {
   return `Indexado el ${d.toLocaleString('es')}`;
 }
 
-export function DocumentsPanel({ open, onClose, canManage }: DocumentsPanelProps) {
+/** Estilo del contenedor del bloque: la caja de `.docs-readonly-note` (misma
+ *  jerarquía visual que la nota de solo lectura) pero en columna, porque aquí
+ *  hay varias filas. Inline y no en styles.css a propósito: son tres valores
+ *  de disposición sobre una clase que ya existe. */
+const COLUMNA = { flexDirection: 'column', alignItems: 'stretch', gap: 8 } as const;
+const FILA = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } as const;
+const CRECE = { flex: 1, minWidth: 0 } as const;
+
+type OcupadoNotion = 'conectar' | 'guardar' | 'sincronizar' | 'desconectar' | null;
+
+interface NotionBloqueProps {
+  open: boolean;
+  /** undefined mientras la suscripción no ha entregado nada. */
+  estado: EstadoNotion | undefined;
+  aviso: AvisoNotion | null;
+  onAvisoVisto: () => void;
+}
+
+/**
+ * El bloque de Notion del panel, para la administradora.
+ *
+ * Cuatro situaciones, decididas por el servidor (`notion.admin.estado`):
+ * - No habilitada: el equipo técnico aún no registró la integración. Texto
+ *   en llano, sin botón: no se ofrece nada que vaya a fallar.
+ * - Habilitada y sin conexión: UN botón, "Conectar con Notion", que lleva a
+ *   la pantalla de Notion donde ella elige qué compartir.
+ * - Conectada: a qué espacio, el desplegable de bases (se pide a Notion al
+ *   abrir el selector), Guardar, y con base elegida "Sincronizar ahora", el
+ *   resumen de la última corrida y Desconectar (dos pasos).
+ * - Sincronizando: barra y "8 de 20 páginas, ahora: <título>", en vivo.
+ */
+function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) {
+  const iniciar = useMutation(api.notion.oauth.iniciar);
+  const listarBases = useAction(api.notion.oauth.listarBases);
+  const elegirBase = useMutation(api.notion.oauth.elegirBase);
+  const desconectar = useMutation(api.notion.oauth.desconectar);
+  const sincronizarAhora = useMutation(api.notion.admin.sincronizarAhora);
+
+  const [ocupado, setOcupado] = useState<OcupadoNotion>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [bases, setBases] = useState<BaseNotion[] | null>(null);
+  const [basesError, setBasesError] = useState<string | null>(null);
+  const [basesCargando, setBasesCargando] = useState(false);
+  /** La administradora pulsó "Cambiar" teniendo ya una base elegida. */
+  const [eligiendo, setEligiendo] = useState(false);
+  const [seleccion, setSeleccion] = useState('');
+  const [confirmDesconectar, setConfirmDesconectar] = useState(false);
+  const [avisosAbiertos, setAvisosAbiertos] = useState(false);
+
+  const conexion = estado?.conexion ?? null;
+  const conectadoEn = conexion?.conectadoEn ?? null;
+  const base = estado?.base ?? null;
+  const baseId = base?.id ?? null;
+  const baseTitulo = base?.titulo ?? null;
+  const enCurso = estado?.enCurso ?? null;
+  const ultima = estado?.ultimas[0] ?? null;
+  const mostrarSelector = conexion !== null && (base === null || eligiendo);
+
+  const cargarBases = useCallback(async () => {
+    setBasesCargando(true);
+    setBasesError(null);
+    try {
+      setBases(await listarBases({}));
+    } catch (err) {
+      if (!avisarSiEsFatal(err)) {
+        setBasesError(mensajeDeError(err, 'No se pudo leer la lista de bases de datos de Notion.'));
+      }
+    } finally {
+      setBasesCargando(false);
+    }
+  }, [listarBases]);
+
+  // Otra conexión (o ninguna): la lista de bases y lo abierto ya no valen.
+  useEffect(() => {
+    setBases(null);
+    setBasesError(null);
+    setEligiendo(false);
+    setConfirmDesconectar(false);
+    setSeleccion('');
+  }, [conectadoEn]);
+
+  // La lista se pide a Notion solo cuando hace falta el desplegable y aún no
+  // se tiene. Tras un fallo no se reintenta solo: hay botón para eso.
+  useEffect(() => {
+    if (!open || !mostrarSelector || bases !== null || basesCargando || basesError !== null) return;
+    void cargarBases();
+  }, [open, mostrarSelector, bases, basesCargando, basesError, cargarBases]);
+
+  // Opciones del desplegable. Si la base en uso no está entre las que Notion
+  // enseña (venía configurada por el equipo técnico), se ofrece igual para
+  // que salga preseleccionada y se pueda conservar.
+  const opciones = useMemo<BaseNotion[]>(() => {
+    const lista = bases ?? [];
+    if (baseId !== null && !lista.some((b) => b.id === baseId)) {
+      return [
+        { id: baseId, titulo: baseTitulo ?? 'La configurada por el equipo técnico', ultimaEdicion: '' },
+        ...lista,
+      ];
+    }
+    return lista;
+  }, [bases, baseId, baseTitulo]);
+
+  // Preselección: la base en uso; si no hay y solo se ve una, esa.
+  useEffect(() => {
+    if (bases === null) return;
+    setSeleccion((actual) => {
+      if (actual !== '' && opciones.some((b) => b.id === actual)) return actual;
+      if (baseId !== null) return baseId;
+      return opciones.length === 1 ? opciones[0].id : '';
+    });
+  }, [bases, opciones, baseId]);
+
+  const conectar = useCallback(async () => {
+    setError(null);
+    setOcupado('conectar');
+    try {
+      const { url } = await iniciar({ origen: window.location.origin });
+      // Se abandona la app: el botón se queda "Abriendo Notion…" hasta que
+      // el navegador navega, sin rebotar a su estado normal.
+      window.location.assign(url);
+    } catch (err) {
+      if (!avisarSiEsFatal(err)) setError(mensajeDeError(err, 'No se pudo abrir la conexión con Notion.'));
+      setOcupado(null);
+    }
+  }, [iniciar]);
+
+  const guardar = useCallback(async () => {
+    const elegida = opciones.find((b) => b.id === seleccion);
+    if (!elegida) return;
+    setError(null);
+    setOcupado('guardar');
+    try {
+      await elegirBase({ databaseId: elegida.id, titulo: elegida.titulo });
+      setEligiendo(false);
+    } catch (err) {
+      if (!avisarSiEsFatal(err)) setError(mensajeDeError(err, 'No se pudo guardar la base de datos elegida.'));
+    } finally {
+      setOcupado(null);
+    }
+  }, [elegirBase, opciones, seleccion]);
+
+  const sincronizar = useCallback(async () => {
+    setError(null);
+    setOcupado('sincronizar');
+    try {
+      await sincronizarAhora({});
+    } catch (err) {
+      if (!avisarSiEsFatal(err)) setError(mensajeDeError(err, 'No se pudo lanzar la sincronización con Notion.'));
+    } finally {
+      setOcupado(null);
+    }
+  }, [sincronizarAhora]);
+
+  const handleDesconectar = useCallback(async () => {
+    setConfirmDesconectar(false);
+    setError(null);
+    setOcupado('desconectar');
+    try {
+      await desconectar({});
+    } catch (err) {
+      if (!avisarSiEsFatal(err)) setError(mensajeDeError(err, 'No se pudo desconectar Notion.'));
+    } finally {
+      setOcupado(null);
+    }
+  }, [desconectar]);
+
+  // Escape recoge lo abierto aquí antes de que el panel lo interprete como
+  // "cerrar": primero la confirmación, luego el selector de cambio de base.
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Escape') return;
+    if (confirmDesconectar) {
+      e.stopPropagation();
+      setConfirmDesconectar(false);
+    } else if (eligiendo) {
+      e.stopPropagation();
+      setEligiendo(false);
+    }
+  };
+
+  const fraccion = enCurso !== null ? fraccionProgreso(enCurso) : null;
+  const cambiosEnCurso =
+    enCurso !== null ? enCurso.nuevos + enCurso.actualizados + enCurso.borrados : 0;
+
+  /** Fila de sincronización: el avance en vivo, o el botón y el resumen de
+   *  la última corrida con sus avisos plegados. */
+  const filaSincronizacion = () =>
+    enCurso !== null ? (
+      <div className="upload-progress" style={{ padding: '10px 12px', gap: 6 }} role="status">
+        <span className="upload-status">{describirProgreso(enCurso)}</span>
+        <div className="upload-bar" aria-hidden="true">
+          {fraccion === null ? (
+            <div className="upload-fill upload-fill-indeterminate" />
+          ) : (
+            <div className="upload-fill" style={{ transform: `scaleX(${fraccion})` }} />
+          )}
+        </div>
+        {cambiosEnCurso > 0 && (
+          <span className="upload-status">
+            Hasta ahora: {plural(enCurso.nuevos, 'documento nuevo', 'documentos nuevos')}
+            {enCurso.actualizados > 0 && `, ${plural(enCurso.actualizados, 'actualizado', 'actualizados')}`}
+            {enCurso.borrados > 0 && `, ${plural(enCurso.borrados, 'retirado', 'retirados')}`}
+          </span>
+        )}
+      </div>
+    ) : (
+      <>
+        <div style={FILA}>
+          <span style={CRECE}>
+            {ultima !== null ? describirCorrida(ultima) : 'Todavía no se ha sincronizado.'}
+            {estado !== undefined && estado.documentos > 0 && (
+              <>
+                {' · '}
+                {plural(estado.documentos, 'documento', 'documentos')} en el índice
+              </>
+            )}
+          </span>
+          <button
+            type="button"
+            className="user-act-btn user-act-promote"
+            disabled={ocupado !== null}
+            onClick={() => void sincronizar()}
+            title="Traer ahora los cambios de Notion"
+          >
+            {ocupado === 'sincronizar' ? <IconSpinner size={13} /> : <IconRefresh size={13} />}
+            Sincronizar ahora
+          </button>
+        </div>
+        {ultima !== null && ultima.errores.length > 0 && (
+          <>
+            <button
+              type="button"
+              className="doc-badge doc-badge-failed"
+              style={{ alignSelf: 'flex-start' }}
+              onClick={() => setAvisosAbiertos((v) => !v)}
+              aria-expanded={avisosAbiertos}
+            >
+              <IconAlert size={11} />
+              {plural(ultima.errores.length, 'aviso', 'avisos')} en la última sincronización
+              <IconChevronDown size={11} />
+            </button>
+            {avisosAbiertos && (
+              <ul className="doc-error-detail" style={{ margin: 0, padding: '0 0 0 16px' }}>
+                {ultima.errores.map((e, i) => (
+                  <li key={i}>{e}</li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </>
+    );
+
+  return (
+    <div onKeyDown={handleKeyDown}>
+      {/* aviso al volver de la pantalla de Notion */}
+      {aviso !== null &&
+        (aviso.tipo === 'conectado' ? (
+          <div className="docs-readonly-note" role="status">
+            <IconCheck size={13} />
+            <span style={CRECE}>{textoDeAviso(aviso)}</span>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onAvisoVisto}
+              title="Cerrar aviso"
+              aria-label="Cerrar aviso"
+            >
+              <IconX size={13} />
+            </button>
+          </div>
+        ) : (
+          <div className="docs-poll-warn" role="alert">
+            <IconAlert size={14} />
+            <span style={CRECE}>{textoDeAviso(aviso)}</span>
+            <button type="button" onClick={onAvisoVisto}>
+              Entendido
+            </button>
+          </div>
+        ))}
+
+      <div className="docs-readonly-note" style={COLUMNA} aria-live="polite">
+        {estado === undefined ? (
+          <span className="shimmer-text">Comprobando la conexión con Notion…</span>
+        ) : conexion === null ? (
+          <>
+            <div style={FILA}>
+              {!estado.habilitada && !estado.porEntorno && <IconLock size={13} />}
+              <span style={CRECE}>
+                <strong>Notion</strong>
+                {' · '}
+                {estado.porEntorno
+                  ? 'Configurado por el equipo técnico.'
+                  : estado.habilitada
+                    ? 'Trae los protocolos y guías directamente desde Notion.'
+                    : 'La conexión con Notion aún no está habilitada por el equipo técnico.'}
+              </span>
+              {estado.habilitada && (
+                <button
+                  type="button"
+                  className="user-act-btn user-act-promote"
+                  disabled={ocupado !== null}
+                  onClick={() => void conectar()}
+                >
+                  {ocupado === 'conectar' ? (
+                    <>
+                      <IconSpinner size={13} />
+                      Abriendo Notion…
+                    </>
+                  ) : (
+                    'Conectar con Notion'
+                  )}
+                </button>
+              )}
+            </div>
+            {estado.porEntorno && filaSincronizacion()}
+          </>
+        ) : (
+          <>
+            <div style={FILA}>
+              {iconoEsImagen(conexion.workspaceIcon) ? (
+                <img
+                  src={conexion.workspaceIcon ?? undefined}
+                  alt=""
+                  width={16}
+                  height={16}
+                  style={{ borderRadius: 3, flexShrink: 0 }}
+                />
+              ) : conexion.workspaceIcon ? (
+                <span aria-hidden="true">{conexion.workspaceIcon}</span>
+              ) : (
+                <IconCheck size={13} />
+              )}
+              <span style={CRECE}>
+                Conectado a <strong>{conexion.workspaceName}</strong>
+              </span>
+              {!confirmDesconectar && (
+                <button
+                  type="button"
+                  className="user-act-btn user-act-danger"
+                  style={{ marginLeft: 0 }}
+                  disabled={ocupado !== null || enCurso !== null}
+                  onClick={() => setConfirmDesconectar(true)}
+                >
+                  {ocupado === 'desconectar' ? <IconSpinner size={13} /> : null}
+                  Desconectar
+                </button>
+              )}
+            </div>
+
+            {confirmDesconectar && (
+              <div className="user-confirm user-confirm-danger" role="group" aria-label="Confirmar desconexión">
+                <span className="user-confirm-text" aria-live="polite">
+                  <IconAlert size={13} />
+                  <span>
+                    ¿Desconectar Notion? Los documentos ya traídos se conservan, pero dejarán de
+                    actualizarse.
+                  </span>
+                </span>
+                <span className="user-confirm-actions">
+                  <button
+                    type="button"
+                    className="doc-confirm-btn user-confirm-delete"
+                    onClick={() => void handleDesconectar()}
+                  >
+                    Desconectar
+                  </button>
+                  {/* el foco entra en Cancelar: la salida segura es la primera
+                      y el botón que confirma cae en otro sitio que el que abrió
+                      la confirmación, así un doble clic no desconecta nada */}
+                  <button
+                    type="button"
+                    className="doc-confirm-btn doc-confirm-no"
+                    onClick={() => setConfirmDesconectar(false)}
+                    autoFocus
+                  >
+                    Cancelar
+                  </button>
+                </span>
+              </div>
+            )}
+
+            {mostrarSelector ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <label htmlFor="notion-base" style={{ fontWeight: 600 }}>
+                  Base de datos a sincronizar
+                </label>
+                {bases === null && basesError === null ? (
+                  <span className="shimmer-text">Buscando tus bases de datos…</span>
+                ) : basesError !== null ? (
+                  <div style={FILA}>
+                    <span className="doc-row-error" style={{ padding: 0, ...CRECE }}>
+                      {basesError}
+                    </span>
+                    <button
+                      type="button"
+                      className="doc-confirm-btn doc-confirm-no"
+                      onClick={() => void cargarBases()}
+                    >
+                      Reintentar
+                    </button>
+                  </div>
+                ) : opciones.length === 0 ? (
+                  <div style={FILA}>
+                    <span style={CRECE}>
+                      Notion no compartió ninguna base de datos con la aplicación. Vuelve a pulsar
+                      "Conectar con Notion" y marca la base que quieres compartir.
+                    </span>
+                    <button
+                      type="button"
+                      className="user-act-btn user-act-promote"
+                      disabled={ocupado !== null}
+                      onClick={() => void conectar()}
+                    >
+                      {ocupado === 'conectar' ? <IconSpinner size={13} /> : null}
+                      Conectar con Notion
+                    </button>
+                  </div>
+                ) : (
+                  <div style={FILA}>
+                    <select
+                      id="notion-base"
+                      className="auth-input"
+                      style={{ fontSize: 13, padding: '6px 8px', ...CRECE }}
+                      value={seleccion}
+                      onChange={(e) => setSeleccion(e.target.value)}
+                      disabled={ocupado !== null}
+                    >
+                      {seleccion === '' && <option value="">Elige una base de datos</option>}
+                      {opciones.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.titulo}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="user-act-btn user-act-promote"
+                      disabled={seleccion === '' || ocupado !== null}
+                      onClick={() => void guardar()}
+                    >
+                      {ocupado === 'guardar' ? <IconSpinner size={13} /> : null}
+                      Guardar
+                    </button>
+                    {base !== null && (
+                      <button
+                        type="button"
+                        className="doc-confirm-btn doc-confirm-no"
+                        onClick={() => setEligiendo(false)}
+                      >
+                        Cancelar
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              base !== null && (
+                <div style={FILA}>
+                  <span style={CRECE}>
+                    Base de datos:{' '}
+                    <strong>{base.titulo ?? 'la configurada por el equipo técnico'}</strong>
+                  </span>
+                  <button
+                    type="button"
+                    className="doc-confirm-btn doc-confirm-no"
+                    disabled={ocupado !== null || enCurso !== null}
+                    onClick={() => setEligiendo(true)}
+                  >
+                    Cambiar
+                  </button>
+                </div>
+              )
+            )}
+
+            {base !== null && !mostrarSelector && filaSincronizacion()}
+          </>
+        )}
+
+        {error !== null && (
+          <span className="doc-row-error" style={{ padding: 0 }} role="alert">
+            {error}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function DocumentsPanel({
+  open,
+  onClose,
+  canManage,
+  notionAviso,
+  onNotionAvisoVisto,
+}: DocumentsPanelProps) {
   // Suscripción permanente: barata, y así el panel abre con la lista ya
   // puesta y ve pasar a "listo" un documento subido con el panel cerrado.
   const docsQuery = useQuery(api.documentos.listar);
@@ -208,29 +668,11 @@ export function DocumentsPanel({ open, onClose, canManage }: DocumentsPanelProps
   const borrar = useMutation(api.documentos.borrar);
 
   // Notion: solo para admin y con el panel abierto, como las estadísticas.
-  // La suscripción hace que el paso de "sincronizando" a la cifra final
-  // llegue solo, sin sondeo.
+  // La suscripción hace que el avance de la sincronización (página a página)
+  // y el paso a la cifra final lleguen solos, sin sondeo.
   const notion = useQuery(api.notion.admin.estado, open && canManage ? {} : 'skip') as
     | EstadoNotion
     | undefined;
-  const sincronizarNotion = useMutation(api.notion.admin.sincronizarAhora);
-  const [notionPending, setNotionPending] = useState(false);
-  const [notionError, setNotionError] = useState<string | null>(null);
-  const notionRunning = notion?.ultimas[0]?.estado === 'running';
-
-  const handleNotionSync = useCallback(async () => {
-    setNotionError(null);
-    setNotionPending(true);
-    try {
-      await sincronizarNotion({});
-    } catch (err) {
-      if (!avisarSiEsFatal(err)) {
-        setNotionError(mensajeDeError(err, 'No se pudo lanzar la sincronización con Notion.'));
-      }
-    } finally {
-      setNotionPending(false);
-    }
-  }, [sincronizarNotion]);
 
   // Más recientes primero, como devolvía el backend anterior.
   const docs = useMemo<DocumentInfo[] | null>(
@@ -540,54 +982,15 @@ export function DocumentsPanel({ open, onClose, canManage }: DocumentsPanelProps
             </p>
           )}
 
-          {/* Notion (solo admin): estado de la sincronización y lanzarla ya.
-              Reutiliza la caja de la nota de solo lectura: misma jerarquía
-              visual, es información de contexto, no una acción principal. */}
-          {canManage && notion !== undefined && (
-            <div className="docs-readonly-note" role="status" aria-live="polite">
-              <span style={{ flex: 1 }}>
-                {notion.configurado ? (
-                  <>
-                    <strong>Notion</strong>
-                    {' · '}
-                    {describirNotion(notion)}
-                    {notionError !== null && (
-                      <>
-                        <br />
-                        <span className="doc-row-error">{notionError}</span>
-                      </>
-                    )}
-                    {notion.ultimas[0]?.errores.length ? (
-                      <>
-                        <br />
-                        <span title={notion.ultimas[0].errores.join('\n')}>
-                          {notion.ultimas[0].errores.length}{' '}
-                          {notion.ultimas[0].errores.length === 1 ? 'aviso' : 'avisos'} en la última
-                          corrida
-                        </span>
-                      </>
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <strong>Notion</strong>
-                    {' · '}
-                    No configurado: faltan NOTION_TOKEN y NOTION_DATABASE_ID en el despliegue.
-                  </>
-                )}
-              </span>
-              {notion.configurado && (
-                <button
-                  type="button"
-                  className="doc-confirm-btn doc-confirm-no"
-                  disabled={notionPending || notionRunning}
-                  onClick={() => void handleNotionSync()}
-                  title="Traer ahora los cambios de la base de Notion"
-                >
-                  {notionRunning ? 'Sincronizando' : 'Sincronizar ahora'}
-                </button>
-              )}
-            </div>
+          {/* Notion (solo admin): conectar, elegir la base, sincronizar y ver
+              el avance en vivo. Ver NotionBloque. */}
+          {canManage && (
+            <NotionBloque
+              open={open}
+              estado={notion}
+              aviso={notionAviso}
+              onAvisoVisto={onNotionAvisoVisto}
+            />
           )}
 
           {/* zona de subida (solo admin) */}

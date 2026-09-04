@@ -213,12 +213,54 @@ export default defineSchema({
     empezadoEn: v.number(),
     terminadoEn: v.optional(v.number()),
     paginas: v.number(),
+    // Contadores PARCIALES mientras la corrida está `running`: la acción los
+    // va escribiendo página a página y la UI, suscrita, pinta el avance en
+    // vivo. Al cerrar la corrida quedan como cifras finales.
     nuevos: v.number(),
     actualizados: v.number(),
     borrados: v.number(),
     errores: v.array(v.string()),
     estado: v.union(v.literal("running"), v.literal("ok"), v.literal("error")),
+    // Progreso en vivo. `paginasTotal` son las páginas activas de la base
+    // (sin archivadas ni excluidas), `paginasProcesadas` cuántas se han
+    // mirado ya (incluidas las que no cambiaron) y `paginaActual` el título
+    // de la que se está leyendo. Se limpian al cerrar.
+    paginasTotal: v.optional(v.number()),
+    paginasProcesadas: v.optional(v.number()),
+    paginaActual: v.optional(v.string()),
   }),
+
+  // La conexión con Notion hecha desde la app (OAuth público). UNA fila como
+  // mucho: conectar de nuevo la reemplaza. El `accessToken` NUNCA sale al
+  // cliente: solo lo leen la acción de sincronización y la que lista las
+  // bases, a través de funciones internas. Los tokens de Notion no caducan,
+  // así que no hay refresco. Si no hay fila, la sincronización cae a
+  // NOTION_TOKEN / NOTION_DATABASE_ID por compatibilidad.
+  notionConexion: defineTable({
+    accessToken: v.string(),
+    botId: v.string(),
+    workspaceId: v.string(),
+    workspaceName: v.string(),
+    workspaceIcon: v.optional(v.string()),
+    conectadoPor: v.id("users"),
+    conectadoEn: v.number(),
+    // La base elegida por la administradora en el desplegable. Sin ella la
+    // conexión existe pero no hay nada que sincronizar.
+    databaseId: v.optional(v.string()),
+    databaseTitulo: v.optional(v.string()),
+  }),
+
+  // Estados pendientes del OAuth de Notion: uno por clic en "Conectar con
+  // Notion". El callback lo busca, comprueba que no caducó y lo BORRA, así un
+  // `state` solo se puede usar una vez. `origen` es la URL del frontend desde
+  // la que se pulsó, por si el despliegue no tiene SITE_URL.
+  notionEstadosOauth: defineTable({
+    state: v.string(),
+    userId: v.id("users"),
+    origen: v.optional(v.string()),
+    creadoEn: v.number(),
+    expiraEn: v.number(),
+  }).index("porState", ["state"]),
 
   // Los fragmentos indexados: lo que era la colección de Qdrant.
   chunks: defineTable({

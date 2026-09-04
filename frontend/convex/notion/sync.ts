@@ -5,9 +5,11 @@
 // La corre el cron de convex/crons.ts cada hora y el administrador a demanda
 // (`notion.admin.sincronizarAhora`). Cada corrida:
 //
-// 1. Se apaga sola si falta el token o la base (la función existe pero no
-//    hace nada), si NOTION_SYNC_MINUTES es 0 y no la fuerza el administrador,
-//    o si la última corrida empezó hace menos de ese intervalo.
+// 1. Se apaga sola si no hay credenciales (la función existe pero no hace
+//    nada), si NOTION_SYNC_MINUTES es 0 y no la fuerza el administrador, o si
+//    la última corrida empezó hace menos de ese intervalo. Las credenciales
+//    salen PRIMERO de la conexión hecha en la app (`notionConexion`, OAuth) y,
+//    si no hay, de NOTION_TOKEN / NOTION_DATABASE_ID (ver notion/oauth.ts).
 // 2. Recorre la base entera y, por página, compara `last_edited_time` con lo
 //    guardado en `notionPaginas`: sin cambio, no hay ninguna petición más.
 // 3. Con cambio: renderiza la página a Markdown y la registra como un `.md`
@@ -18,6 +20,11 @@
 //    embeber, retirar los fragmentos viejos).
 // 4. Las páginas que ya no están (archivadas, excluidas o borradas de la
 //    base) pierden sus documentos si NOTION_DELETE_ARCHIVED está activo.
+//
+// El avance se escribe en la fila `running` de `notionSincronizaciones` ANTES
+// de mirar cada página (cuántas van, cuál se está leyendo, contadores
+// parciales): la UI está suscrita a esa fila y pinta "8 de 20 páginas, ahora:
+// <título>" con una barra, en vez de un "Sincronizando…" mudo durante minutos.
 //
 // Cada página va en su propio try/catch: un PDF corrupto o una URL caducada
 // se anota en `errores` y las demás páginas siguen. Y hay un reloj: la acción
@@ -106,8 +113,9 @@ export const sincronizar = internalAction({
   args: { forzar: v.optional(v.boolean()) },
   handler: async (ctx, { forzar }) => {
     const a = ajustes();
-    if (!a.notionToken || !a.notionDatabaseId) {
-      console.log("notion: sin NOTION_TOKEN o NOTION_DATABASE_ID, sincronización apagada");
+    const cred = await ctx.runQuery(internal.notion.oauth.credenciales, {});
+    if (!cred) {
+      console.log("notion: sin conexión ni NOTION_TOKEN/NOTION_DATABASE_ID, sincronización apagada");
       return { estado: "apagado" as const };
     }
     if (!forzar && a.notionSyncMinutes <= 0) {
@@ -149,7 +157,7 @@ export const sincronizar = internalAction({
     const t0 = Date.now();
 
     try {
-      const cliente = new ClienteNotion(a.notionToken);
+      const cliente = new ClienteNotion(cred.token);
       const conocidas = new Map(
         (await ctx.runQuery(internal.notion.datos.paginasConocidas, {})).map((p) => [p.pageId, p]),
       );
@@ -157,13 +165,22 @@ export const sincronizar = internalAction({
       // borró un administrador se vuelve a traer aunque Notion no cambiara,
       // porque Notion manda sobre lo que hay en el índice.
       const vivos = new Set<string>(await ctx.runQuery(internal.notion.datos.idsDocumentosNotion, {}));
-      const paginas = await cliente.paginasDeBase(a.notionDatabaseId);
+      const paginas = await cliente.paginasDeBase(cred.databaseId);
+      // Las archivadas y las excluidas no cuentan: se tratan abajo, con las
+      // que ya no están. Filtrar antes permite anunciar el total real.
+      const activas = paginas.filter(
+        (p) => !(Boolean(p.archived || p.in_trash) || estaExcluida(p)),
+      );
+      await ctx.runMutation(internal.notion.datos.avanzarCorrida, {
+        runId,
+        paginasTotal: activas.length,
+        paginasProcesadas: 0,
+      });
       const vistas = new Set<string>();
+      let procesadas = 0;
 
-      for (const pagina of paginas) {
+      for (const pagina of activas) {
         const pageId = normalizarId(pagina.id);
-        const fuera = Boolean(pagina.archived || pagina.in_trash) || estaExcluida(pagina);
-        if (fuera) continue; // se trata abajo, con las que ya no están
         vistas.add(pageId);
         cifras.paginas += 1;
 
@@ -171,6 +188,17 @@ export const sincronizar = internalAction({
           parcial = true;
           break;
         }
+
+        const titulo = tituloDe(pagina) || `pagina-${pageId.slice(0, 8)}`;
+        // Avance ANTES de tocar la página: si esta tarda (adjuntos grandes),
+        // la UI ya dice cuál es. Lleva los contadores de las anteriores.
+        await ctx.runMutation(internal.notion.datos.avanzarCorrida, {
+          runId,
+          paginasProcesadas: procesadas,
+          paginaActual: titulo,
+          ...cifras,
+        });
+        procesadas += 1;
 
         const previa = conocidas.get(pageId) ?? null;
         const intacta =
@@ -180,7 +208,6 @@ export const sincronizar = internalAction({
           previa.documentIds.every((id) => vivos.has(id));
         if (intacta) continue;
 
-        const titulo = tituloDe(pagina) || `pagina-${pageId.slice(0, 8)}`;
         try {
           const r = await procesarPagina(ctx, cliente, pagina, pageId, titulo, previa, cifras);
           await ctx.runMutation(internal.notion.datos.guardarPagina, {

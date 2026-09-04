@@ -293,3 +293,15 @@ export const borrarUsuarioDePrueba = internalMutation({
     return { estado: "borrado", sesiones: sesiones.length, votos: votos.length };
   },
 });
+
+/** Comprueba en el runtime real que una mutación puede generar aleatoriedad
+ *  (Convex la ofrece de forma determinista por transacción). El flujo OAuth de
+ *  Notion depende de ello para el `state`. */
+export const probarAleatorio = internalMutation({
+  args: {},
+  handler: async () => {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    return { uuid: crypto.randomUUID(), bytes: Array.from(bytes) };
+  },
+});

@@ -280,6 +280,75 @@ export interface DocumentInfo {
   origen: 'subida' | 'notion' | null;
 }
 
+/** Una corrida de la sincronización con Notion (notion.admin.estado.ultimas). */
+export interface CorridaNotion {
+  empezadoEn: number;
+  terminadoEn: number | null;
+  estado: 'running' | 'ok' | 'error';
+  paginas: number;
+  nuevos: number;
+  actualizados: number;
+  borrados: number;
+  /** Avisos por página, en texto. La UI los pliega. */
+  errores: string[];
+}
+
+/** Progreso de la corrida en curso, que la acción escribe página a página. */
+export interface ProgresoNotion {
+  empezadoEn: number;
+  /** null mientras aún se lee la lista de páginas de la base. */
+  paginasTotal: number | null;
+  paginasProcesadas: number;
+  paginaActual: string | null;
+  nuevos: number;
+  actualizados: number;
+  borrados: number;
+  errores: string[];
+}
+
+/** Estado completo del bloque de Notion (notion.admin.estado, solo admin).
+ *  Nunca trae tokens ni secretos: dice a qué espacio se está conectado y con
+ *  qué base, no con qué credenciales. */
+export interface EstadoNotion {
+  /** La integración pública está registrada por el equipo técnico. */
+  habilitada: boolean;
+  conexion: {
+    workspaceName: string;
+    /** URL http(s) o emoji; null si Notion no dio ninguno. */
+    workspaceIcon: string | null;
+    conectadoEn: number;
+  } | null;
+  /** La base con la que se sincroniza, o null si aún no hay ninguna. */
+  base: {
+    id: string;
+    /** null cuando la base viene de la configuración del equipo técnico. */
+    titulo: string | null;
+    elegidaEnApp: boolean;
+  } | null;
+  /** Sin conexión en la app, pero configurado por el equipo técnico. */
+  porEntorno: boolean;
+  periodicaMinutos: number;
+  borrarArchivados: boolean;
+  paginas: number;
+  paginasConError: number;
+  documentos: number;
+  enCurso: ProgresoNotion | null;
+  ultimas: CorridaNotion[];
+}
+
+/** Una base de datos que la conexión puede ver (notion.oauth.listarBases). */
+export interface BaseNotion {
+  id: string;
+  titulo: string;
+  ultimaEdicion: string;
+}
+
+/** Con qué volvió la usuaria de la pantalla de Notion (`?notion=` en la URL). */
+export type AvisoNotion =
+  | { tipo: 'conectado' }
+  | { tipo: 'cancelado' }
+  | { tipo: 'error'; motivo: string | null };
+
 /** Señal para enfocar una fuente concreta en el panel derecho (clic en una cita). */
 export interface SourceFocus {
   file: string;

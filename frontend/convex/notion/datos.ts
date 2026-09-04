@@ -87,6 +87,32 @@ export const abrirCorrida = internalMutation({
   },
 });
 
+/** Avance de una corrida en curso, para que la UI suscrita lo pinte en vivo.
+ *  Solo lo que venga se escribe: `paginasTotal` una vez al conocer la base,
+ *  y por cada página la posición, el título y los contadores parciales. Si
+ *  la corrida ya no está `running` (la cerró otro camino o la podó
+ *  `abrirCorrida`), no se toca: un avance tardío no debe reabrirla. */
+export const avanzarCorrida = internalMutation({
+  args: {
+    runId: v.id("notionSincronizaciones"),
+    paginasTotal: v.optional(v.number()),
+    paginasProcesadas: v.optional(v.number()),
+    paginaActual: v.optional(v.string()),
+    paginas: v.optional(v.number()),
+    nuevos: v.optional(v.number()),
+    actualizados: v.optional(v.number()),
+    borrados: v.optional(v.number()),
+    errores: v.optional(v.array(v.string())),
+  },
+  handler: async (ctx, { runId, ...avance }) => {
+    const fila = await ctx.db.get(runId);
+    if (!fila || fila.estado !== "running") return;
+    const cambios: Record<string, unknown> = {};
+    for (const [k, valor] of Object.entries(avance)) if (valor !== undefined) cambios[k] = valor;
+    if (Object.keys(cambios).length > 0) await ctx.db.patch(runId, cambios);
+  },
+});
+
 export const cerrarCorrida = internalMutation({
   args: {
     runId: v.id("notionSincronizaciones"),
@@ -101,7 +127,9 @@ export const cerrarCorrida = internalMutation({
     // Puede haberla podado `abrirCorrida` de una corrida posterior si esta
     // duró más que 20 corridas seguidas; no es un error.
     if (!(await ctx.db.get(runId))) return;
-    await ctx.db.patch(runId, { ...resto, terminadoEn: Date.now() });
+    // `paginaActual` se retira: cerrada, ya no hay "ahora leyendo…". Con
+    // `patch`, un campo en undefined desaparece del documento.
+    await ctx.db.patch(runId, { ...resto, terminadoEn: Date.now(), paginaActual: undefined });
   },
 });
 

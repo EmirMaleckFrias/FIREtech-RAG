@@ -79,6 +79,18 @@ export interface Ajustes {
   notionDatabaseId: string;
   notionSyncMinutes: number;
   notionBorrarArchivados: boolean;
+  // Integración PÚBLICA de Notion (OAuth), la que permite que una
+  // administradora conecte su espacio desde la app con un botón y sin ver
+  // nunca un token. Las fija el desarrollador una sola vez; sin ellas la UI
+  // dice que la conexión "aún no está habilitada por el equipo técnico".
+  notionClientId: string;
+  notionClientSecret: string;
+  // URL pública de las rutas HTTP del despliegue (`*.convex.site`). La pone
+  // la plataforma; es la base de la redirect URI que se registra en Notion.
+  convexSiteUrl: string;
+  // URL del frontend (la misma que usa Convex Auth para volver tras un OAuth).
+  // Es adonde se devuelve a la administradora al terminar de conectar Notion.
+  siteUrl: string;
 }
 
 export function ajustes(): Ajustes {
@@ -160,6 +172,10 @@ export function ajustes(): Ajustes {
     // es la fuente de verdad, lo que sale de Notion sale del índice. En false
     // la fila queda marcada y los documentos se conservan.
     notionBorrarArchivados: booleano("NOTION_DELETE_ARCHIVED", true),
+    notionClientId: texto("NOTION_CLIENT_ID"),
+    notionClientSecret: texto("NOTION_CLIENT_SECRET"),
+    convexSiteUrl: texto("CONVEX_SITE_URL").replace(/\/$/, ""),
+    siteUrl: texto("SITE_URL").replace(/\/$/, ""),
   };
 }
 
