@@ -13,6 +13,7 @@ subirlos y borrarlos es exclusivo de `admin` (403 para el rol de consulta).
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 import re
@@ -57,6 +58,16 @@ MAX_UPLOAD_BYTES = (
 # Límite vigente en MB: lo expone GET /api/health como "upload_limit_mb" para
 # que el frontend anuncie el valor real (4 en Vercel, 25 en local).
 UPLOAD_LIMIT_MB = MAX_UPLOAD_BYTES // (1024 * 1024)
+# Minutos tras los que un documento en `processing` se considera abandonado y
+# se puede reintentar. Existe porque hay una forma de quedarse en `processing`
+# PARA SIEMPRE: si la función de Vercel muere por el corte de 300 s a mitad de
+# ingesta no hay excepción de Python, así que el `except` de `_ingest_uploaded`
+# nunca corre y nadie marca `failed`. Y entonces los dos caminos de
+# recuperación se bloqueaban entre sí: /upload responde 409 porque el nombre
+# existe, y /reindex responde 409 porque está "procesando". La única salida
+# era borrar y resubir. El tope de la función son 300 s, así que 10 minutos es
+# holgado: nada legítimo sigue vivo pasado ese punto.
+PROCESSING_STALE_MINUTES = 10
 UPLOADS_DIR = (
     Path(tempfile.gettempdir()) / "rag_uploads"
     if IS_SERVERLESS
@@ -299,6 +310,27 @@ async def upload_document(
     return {"id": doc_id or file_name, "file_name": file_name, "status": "processing"}
 
 
+def _processing_rancio(row: dict) -> bool:
+    """¿Este `processing` lleva tanto tiempo que ya no puede estar vivo?
+
+    Sin fecha utilizable se responde True: un registro en `processing` sin
+    marca de tiempo es indistinguible de uno abandonado, y bloquear el
+    reintento para siempre es peor que permitir uno de más (que como mucho
+    reingiere algo que ya estaba bien).
+    """
+    crudo = row.get("ingested_at")
+    if not crudo:
+        return True
+    try:
+        marca = datetime.fromisoformat(str(crudo).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if marca.tzinfo is None:
+        marca = marca.replace(tzinfo=timezone.utc)
+    edad = datetime.now(timezone.utc) - marca
+    return edad > timedelta(minutes=PROCESSING_STALE_MINUTES)
+
+
 @router.post("/documents/{file_name}/reindex")
 async def reindex_document(
     file_name: str,
@@ -317,8 +349,11 @@ async def reindex_document(
     que no: el archivo NO se guarda de forma permanente. En local vive en
     data/uploads y el reintento funciona siempre; en Vercel va a /tmp, que es
     efímero, así que solo está si la misma instancia sigue caliente. Cuando no
-    está se responde 409 con `code: "file_not_stored"` para que la interfaz
-    pida la resubida en vez de mentir con un error genérico.
+    está se responde 409 con la cabecera `X-Reindex-Code: file_not_stored`
+    para que la interfaz pida la resubida en vez de mentir con un error
+    genérico. Va en una cabecera y no en el cuerpo porque el cuerpo de una
+    HTTPException es solo `{"detail": ...}`; el frontend la lee sin CORS
+    porque `/api/*` es una reescritura al mismo dominio (vercel.json).
     """
     safe_name = _sanitize_file_name(file_name)
     rows = await run_in_threadpool(supabase_db.list_documents)
@@ -327,8 +362,10 @@ async def reindex_document(
         raise HTTPException(
             status_code=404, detail=f"'{file_name}' no está registrado"
         )
-    if row.get("status") == "processing":
+    if row.get("status") == "processing" and not _processing_rancio(row):
         # Reingerir en paralelo duplicaría chunks y pelearía por el registro.
+        # Pero solo se rechaza si de verdad SIGUE procesándose: ver
+        # PROCESSING_STALE_MINUTES.
         raise HTTPException(
             status_code=409,
             detail=f"'{file_name}' ya se está procesando",

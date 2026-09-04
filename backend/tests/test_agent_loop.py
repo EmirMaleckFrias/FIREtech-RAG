@@ -491,3 +491,39 @@ async def test_una_cita_inventada_queda_registrada_en_la_telemetria(
     meta = tel.summary()["meta"]["verificacion"]
     assert meta["citas_sin_resolver"] == ["[fantasma.pdf, pág. 7]"]
     assert meta["afirmaciones"] == 1
+
+
+async def test_el_inventario_no_gasta_el_freno_de_busquedas_sin_avance(
+    settings_override, fake_openai, catalogo_falso, monkeypatch
+):
+    """Regresión encontrada en revisión.
+
+    `listar_documentos` devuelve `chunks=[]` por diseño: lista los documentos,
+    no recupera fragmentos. Al contarlo como "búsqueda sin avance", en modo
+    normal (max_hops_sin_avance=1) preguntar "¿qué documentos tienes y qué
+    dicen sobre X?" gastaba el freno con el inventario y forzaba la respuesta
+    final SIN haber buscado nada: el modelo tenía que responder con cero
+    evidencia sobre un corpus que sí la tenía.
+    """
+    monkeypatch.setattr(
+        agent,
+        "index_inventory",
+        lambda: {
+            "chunks": 8, "documentos": 1,
+            "archivos": [{"valor": "e.pdf", "chunks": 8}],
+            "tipos": [{"valor": "pdf", "chunks": 8}],
+            "idiomas": [{"valor": "es", "chunks": 8}],
+        },
+    )
+    fake_openai.queue(
+        make_tool_call_stream(INVENTARIO, {}, usage=make_usage(40, 4)),
+        make_tool_call_stream(TOOL, {"semantico": "tau"}, usage=make_usage(50, 5)),
+        make_text_stream("Respondo con evidencia.", usage=make_usage(60, 6)),
+    )
+
+    eventos = await _correr("que documentos tienes y que dicen de tau", modo="normal")
+
+    # el inventario y DESPUÉS la búsqueda: dos hops, no uno cortado a medias
+    assert _tipos(eventos).count("hop") == 2
+    # y la búsqueda real llegó a ejecutarse con tool_choice libre
+    assert fake_openai.calls[1]["tool_choice"] == "auto"

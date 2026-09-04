@@ -297,3 +297,106 @@ async def test_el_payload_es_serializable(settings_override, fake_openai):
     assert plano["fidelidad"] == 1.0
     assert plano["afirmaciones"][0]["veredicto"] == SOSTENIDA
     assert plano["afirmaciones"][0]["cita"] == ch.cite()
+
+
+# ---------------------------------------------------------------------------
+# Regresiones encontradas en revisión: la fidelidad reportada era una
+# garantía falsa por dos vías distintas
+# ---------------------------------------------------------------------------
+async def test_una_lista_con_una_sola_cita_audita_todas_sus_vinetas(
+    settings_override, fake_openai
+):
+    """El prompt del agente empuja a citar UNA vez por lista ("no repitas la
+    misma cita en cada punto si todos salen del mismo sitio"), y antes solo se
+    auditaba la última frase del tramo: cinco viñetas factuales producían una
+    afirmación y un informe de "fidelidad 1.0". Las otras cuatro no salían ni
+    como sostenidas ni como sin verificar: desaparecían.
+    """
+    ch = _chunk("c1", "Datos del estudio.", "estudio.pdf", 3)
+    respuesta = (
+        "Los hallazgos principales son:\n"
+        "- La conversion fue del 31.6%.\n"
+        "- El AUC de p-tau217 fue 0.94.\n"
+        f"- La cohorte incluyo 412 pacientes {ch.cite()}."
+    )
+    fake_openai.queue(
+        make_json_completion(
+            {
+                "veredictos": [
+                    {"i": 0, "veredicto": "sostenida", "motivo": "ok"},
+                    {"i": 1, "veredicto": "no_sostenida", "motivo": "no consta"},
+                    {"i": 2, "veredicto": "sostenida", "motivo": "ok"},
+                ]
+            }
+        )
+    )
+
+    informe = await verificar(respuesta, [ch])
+
+    # las tres viñetas, no solo la última
+    assert len(informe.afirmaciones) == 3
+    assert [a.veredicto for a in informe.afirmaciones] == [
+        SOSTENIDA, NO_SOSTENIDA, SOSTENIDA,
+    ]
+    # y la fidelidad ya no miente: 2 de 3, no 1.0
+    assert informe.fidelidad == pytest.approx(2 / 3)
+    # el encabezado "Los hallazgos principales son:" no es una afirmación
+    assert all("hallazgos principales" not in a.texto for a in informe.afirmaciones)
+
+
+async def test_el_punto_suelto_tras_una_cita_no_es_una_afirmacion(
+    settings_override, fake_openai
+):
+    """Al trocear por citas, tras cada una queda el punto de la frase anterior.
+    Sin filtro de contenido se colaba como una afirmación cuyo texto era "."."""
+    a = _chunk("c1", "Primero.", "a.pdf", 1)
+    b = _chunk("c2", "Segundo.", "b.pdf", 2)
+    fake_openai.queue(
+        make_json_completion(
+            {
+                "veredictos": [
+                    {"i": 0, "veredicto": "sostenida", "motivo": "ok"},
+                    {"i": 1, "veredicto": "sostenida", "motivo": "ok"},
+                ]
+            }
+        )
+    )
+
+    informe = await verificar(f"Uno {a.cite()}. Dos {b.cite()}.", [a, b])
+
+    assert len(informe.afirmaciones) == 2
+    assert all(a.texto.strip() not in {".", ""} for a in informe.afirmaciones)
+
+
+async def test_una_cita_compartida_por_varios_fragmentos_los_manda_todos(
+    settings_override, fake_openai
+):
+    """`cite()` no es única: su localizador es la página, y con fragmentos de
+    ~400 tokens una página de paper produce dos o tres con la MISMA cita.
+
+    Antes el índice era un dict de un fragmento por cita y se quedaba con el
+    último, así que una afirmación sacada del primero se dictaminaba contra el
+    texto del otro: producía `no_sostenida` falsos y, peor, `sostenida` falsos
+    cuando el hermano decía algo parecido.
+    """
+    a = Chunk(id="c1", text="La conversion fue del 31.6%.", source_file="e.pdf",
+              page=4, document_type="pdf", citation="Allegri et al., 2023")
+    b = Chunk(id="c2", text="El AUC fue 0.94.", source_file="e.pdf",
+              page=4, document_type="pdf", citation="Allegri et al., 2023")
+    assert a.cite() == b.cite()  # la premisa del bug
+
+    fake_openai.queue(
+        make_json_completion(
+            {"veredictos": [{"i": 0, "veredicto": "sostenida", "motivo": "consta"}]}
+        )
+    )
+
+    informe = await verificar(f"La conversion fue del 31.6% {a.cite()}.", [a, b])
+
+    assert [x.veredicto for x in informe.afirmaciones] == [SOSTENIDA]
+    # los DOS textos viajan al modelo: si solo fuera el ultimo, la afirmacion
+    # se juzgaria contra "El AUC fue 0.94." y saldria no sostenida
+    enviado = fake_openai.calls[0]["messages"][-1]["content"]
+    assert "La conversion fue del 31.6%." in enviado
+    assert "El AUC fue 0.94." in enviado
+    assert "FRAGMENTO 1 DE 2" in enviado

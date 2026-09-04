@@ -8,7 +8,8 @@ tabla `profiles` (migración 004).
 Las llamadas del SDK de Supabase son SÍNCRONAS y hacen red: se ejecutan en el
 threadpool (`run_in_threadpool`) para no bloquear el event loop.
 
-Caché en memoria token → (AuthUser, expiry) con TTL de 60 s y tope de tamaño,
+Caché en memoria token → (AuthUser, expiry) con TTL de CACHE_TTL_SECONDS y
+tope de tamaño,
 para no ir a la red en cada request. Es por proceso; al reiniciar se vacía y un
 cambio de rol tarda como mucho el TTL en verse.
 """
@@ -258,8 +259,23 @@ def _resolve_token(token: str) -> AuthUser:
             logger.warning("Usuario %s sin fila en profiles; rol por defecto", user_id)
     except BlockedAccount:
         raise
-    except Exception:
+    except Exception as exc:
+        # 503, NO un usuario válido con el rol por defecto. Antes esto seguía
+        # adelante y tenía dos consecuencias malas:
+        #
+        # 1. `blocked` nunca se evaluaba, así que una cuenta revocada entraba
+        #    en cuanto la lectura de `profiles` fallara. El bloqueo se aplica
+        #    ahí, y `supabase_db.update_user` acepta que el ban en Supabase
+        #    Auth falle confiando en que "el backend lo respeta": si el
+        #    backend tampoco lo mira, no lo respeta nadie.
+        # 2. Un admin quedaba degradado al rol de consulta Y CACHEADO, así que
+        #    durante la vida de la caché recibía 403 al subir o borrar
+        #    documentos sin ninguna señal de que el fallo era del servidor.
+        #
+        # El rol por defecto sigue siendo correcto para "no hay fila" (rama
+        # `else` de arriba), que es un caso distinto de "no pude preguntar".
         logger.exception("No se pudo leer el rol de profiles para %s", user_id)
+        raise _unavailable() from exc
 
     return AuthUser(id=user_id, email=email, role=role)
 

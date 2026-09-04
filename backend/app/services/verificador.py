@@ -69,7 +69,9 @@ SIN_VERIFICAR = "sin_verificar"
 _VEREDICTOS_MODELO = {SOSTENIDA, NO_SOSTENIDA, PARCIAL}
 
 _SYSTEM = """Eres un verificador de atribución en literatura científica. Para
-cada afirmación recibes el texto del fragmento que la respuesta citó. Dictamina
+cada afirmación recibes el texto de los fragmentos que la respuesta citó (una
+misma cita puede corresponder a varios fragmentos de la misma página o
+sección; basta con que UNO sostenga la afirmación). Dictamina
 SOLO si ese fragmento sostiene la afirmación; no juzgues si es verdad en el
 mundo, ni aportes conocimiento propio, ni corrijas la redacción.
 
@@ -91,6 +93,9 @@ Devuelve solo JSON con esta forma, un objeto por afirmación recibida:
 # ("TODA afirmación factual debe llevar su cita"), así que es también la unidad
 # que se puede auditar.
 _FIN_DE_FRASE = re.compile(r"(?<=[.;:!?])\s+")
+# Una "frase" sin ninguna letra ni digito no afirma nada: es puntuacion
+# suelta, una viñeta o un separador.
+_TIENE_CONTENIDO = re.compile(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]")
 
 
 @dataclass(frozen=True)
@@ -157,40 +162,75 @@ def _trocear(answer: str) -> list[tuple[str, str]]:
         ultimo_fin = m.end()
         if not tramo:
             continue
-        # De un tramo largo con varias frases, la afirmación que la cita
-        # respalda es la última: las anteriores ya llevaban la suya o son
-        # texto de enlace.
-        frases = [f for f in _FIN_DE_FRASE.split(tramo) if f.strip()]
-        texto = frases[-1].strip() if frases else tramo
-        salida.append((texto, m.group(0)))
+        # TODAS las frases del tramo, no solo la última. Antes se auditaba
+        # únicamente la última y el resto desaparecía del informe -ni como
+        # sostenida ni como sin_verificar-, así que una lista de cinco viñetas
+        # con una sola cita al final reportaba "1 afirmación, fidelidad 1.0".
+        # Eso es la garantía falsa que este módulo existe para impedir, y
+        # además el propio prompt del agente empuja a ese formato: "no repitas
+        # la misma cita en cada punto de una lista si todos salen del mismo
+        # sitio". La lectura correcta del contrato es que la cita de cierre
+        # respalda el tramo COMPLETO.
+        for frase in _FIN_DE_FRASE.split(tramo):
+            frase = frase.strip()
+            # Se descartan tres cosas que no afirman nada y solo producirian
+            # veredictos sin sentido: los encabezados de lista ("Los hallazgos
+            # son:"), y los restos sin contenido -tras una cita queda el punto
+            # de la frase anterior, que sin este filtro se colaba como una
+            # afirmacion cuyo texto entero era "."-.
+            if not frase or frase.endswith(":"):
+                continue
+            if not _TIENE_CONTENIDO.search(frase):
+                continue
+            salida.append((frase, m.group(0)))
     return salida
 
 
-def _indice_de_fragmentos(chunks: list[Chunk]) -> dict[str, Chunk]:
-    """Fragmentos indexados por su cita completa, en minúsculas y normalizada.
+def _indice_de_fragmentos(chunks: list[Chunk]) -> dict[str, list[Chunk]]:
+    """Fragmentos agrupados por su cita completa, en minúsculas y normalizada.
+
+    El valor es una LISTA y no un fragmento, porque `cite()` NO es única: su
+    localizador es la página o la sección (`Chunk.locator`), y con fragmentos
+    de ~400 tokens una página de paper a dos columnas produce dos o tres, los
+    tres con la misma cita. Cuando esto era un dict de un solo fragmento se
+    quedaba con el último de cada página, y entonces una afirmación sacada del
+    fragmento A se dictaminaba contra el texto del fragmento B: producía
+    `no_sostenida` falsos y, peor, `sostenida` falsos cuando el hermano decía
+    algo parecido.
 
     La comparación es laxa en forma y estricta en contenido: el modelo copia la
     cita literal, pero un espacio de diferencia no debería contar como cita
     inventada.
     """
-    return {" ".join(ch.cite().casefold().split()): ch for ch in chunks}
+    indice: dict[str, list[Chunk]] = {}
+    for ch in chunks:
+        indice.setdefault(" ".join(ch.cite().casefold().split()), []).append(ch)
+    return indice
 
 
 async def _dictaminar(
-    pendientes: list[tuple[int, Afirmacion, Chunk]],
+    pendientes: list[tuple[int, Afirmacion, list[Chunk]]],
 ) -> dict[int, tuple[str, str]]:
-    """Un único request JSON con todas las afirmaciones que hay que juzgar."""
+    """Un único request JSON con todas las afirmaciones que hay que juzgar.
+
+    Cada afirmación puede traer VARIOS fragmentos, porque una misma cita
+    corresponde a todos los de su página o sección (ver
+    `_indice_de_fragmentos`). Se envían todos y basta con que uno la sostenga:
+    la cita del modelo apunta a esa página, y la afirmación está respaldada si
+    está en alguno de sus fragmentos.
+    """
     settings = get_settings()
     model = settings.verifier_model_resolved
     tel = telemetry.current()
     t0 = time.perf_counter()
 
     bloques = []
-    for i, (_, af, ch) in enumerate(pendientes):
-        bloques.append(
-            f"[{i}] AFIRMACIÓN: {af.texto}\n"
-            f"    FRAGMENTO CITADO ({ch.cite()}): {ch.text}"
+    for i, (_, af, chs) in enumerate(pendientes):
+        cuerpo = "\n".join(
+            f"    FRAGMENTO {n} DE {len(chs)} ({ch.cite()}): {ch.text}"
+            for n, ch in enumerate(chs, start=1)
         )
+        bloques.append(f"[{i}] AFIRMACIÓN: {af.texto}\n{cuerpo}")
     payload = "\n\n".join(bloques)
 
     try:
@@ -289,13 +329,13 @@ async def verificar(
 
     indice = _indice_de_fragmentos(chunks)
     afirmaciones: list[Afirmacion] = []
-    pendientes: list[tuple[int, Afirmacion, Chunk]] = []
+    pendientes: list[tuple[int, Afirmacion, list[Chunk]]] = []
     citas_sin_resolver: list[str] = []
 
     for texto, cita in troceado:
         clave = " ".join(cita.casefold().split())
-        ch = indice.get(clave)
-        if ch is None:
+        chs = indice.get(clave)
+        if not chs:
             citas_sin_resolver.append(cita)
             afirmaciones.append(
                 Afirmacion(
@@ -304,12 +344,12 @@ async def verificar(
                 )
             )
             continue
-        af = Afirmacion(texto=texto, cita=cita, fragmento_id=ch.cite())
+        af = Afirmacion(texto=texto, cita=cita, fragmento_id=chs[0].cite())
         if len(pendientes) < settings.verifier_max_claims:
-            pendientes.append((len(afirmaciones), af, ch))
+            pendientes.append((len(afirmaciones), af, chs))
         else:
             af = Afirmacion(
-                texto=texto, cita=cita, fragmento_id=ch.cite(),
+                texto=texto, cita=cita, fragmento_id=chs[0].cite(),
                 motivo=f"por encima del tope de {settings.verifier_max_claims} afirmaciones",
             )
         afirmaciones.append(af)

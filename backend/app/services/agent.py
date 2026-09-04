@@ -650,7 +650,15 @@ async def run_agent(
                         accumulated[ch.id] = ch
                         nuevos += 1
                 hop_info["nuevos"] = nuevos
-                hops_sin_avance = 0 if nuevos else hops_sin_avance + 1
+                # El inventario NO cuenta como búsqueda sin avance: devuelve
+                # `chunks=[]` por diseño, porque lista los documentos en lugar
+                # de recuperar fragmentos. Contándolo, preguntar "¿qué
+                # documentos tienes y qué dicen sobre X?" en modo normal
+                # gastaba el freno con el inventario y forzaba la respuesta
+                # final SIN haber buscado nada.
+                es_inventario = tc["name"] == _INVENTORY_TOOL["function"]["name"]
+                if not es_inventario:
+                    hops_sin_avance = 0 if nuevos else hops_sin_avance + 1
 
                 messages.append(
                     {

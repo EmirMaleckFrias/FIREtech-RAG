@@ -462,6 +462,36 @@ async def chat(
             raise
         except Exception as exc:
             logger.exception("Error en /api/chat")
+            # Guardar lo streameado, igual que hace el CancelledError de
+            # arriba. Sin esto, este camino dejaba el mensaje `user` HUÉRFANO
+            # y rompía la invariante que el comentario del punto 3 declara:
+            # el turno siguiente enviaba a OpenAI dos mensajes `user`
+            # consecutivos, y al recargar la conversación se veía la pregunta
+            # sin la respuesta que el usuario sí había leído en pantalla.
+            if user_saved and not assistant_saved and session_id:
+                content = "".join(partial_tokens).strip()
+                content = (
+                    f"{content}\n\n*(Respuesta incompleta: el servidor falló)*"
+                    if content
+                    else "*(No se pudo generar la respuesta)*"
+                )
+                try:
+                    await run_in_threadpool(
+                        _save_partial_message,
+                        session_id,
+                        content,
+                        partial_sources,
+                        partial_hops,
+                        user.id,
+                        user.is_admin,
+                    )
+                    assistant_saved = True
+                except Exception:
+                    logger.exception(
+                        "No se pudo guardar la respuesta parcial tras el error "
+                        "(session %s)",
+                        session_id,
+                    )
             # RuntimeError = mensajes nuestros user-friendly (p. ej. falta
             # OPENAI_API_KEY). Cualquier otra excepción no expone detalles
             # técnicos (SQL, stack traces) al cliente.

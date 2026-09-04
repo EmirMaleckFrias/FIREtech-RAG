@@ -64,7 +64,14 @@ NORMAL = Modo(
     budget_s=60.0,
     # Si la primera búsqueda no trae nada nuevo, la segunda tampoco lo hará por
     # insistir: se responde con lo que haya.
-    max_hops_sin_avance=1,
+    # 2 y no 1: con max_hops=2 el tope de búsquedas ya acota el gasto, así
+    # que este freno era redundante y sí hacía daño. El prompt le pide al
+    # modelo reformular cuando una búsqueda no trae nada, y en un corpus en
+    # inglés con preguntas en español ese reintento es el caso NORMAL, no la
+    # excepción. Con 1, la primera búsqueda vacía prohibía el reintento que el
+    # propio sistema acababa de pedir, y se respondía "no lo encuentro en los
+    # documentos" sobre información que sí estaba indexada.
+    max_hops_sin_avance=2,
     fragmentos=8,
     planifica=False,
     esfuerzo=None,
