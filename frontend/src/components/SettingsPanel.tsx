@@ -4,18 +4,22 @@
 //
 // Decisiones:
 // - Visibilidad por rol: un lector solo tiene "Mi cuenta" y ni siquiera se
-//   monta la pestaña de usuarios ni la de sistema, así que sus endpoints de
-//   admin (GET /api/users, GET /api/stats) nunca se llaman desde su sesión.
+//   monta la pestaña de usuarios ni la de sistema, así que sus queries de
+//   admin (usuarios.listar, estadisticas.sistema) nunca se suscriben desde su
+//   sesión.
 // - Solo se monta el contenido de la pestaña activa, pero sigue montado con
 //   el panel cerrado: reabrir no parpadea y el cierre anima con contenido.
-//   Cada pestaña pide sus datos cuando el panel se abre, no al montarse.
 // - Privacidad: de las conversaciones ajenas solo se muestran CONTADORES
 //   (cuántas y cuántas preguntas). Ni títulos ni texto, en ningún rol.
-// - Toda acción de fila es OPTIMISTA con reversión si el backend la rechaza,
-//   y pide confirmación inline en dos pasos, nunca window.confirm.
+// - Las listas son suscripciones. Una acción de fila espera a su mutación y
+//   la lista ya llega actualizada cuando la promesa se resuelve (Convex no
+//   resuelve una mutación hasta que las suscripciones reflejan sus
+//   escrituras), así que sobran el parche optimista, su reversión y la
+//   secuenciación de peticiones que hacían falta con fetch. La confirmación
+//   sigue siendo inline y en dos pasos, nunca window.confirm.
 // - La fila entera abre y cierra sus acciones al hacer clic. La fila propia
-//   lleva "Tú", no despliega nada y no ofrece acción: el backend responde 403
-//   a quien intenta cambiarse el rol, bloquearse o borrarse a sí mismo, y la
+//   lleva "Tú", no despliega nada y no ofrece acción: el servidor rechaza a
+//   quien intenta cambiarse el rol, bloquearse o borrarse a sí mismo, y la
 //   UI no ofrece lo que se va a rechazar.
 // - Bloquear y eliminar son cosas MUY distintas y se pintan distinto:
 //   bloquear es reversible y conserva la cuenta, así que va en ámbar (el
@@ -28,18 +32,19 @@
 import {
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
-  type FormEvent,
   type KeyboardEvent,
 } from 'react';
-import { deleteUser, fetchStats, fetchUsers, setUserBlocked, updateUserRole } from '../api';
+import { useMutation, useQuery } from 'convex/react';
+import { api } from '../../convex/_generated/api';
+import type { Id } from '../../convex/_generated/dataModel';
+import { avisarSiEsFatal } from '../lib/auth';
+import { mensajeDeError } from '../lib/errores';
 import { useSheetDrag } from '../lib/useSheetDrag';
-import { updatePassword } from '../lib/session';
 import { aplicarTema, guardarTema, leerTema, type Tema } from '../lib/theme';
-import type { AdminStats, UserAccount, UserRole } from '../types';
+import { ROLE_LABEL, type AdminStats, type UserAccount, type UserRole } from '../types';
 import {
   IconAlert,
   IconCheck,
@@ -64,19 +69,10 @@ const TEMAS: { valor: Tema; etiqueta: string; ayuda: string }[] = [
   { valor: 'claro', etiqueta: 'Claro', ayuda: 'Siempre en claro' },
   { valor: 'oscuro', etiqueta: 'Oscuro', ayuda: 'Siempre en oscuro' },
 ];
-/** Mínimo que exige el producto para una contraseña nueva. */
-const MIN_PASSWORD = 8;
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), a[href], input:not([disabled]):not([type="file"]), ' +
   'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-const ROLE_LABEL: Record<UserRole, string> = {
-  admin: 'Administrador',
-  // El identificador es `vendedor` (ver UserRole en types.ts); lo que se
-  // muestra ya es "Lector", que es lo que pidio el producto.
-  vendedor: 'Lector',
-};
 
 /** Miles con separador español (1.234). */
 function num(value: number): string {
@@ -88,28 +84,28 @@ function plural(count: number, one: string, many: string): string {
 }
 
 /** Fecha corta para la línea de metadatos ("3 mar 2026"). */
-function shortDate(iso: string): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
+function shortDate(ms: number | null): string | null {
+  if (ms === null || ms <= 0) return null;
+  const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return null;
   return d.toLocaleDateString('es', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 /** Fecha y hora completas para el atributo title. */
-function fullDate(iso: string): string | undefined {
-  if (!iso) return undefined;
-  const d = new Date(iso);
+function fullDate(ms: number | null): string | undefined {
+  if (ms === null || ms <= 0) return undefined;
+  const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return undefined;
   return d.toLocaleString('es');
 }
 
 /**
  * Último acceso en lenguaje llano: "hace 2 horas", "ayer", o la fecha si ya
- * es antigua. null (o fecha ilegible) significa que la cuenta nunca entró.
+ * es antigua. null significa que la cuenta nunca entró.
  */
-function lastSeenText(iso: string | null): string {
-  if (iso === null || iso === '') return 'Nunca ha entrado';
-  const d = new Date(iso);
+function lastSeenText(ms: number | null): string {
+  if (ms === null || ms <= 0) return 'Nunca ha entrado';
+  const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return 'Nunca ha entrado';
 
   const now = new Date();
@@ -127,17 +123,58 @@ function lastSeenText(iso: string | null): string {
   const diffDays = Math.round((startOf(now) - startOf(d)) / 86_400_000);
   if (diffDays <= 1) return 'Ayer';
   if (diffDays < 7) return `Hace ${diffDays} días`;
-  return shortDate(iso) ?? 'Nunca ha entrado';
+  return shortDate(ms) ?? 'Nunca ha entrado';
 }
 
-/** Orden por fecha de alta (más antiguas primero); las ilegibles, al final. */
+/** Orden por fecha de alta (más antiguas primero); las sin fecha, al final. */
 function bySignup(a: UserAccount, b: UserAccount): number {
-  const ta = Date.parse(a.created_at);
-  const tb = Date.parse(b.created_at);
-  if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
-  if (Number.isNaN(ta)) return 1;
-  if (Number.isNaN(tb)) return -1;
-  return ta - tb;
+  if (a.creadoEn === null && b.creadoEn === null) return 0;
+  if (a.creadoEn === null) return 1;
+  if (b.creadoEn === null) return -1;
+  return a.creadoEn - b.creadoEn;
+}
+
+/** Entero no negativo, o 0 si el servidor manda algo raro (contadores). */
+function asCount(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
+/** Rol desconocido o ausente degrada al de menos permisos. */
+function normalizeRole(raw: unknown): UserRole {
+  return raw === 'admin' ? 'admin' : 'lector';
+}
+
+/** Lo que el frontend lee de una fila de usuarios.listar. Tipo estructural. */
+interface UsuarioDoc {
+  _id: Id<'users'>;
+  _creationTime?: number;
+  email?: string;
+  rol?: string;
+  bloqueado?: boolean;
+  creadoEn?: number | null;
+  ultimoAccesoEn?: number | null;
+  sesiones?: number;
+  mensajes?: number;
+}
+
+function normalizeUser(u: UsuarioDoc): UserAccount {
+  return {
+    id: u._id,
+    email: typeof u.email === 'string' && u.email !== '' ? u.email : 'desconocido',
+    rol: normalizeRole(u.rol),
+    // Solo un true explícito bloquea: un campo ausente deja la cuenta
+    // activa, nunca atenuada por error.
+    bloqueado: u.bloqueado === true,
+    creadoEn:
+      typeof u.creadoEn === 'number'
+        ? u.creadoEn
+        : typeof u._creationTime === 'number'
+          ? u._creationTime
+          : null,
+    ultimoAccesoEn: typeof u.ultimoAccesoEn === 'number' ? u.ultimoAccesoEn : null,
+    sesiones: asCount(u.sesiones),
+    mensajes: asCount(u.mensajes),
+  };
 }
 
 /* ======================================================================
@@ -151,7 +188,7 @@ type RowAction = 'demote' | 'block' | 'unblock' | 'delete';
 type NoticeTone = 'ok' | 'plain';
 
 interface PendingConfirm {
-  id: string;
+  id: Id<'users'>;
   action: RowAction;
 }
 
@@ -161,7 +198,7 @@ interface PendingConfirm {
  * separa "bloquear" de "eliminar" para quien lee en vez de mirar colores.
  */
 function confirmPrompt(action: RowAction, user: UserAccount): { question: string; verb: string } {
-  const chats = plural(user.sessions_count, 'conversación', 'conversaciones');
+  const chats = plural(user.sesiones, 'conversación', 'conversaciones');
   switch (action) {
     case 'demote':
       return {
@@ -187,18 +224,23 @@ function confirmPrompt(action: RowAction, user: UserAccount): { question: string
 }
 
 interface UsersTabProps {
-  /** El panel está abierto: momento de pedir (o refrescar) la lista. */
+  /** El panel está abierto. Al cerrarse se recogen confirmaciones y errores. */
   open: boolean;
-  currentUserId: string | null;
+  currentUserId: Id<'users'> | null;
 }
 
 function UsersTab({ open, currentUserId }: UsersTabProps) {
-  const [users, setUsers] = useState<UserAccount[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const listaQuery = useQuery(api.usuarios.listar);
+  const actualizar = useMutation(api.usuarios.actualizar);
+  const borrar = useMutation(api.usuarios.borrar);
+
+  const users = useMemo<UserAccount[] | null>(
+    () => (listaQuery === undefined ? null : listaQuery.map(normalizeUser).sort(bySignup)),
+    [listaQuery],
+  );
 
   const [query, setQuery] = useState('');
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<Id<'users'> | null>(null);
   const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
   /** id de fila -> etiqueta del trabajo en curso ("Bloqueando…", ...). */
   const [saving, setSaving] = useState<Record<string, string>>({});
@@ -210,19 +252,7 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
    */
   const [notice, setNotice] = useState<{ text: string; tone: NoticeTone } | null>(null);
 
-  const usersRef = useRef<UserAccount[] | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
-  /**
-   * Secuenciación de refreshUsers (mismo patrón que docsRequestRef en
-   * DocumentsPanel): cada petición toma un id y, si al resolver ya no es la
-   * vigente, su resultado se descarta. Un PATCH exitoso incrementa la
-   * secuencia para que un GET /api/users en vuelo no reponga el rol viejo.
-   */
-  const usersRequestRef = useRef(0);
-
-  useEffect(() => {
-    usersRef.current = users;
-  }, [users]);
 
   useEffect(
     () => () => {
@@ -239,36 +269,6 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
       noticeTimerRef.current = null;
     }, NOTICE_MS);
   }, []);
-
-  const refreshUsers = useCallback(async (opts?: { silent?: boolean }) => {
-    const silent = opts?.silent ?? false;
-    const requestId = ++usersRequestRef.current;
-    if (!silent) {
-      setLoading(true);
-      setLoadError(null);
-    }
-    try {
-      const list = await fetchUsers();
-      if (usersRequestRef.current !== requestId) return; // respuesta obsoleta
-      setUsers([...list].sort(bySignup));
-      setLoadError(null);
-    } catch (err) {
-      if (usersRequestRef.current !== requestId) return;
-      if (!silent) {
-        setLoadError(
-          err instanceof Error ? err.message : 'No se pudo cargar la lista de usuarios.',
-        );
-      }
-    } finally {
-      if (!silent && usersRequestRef.current === requestId) setLoading(false);
-    }
-  }, []);
-
-  // Al abrir: primera carga con skeleton; si ya hay datos, refresco silencioso.
-  useEffect(() => {
-    if (!open) return;
-    void refreshUsers({ silent: usersRef.current !== null });
-  }, [open, refreshUsers]);
 
   // Al cerrar se recogen las acciones desplegadas y los errores de fila:
   // reabrir nunca muestra un "¿Eliminar?" a medias ni el motivo de un intento
@@ -303,19 +303,12 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
     });
   }, []);
 
-  /** Motivo del rechazo en la propia fila: manda el `detail` del backend. */
+  /** Motivo del rechazo en la propia fila: manda el `mensaje` del servidor.
+   *  Si el error obliga a salir (acceso revocado) no se pinta nada: App ya
+   *  está cerrando la sesión. */
   const failRow = useCallback((id: string, err: unknown, fallback: string) => {
-    setRowErrors((errs) => ({
-      ...errs,
-      [id]: err instanceof Error && err.message !== '' ? err.message : fallback,
-    }));
-  }, []);
-
-  /** Aplica un parche local a una fila (sin tocar el resto de la lista). */
-  const patchRow = useCallback((id: string, patch: Partial<UserAccount>) => {
-    setUsers((prev) =>
-      prev === null ? prev : prev.map((u) => (u.id === id ? { ...u, ...patch } : u)),
-    );
+    if (avisarSiEsFatal(err)) return;
+    setRowErrors((errs) => ({ ...errs, [id]: mensajeDeError(err, fallback) }));
   }, []);
 
   const changeRole = useCallback(
@@ -323,34 +316,21 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
       setConfirm(null);
       clearRowError(user.id);
       startSaving(user.id, 'Guardando…');
-
-      // Optimista: la fila ya luce el rol nuevo mientras viaja el PATCH.
-      const previousRole = user.role;
-      patchRow(user.id, { role: nextRole });
-
       try {
-        const updated = await updateUserRole(user.id, nextRole);
-        // Invalida cualquier GET /api/users en vuelo: su lista trae el rol
-        // anterior y desharía el cambio recién confirmado.
-        usersRequestRef.current++;
-        // Solo se fusiona lo que esta acción cambia: el bloqueo lo lleva su
-        // propia acción y nunca se pisa desde aquí.
-        patchRow(user.id, { role: updated.role, email: updated.email || user.email });
+        await actualizar({ userId: user.id, rol: nextRole });
         setExpandedId(null);
         showNotice(
-          updated.role === 'admin'
+          nextRole === 'admin'
             ? `${user.email} ya es administrador.`
             : `${user.email} ya no es administrador.`,
         );
       } catch (err) {
-        // Reversión: la fila vuelve al rol que tenía antes del intento.
-        patchRow(user.id, { role: previousRole });
         failRow(user.id, err, 'No se pudo cambiar el rol.');
       } finally {
         stopSaving(user.id);
       }
     },
-    [clearRowError, failRow, patchRow, showNotice, startSaving, stopSaving],
+    [actualizar, clearRowError, failRow, showNotice, startSaving, stopSaving],
   );
 
   /**
@@ -364,18 +344,8 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
       setConfirm(null);
       clearRowError(user.id);
       startSaving(user.id, nextBlocked ? 'Bloqueando…' : 'Desbloqueando…');
-
-      const previousBlocked = user.blocked;
-      patchRow(user.id, { blocked: nextBlocked });
-
       try {
-        const updated = await setUserBlocked(user.id, nextBlocked);
-        usersRequestRef.current++;
-        // `blocked` null = el backend no devolvió el campo: vale lo pedido.
-        patchRow(user.id, {
-          blocked: updated.blocked ?? nextBlocked,
-          email: updated.email || user.email,
-        });
+        await actualizar({ userId: user.id, bloqueado: nextBlocked });
         showNotice(
           nextBlocked
             ? `${user.email} ya no puede entrar. Puedes devolverle el acceso cuando quieras.`
@@ -383,48 +353,32 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
           nextBlocked ? 'plain' : 'ok',
         );
       } catch (err) {
-        patchRow(user.id, { blocked: previousBlocked });
         failRow(user.id, err, 'No se pudo cambiar el acceso de la cuenta.');
       } finally {
         stopSaving(user.id);
       }
     },
-    [clearRowError, failRow, patchRow, showNotice, startSaving, stopSaving],
+    [actualizar, clearRowError, failRow, showNotice, startSaving, stopSaving],
   );
 
-  /**
-   * Borrado permanente. Optimista igual que el resto: la fila desaparece al
-   * instante y, si el backend dice que no, vuelve a su sitio exacto con el
-   * motivo debajo (nunca al final de la lista, que parecería otra cuenta).
-   */
+  /** Borrado permanente. La fila desaparece cuando la suscripción lo refleja,
+   *  y si el servidor dice que no, el motivo queda debajo de la fila. */
   const removeUser = useCallback(
     async (user: UserAccount) => {
       setConfirm(null);
-      setExpandedId((prev) => (prev === user.id ? null : prev));
       clearRowError(user.id);
-
-      const previousIndex = usersRef.current?.findIndex((u) => u.id === user.id) ?? -1;
-      setUsers((prev) => (prev === null ? prev : prev.filter((u) => u.id !== user.id)));
-      // Un GET en vuelo traería la cuenta de vuelta: se descarta su respuesta.
-      usersRequestRef.current++;
-
+      startSaving(user.id, 'Eliminando…');
       try {
-        await deleteUser(user.id);
-        usersRequestRef.current++;
+        await borrar({ userId: user.id });
+        setExpandedId((prev) => (prev === user.id ? null : prev));
         showNotice(`Cuenta de ${user.email} eliminada, con sus conversaciones.`, 'plain');
       } catch (err) {
-        setUsers((prev) => {
-          if (prev === null) return prev;
-          if (prev.some((u) => u.id === user.id)) return prev; // ya repuesta
-          const restored = [...prev];
-          const at = previousIndex >= 0 ? Math.min(previousIndex, restored.length) : restored.length;
-          restored.splice(at, 0, user);
-          return restored;
-        });
         failRow(user.id, err, 'No se pudo eliminar la cuenta.');
+      } finally {
+        stopSaving(user.id);
       }
     },
-    [clearRowError, failRow, showNotice],
+    [borrar, clearRowError, failRow, showNotice, startSaving, stopSaving],
   );
 
   /** Ejecuta la acción ya confirmada en el segundo paso. */
@@ -432,7 +386,7 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
     (user: UserAccount, action: RowAction) => {
       switch (action) {
         case 'demote':
-          void changeRole(user, 'vendedor');
+          void changeRole(user, 'lector');
           break;
         case 'block':
           void changeBlocked(user, true);
@@ -448,7 +402,7 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
     [changeBlocked, changeRole, removeUser],
   );
 
-  const toggleRow = (id: string) => {
+  const toggleRow = (id: Id<'users'>) => {
     setConfirm(null);
     setExpandedId((prev) => (prev === id ? null : id));
   };
@@ -476,9 +430,6 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
     if (needle === '') return users;
     return users.filter((u) => u.email.toLowerCase().includes(needle));
   }, [needle, users]);
-
-  const showSkeleton = loading && users === null;
-  const showUnavailable = !loading && loadError !== null && users === null;
 
   return (
     <div className="settings-tabpanel" onKeyDown={handleListKeyDown}>
@@ -513,7 +464,7 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
         </p>
       )}
 
-      {showSkeleton && (
+      {users === null && (
         <div className="users-skeleton" role="status" aria-label="Cargando usuarios">
           {[0, 1, 2, 3].map((i) => (
             <div
@@ -522,19 +473,6 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
               style={{ animationDelay: `-${i * 140}ms` }}
             />
           ))}
-        </div>
-      )}
-
-      {showUnavailable && (
-        <div className="settings-empty">
-          <span className="settings-empty-icon" aria-hidden="true">
-            <IconAlert size={20} />
-          </span>
-          <p className="settings-empty-title">No disponible</p>
-          <p>{loadError}</p>
-          <button type="button" className="docs-retry-btn" onClick={() => void refreshUsers()}>
-            Reintentar
-          </button>
         </div>
       )}
 
@@ -562,7 +500,7 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
             const isOpen = expandedId === u.id;
             const pending = confirm !== null && confirm.id === u.id ? confirm.action : null;
             const rowError = rowErrors[u.id];
-            const since = shortDate(u.created_at);
+            const since = shortDate(u.creadoEn);
             const actionsId = `user-actions-${u.id}`;
 
             const rowContent = (
@@ -575,19 +513,19 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
                     {u.email}
                   </span>
                   <span className="user-meta">
-                    <span className={`sidebar-role sidebar-role-${u.role}`}>
-                      {ROLE_LABEL[u.role]}
+                    <span className={`sidebar-role sidebar-role-${u.rol}`}>
+                      {ROLE_LABEL[u.rol]}
                     </span>
                     {/* el bloqueo manda sobre todo lo demás de la fila: va
                         justo detrás del rol y en ámbar de aviso */}
-                    {u.blocked && (
+                    {u.bloqueado && (
                       <span className="user-blocked-badge">
                         <IconLock size={11} />
                         <span>Bloqueado</span>
                       </span>
                     )}
                     {since !== null && (
-                      <span className="user-since" title={fullDate(u.created_at)}>
+                      <span className="user-since" title={fullDate(u.creadoEn)}>
                         Alta {since}
                       </span>
                     )}
@@ -595,13 +533,11 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
                   {/* solo cifras: el contenido de las conversaciones ajenas
                       no se muestra ni a un administrador */}
                   <span className="user-counts">
-                    <span title={fullDate(u.last_sign_in_at ?? '')}>
-                      {lastSeenText(u.last_sign_in_at)}
-                    </span>
+                    <span title={fullDate(u.ultimoAccesoEn)}>{lastSeenText(u.ultimoAccesoEn)}</span>
                     <span className="doc-sep">·</span>
-                    <span>{plural(u.sessions_count, 'conversación', 'conversaciones')}</span>
+                    <span>{plural(u.sesiones, 'conversación', 'conversaciones')}</span>
                     <span className="doc-sep">·</span>
-                    <span>{plural(u.messages_count, 'pregunta', 'preguntas')}</span>
+                    <span>{plural(u.mensajes, 'pregunta', 'preguntas')}</span>
                   </span>
                 </span>
               </>
@@ -611,7 +547,7 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
               <li
                 key={u.id}
                 className={`user-card ${isOpen ? 'user-card-open' : ''} ${
-                  u.blocked ? 'user-card-blocked' : ''
+                  u.bloqueado ? 'user-card-blocked' : ''
                 }`}
               >
                 {isSelf ? (
@@ -689,7 +625,7 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
                       })()
                     ) : (
                       <>
-                        {u.role === 'admin' ? (
+                        {u.rol === 'admin' ? (
                           <button
                             type="button"
                             className="user-act-btn user-act-demote"
@@ -714,16 +650,16 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
                           type="button"
                           className="user-act-btn user-act-block"
                           onClick={() =>
-                            setConfirm({ id: u.id, action: u.blocked ? 'unblock' : 'block' })
+                            setConfirm({ id: u.id, action: u.bloqueado ? 'unblock' : 'block' })
                           }
                           aria-label={
-                            u.blocked
+                            u.bloqueado
                               ? `Desbloquear el acceso de ${u.email}`
                               : `Bloquear el acceso de ${u.email}`
                           }
                         >
                           <IconLock size={12} />
-                          <span>{u.blocked ? 'Desbloquear' : 'Bloquear acceso'}</span>
+                          <span>{u.bloqueado ? 'Desbloquear' : 'Bloquear acceso'}</span>
                         </button>
 
                         {/* permanente: apartado a la derecha y en rojo */}
@@ -755,6 +691,58 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
    Pestaña 2: Sistema (solo admin, solo lectura)
    ====================================================================== */
 
+/** Lista de valores de un campo del índice: strings no vacíos, sin duplicados. */
+function normalizeStringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const name = v.trim();
+    if (name !== '') seen.add(name);
+  }
+  return [...seen];
+}
+
+/**
+ * Cifras de índice, actividad y configuración. Es de solo lectura y NUNCA
+ * trae contenido de conversaciones, solo agregados. Cada bloque se normaliza
+ * campo a campo: un despliegue a medio actualizar deja ceros y cadenas vacías
+ * en vez de romper el panel.
+ */
+function normalizeStats(data: unknown): AdminStats {
+  const root = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {};
+  const section = (key: string): Record<string, unknown> => {
+    const value = root[key];
+    return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+  };
+  const index = section('index');
+  const activity = section('activity');
+  const config = section('config');
+  const text = (raw: unknown): string => (typeof raw === 'string' ? raw.trim() : '');
+
+  return {
+    index: {
+      chunks: asCount(index.chunks),
+      files: asCount(index.files),
+      types: normalizeStringList(index.types),
+      languages: normalizeStringList(index.languages),
+    },
+    activity: {
+      questions_total: asCount(activity.questions_total),
+      questions_7d: asCount(activity.questions_7d),
+      active_users_7d: asCount(activity.active_users_7d),
+      feedback_up: asCount(activity.feedback_up),
+      feedback_down: asCount(activity.feedback_down),
+    },
+    config: {
+      model: text(config.model),
+      embedding_model: text(config.embedding_model),
+      prompt_version: text(config.prompt_version),
+      upload_limit_mb: asCount(config.upload_limit_mb),
+    },
+  };
+}
+
 function StatTile({ value, label }: { value: string; label: string }) {
   return (
     <div className="stat-tile">
@@ -764,47 +752,14 @@ function StatTile({ value, label }: { value: string; label: string }) {
   );
 }
 
-function SystemTab({ open }: { open: boolean }) {
-  const [stats, setStats] = useState<AdminStats | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const statsRef = useRef<AdminStats | null>(null);
-  const requestRef = useRef(0);
+function SystemTab() {
+  const statsQuery = useQuery(api.estadisticas.sistema);
+  const stats = useMemo(
+    () => (statsQuery === undefined ? null : normalizeStats(statsQuery)),
+    [statsQuery],
+  );
 
-  useEffect(() => {
-    statsRef.current = stats;
-  }, [stats]);
-
-  const refreshStats = useCallback(async (opts?: { silent?: boolean }) => {
-    const silent = opts?.silent ?? false;
-    const requestId = ++requestRef.current;
-    if (!silent) {
-      setLoading(true);
-      setLoadError(null);
-    }
-    try {
-      const data = await fetchStats();
-      if (requestRef.current !== requestId) return;
-      setStats(data);
-      setLoadError(null);
-    } catch (err) {
-      if (requestRef.current !== requestId) return;
-      if (!silent) {
-        setLoadError(
-          err instanceof Error ? err.message : 'No se pudo leer el estado del sistema.',
-        );
-      }
-    } finally {
-      if (!silent && requestRef.current === requestId) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    void refreshStats({ silent: statsRef.current !== null });
-  }, [open, refreshStats]);
-
-  if (loading && stats === null) {
+  if (stats === null) {
     return (
       <div className="settings-tabpanel">
         <div className="users-skeleton" role="status" aria-label="Cargando el estado del sistema">
@@ -820,28 +775,11 @@ function SystemTab({ open }: { open: boolean }) {
     );
   }
 
-  if (stats === null) {
-    return (
-      <div className="settings-tabpanel">
-        <div className="settings-empty">
-          <span className="settings-empty-icon" aria-hidden="true">
-            <IconAlert size={20} />
-          </span>
-          <p className="settings-empty-title">No disponible</p>
-          <p>{loadError ?? 'No se pudo leer el estado del sistema.'}</p>
-          <button type="button" className="docs-retry-btn" onClick={() => void refreshStats()}>
-            Reintentar
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   const { index, activity, config } = stats;
   const configRows: Array<{ key: string; value: string }> = [
     { key: 'Modelo', value: config.model || 'Sin dato' },
     { key: 'Embeddings', value: config.embedding_model || 'Sin dato' },
-    { key: 'Saltos máximos del agente', value: num(config.max_hops) },
+    { key: 'Versión del prompt', value: config.prompt_version || 'Sin dato' },
     { key: 'Límite de subida', value: `${num(config.upload_limit_mb)} MB` },
   ];
 
@@ -883,6 +821,12 @@ function SystemTab({ open }: { open: boolean }) {
 
 /* ======================================================================
    Pestaña 3: Mi cuenta (todos los roles)
+
+   Ya no hay formulario de cambio de contraseña: con Supabase se hacía con
+   `updateUser` desde el cliente, y el proveedor Password de Convex Auth no
+   tiene un flujo de cambio con sesión (solo `reset` por código enviado al
+   correo, que exige configurar un proveedor de correo). Cuando exista ese
+   flujo, vuelve aquí.
    ====================================================================== */
 
 interface AccountTabProps {
@@ -897,44 +841,6 @@ function AccountTab({ userEmail, role, onSignOut }: AccountTabProps) {
   // localStorage al montar, asi que refleja la eleccion real aunque el panel
   // se abra despues de una recarga.
   const [tema, setTema] = useState<Tema>(() => leerTema());
-  const [password, setPassword] = useState('');
-  const [repeat, setRepeat] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
-
-  const passwordId = useId();
-  const repeatId = useId();
-
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (busy) return;
-    setError(null);
-    setInfo(null);
-
-    if (password.length < MIN_PASSWORD) {
-      setError(`La contraseña debe tener al menos ${MIN_PASSWORD} caracteres.`);
-      return;
-    }
-    if (password !== repeat) {
-      setError('Las dos contraseñas no coinciden.');
-      return;
-    }
-
-    setBusy(true);
-    try {
-      const result = await updatePassword(password);
-      if (!result.ok) {
-        setError(result.message);
-        return;
-      }
-      setPassword('');
-      setRepeat('');
-      setInfo('Tu contraseña quedó actualizada.');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <div className="settings-tabpanel settings-scroll">
@@ -977,68 +883,6 @@ function AccountTab({ userEmail, role, onSignOut }: AccountTabProps) {
         </div>
       </section>
 
-      <form className="auth-form account-form" onSubmit={(e) => void handleSubmit(e)} noValidate>
-        <h3 className="stats-title">Cambiar contraseña</h3>
-
-        <div className="auth-field">
-          <label className="auth-label" htmlFor={passwordId}>
-            Nueva contraseña
-          </label>
-          <input
-            id={passwordId}
-            className="auth-input"
-            type="password"
-            autoComplete="new-password"
-            placeholder={`Mínimo ${MIN_PASSWORD} caracteres`}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            disabled={busy}
-            required
-          />
-        </div>
-
-        <div className="auth-field">
-          <label className="auth-label" htmlFor={repeatId}>
-            Repite la contraseña
-          </label>
-          <input
-            id={repeatId}
-            className="auth-input"
-            type="password"
-            autoComplete="new-password"
-            placeholder="La misma otra vez"
-            value={repeat}
-            onChange={(e) => setRepeat(e.target.value)}
-            disabled={busy}
-            required
-          />
-        </div>
-
-        {error !== null && (
-          <p className="auth-error" role="alert">
-            <IconAlert size={14} />
-            <span>{error}</span>
-          </p>
-        )}
-
-        {info !== null && (
-          <p className="auth-info" role="status">
-            {info}
-          </p>
-        )}
-
-        <button type="submit" className="auth-submit" disabled={busy}>
-          {busy ? (
-            <>
-              <IconSpinner size={15} />
-              <span>Guardando…</span>
-            </>
-          ) : (
-            <span>Guardar contraseña</span>
-          )}
-        </button>
-      </form>
-
       <button type="button" className="settings-signout" onClick={onSignOut}>
         <IconLogout size={15} />
         <span>Cerrar sesión</span>
@@ -1054,10 +898,10 @@ function AccountTab({ userEmail, role, onSignOut }: AccountTabProps) {
 interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
-  /** Rol de GET /api/me; null mientras no se conoce (se asume lector). */
+  /** Rol de usuarios.yo; null mientras no se conoce (se asume lector). */
   role: UserRole | null;
   /** id del usuario de la sesión: su fila se marca "Tú" y no tiene acción. */
-  currentUserId: string | null;
+  currentUserId: Id<'users'> | null;
   userEmail: string;
   onSignOut: () => void;
 }
@@ -1077,9 +921,9 @@ export function SettingsPanel({
   const grabberRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
 
-  // El rol llega asíncrono (GET /api/me) y puede cambiar de usuario: la
-  // pestaña por defecto se recalcula al conocerlo, y un lector nunca se
-  // queda mirando una pestaña de admin.
+  // El rol llega asíncrono (usuarios.yo) y puede cambiar: la pestaña por
+  // defecto se recalcula al conocerlo, y un lector nunca se queda mirando una
+  // pestaña de admin.
   useEffect(() => {
     setTab(role === 'admin' ? 'usuarios' : 'cuenta');
   }, [role]);
@@ -1181,7 +1025,7 @@ export function SettingsPanel({
           {isAdmin && tab === 'usuarios' && (
             <UsersTab open={open} currentUserId={currentUserId} />
           )}
-          {isAdmin && tab === 'sistema' && <SystemTab open={open} />}
+          {isAdmin && tab === 'sistema' && <SystemTab />}
           {(!isAdmin || tab === 'cuenta') && (
             <AccountTab userEmail={userEmail} role={role} onSignOut={onSignOut} />
           )}

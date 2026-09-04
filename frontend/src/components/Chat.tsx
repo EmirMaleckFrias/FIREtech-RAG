@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { CitationRef } from '../lib/markdown';
 import type { ChatMessage, ModoPensamiento } from '../types';
-import { IconCheck, IconChevronDown, IconArrowUp, IconStop } from './icons';
+import { IconArrowUp, IconCheck, IconChevronDown, IconSpinner } from './icons';
 import { MessageItem } from './MessageItem';
 import { WelcomeIntro, WelcomeSuggestions } from './Welcome';
 
@@ -14,7 +14,6 @@ interface ChatProps {
   onSend: (text: string) => void;
   modo: ModoPensamiento;
   onModoChange: (modo: ModoPensamiento) => void;
-  onStop: () => void;
   onFeedback: (msg: ChatMessage, rating: 1 | -1) => void;
   onCitation: (msgLocalId: string, ref: CitationRef) => void;
   onShowSources: (msgLocalId: string) => void;
@@ -57,7 +56,6 @@ export function Chat({
   onSend,
   modo,
   onModoChange,
-  onStop,
   onFeedback,
   onCitation,
   onShowSources,
@@ -92,10 +90,10 @@ export function Chat({
     };
   }, [modoMenuAbierto]);
 
-  // Autoscroll mientras llegan tokens, salvo que el usuario haya subido.
-  // Suave solo en saltos discretos (nuevo par de mensajes); durante el goteo
-  // de tokens el ajuste directo ya se percibe continuo y no pelea con el
-  // animador de scroll del navegador.
+  // Autoscroll mientras el asistente avanza (plan, hops, respuesta), salvo
+  // que el usuario haya subido. Suave solo en saltos discretos (nuevo par de
+  // mensajes); en las actualizaciones intermedias el ajuste directo ya se
+  // percibe continuo y no pelea con el animador de scroll del navegador.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -326,14 +324,18 @@ export function Chat({
               )}
             </div>
             {isStreaming ? (
+              /* El agente corre en el servidor y el contrato no tiene forma de
+                 cancelarlo, asi que no se ofrece un "detener" que no haria
+                 nada: el boton espera, y la respuesta llega aunque se cierre
+                 la pestaña. */
               <button
                 type="button"
-                className="send-btn send-stop"
-                onClick={onStop}
-                title="Detener la generación"
-                aria-label="Detener la generación"
+                className="send-btn"
+                disabled
+                title="El asistente está respondiendo"
+                aria-label="El asistente está respondiendo"
               >
-                <IconStop />
+                <IconSpinner />
               </button>
             ) : (
               <button

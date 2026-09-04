@@ -16,6 +16,7 @@
 //   cifra sobre 3 afirmaciones invita a compararla entre respuestas como si
 //   fuera una nota, y no lo es.
 import { useState } from 'react';
+import { puntosNoUsados } from '../lib/cobertura';
 import type { Afirmacion, Veredicto, Verificacion } from '../types';
 import { IconAlert, IconCheck, IconChevronDown } from './icons';
 
@@ -43,6 +44,16 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
   // Abre solo si hay algo que mirar: lo limpio no interrumpe.
   const [abierto, setAbierto] = useState(problemas.length > 0);
 
+  // Puntos del plan con evidencia recuperada que la respuesta no uso. No
+  // cambia el color ni abre el panel (no es un fallo de fidelidad: nada de lo
+  // dicho es falso), pero se dice en la cabecera porque es evidencia que
+  // existe en los documentos y la medica no la esta viendo en el texto.
+  const noUsados = puntosNoUsados(informe.cobertura);
+  const avisoNoUsados =
+    noUsados > 0
+      ? `evidencia disponible no usada en ${noUsados} ${noUsados === 1 ? 'punto' : 'puntos'}`
+      : '';
+
   // Lista vacía = abstención legítima, y solo eso: una respuesta que afirma sin
   // citar YA NO llega aquí, llega con una afirmación de veredicto `sin_cita`
   // que se pinta en rojo como el fallo que es. Así que este caso es sobrio a
@@ -50,7 +61,9 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
   if (afirmaciones.length === 0) {
     return (
       <div className="verif verif-vacia">
-        <span className="verif-resumen">{informe.nota || 'Sin citas que verificar'}</span>
+        <span className="verif-resumen">
+          {[informe.nota || 'Sin citas que verificar', avisoNoUsados].filter(Boolean).join(' · ')}
+        </span>
       </div>
     );
   }
@@ -58,7 +71,7 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
   const sostenidas = cuenta(afirmaciones, 'sostenida');
   const limpio = problemas.length === 0;
 
-  const resumen = limpio
+  const resumenBase = limpio
     ? `${sostenidas} de ${afirmaciones.length} afirmaciones respaldadas por su fuente`
     : [
         cuenta(afirmaciones, 'sin_cita') > 0 && 'la respuesta no cita ninguna fuente',
@@ -72,6 +85,7 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
       ]
         .filter(Boolean)
         .join(' · ');
+  const resumen = [resumenBase, avisoNoUsados].filter(Boolean).join(' · ');
 
   return (
     <div className={`verif ${limpio ? 'verif-limpio' : 'verif-con-avisos'}`}>

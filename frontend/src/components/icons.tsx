@@ -247,3 +247,33 @@ export function IconLogout({ size = 15, ...props }: IconProps) {
     </svg>
   );
 }
+
+/** Circulo vacio: punto del plan pendiente de buscar. */
+export function IconCircle({ size = 14, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <circle cx="12" cy="12" r="8" />
+    </svg>
+  );
+}
+
+/** Circulo medio lleno: punto respondido solo parcialmente. */
+export function IconCircleHalf({ size = 14, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** Circulo con guion: el punto no esta en los documentos. Es informacion,
+ *  no un fallo, asi que no es una cruz ni un triangulo. */
+export function IconMinusCircle({ size = 14, ...props }: IconProps) {
+  return (
+    <svg {...base(size, { ...props, strokeWidth: 1.6 })}>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M8.5 12h7" />
+    </svg>
+  );
+}

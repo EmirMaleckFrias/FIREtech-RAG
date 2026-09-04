@@ -1,9 +1,20 @@
-# Lo que NO se sube a Vercel. La función Python solo necesita backend/app +
-# api/ (el builder de Python empaqueta todos los archivos subidos, así que
-# esto también controla el tamaño de la lambda). El frontend solo necesita
-# frontend/ sin node_modules ni dist (se reconstruye con buildCommand).
+# Lo que NO se sube a Vercel.
+#
+# Desde la migración a Convex, Vercel solo sirve el frontend estático: el
+# backend (funciones, base de datos, auth, vectores) vive en Convex y se
+# empuja desde el propio buildCommand (`npx convex deploy --cmd 'npm run
+# build'`), que además fija VITE_CONVEX_URL para el bundle. Ya no hay función
+# Python ni límite de 300 s ni de 250 MB que vigilar aquí. El build necesita
+# CONVEX_DEPLOY_KEY (clave de despliegue de PRODUCCIÓN) en las variables de
+# entorno del proyecto de Vercel.
 
-# Datos y documentación (pesados, irrelevantes en runtime)
+# El backend Python anterior y su punto de entrada serverless. Se conservan en
+# el repositorio como referencia del port mientras se verifica la migración,
+# pero no viajan al despliegue.
+backend/
+api/
+
+# Datos, documentación y esquema de la base anterior (Supabase)
 data/
 docs/
 evals/
@@ -15,19 +26,13 @@ scratch/
 *.pdf
 *.xlsx
 
-# Entornos y artefactos locales
-backend/.venv/
+# Artefactos locales
 frontend/node_modules/
 frontend/dist/
 __pycache__/
 *.pyc
 
-# Secretos: JAMÁS al bundle (las env se configuran en Vercel)
-backend/.env
-backend/.supabase_db_password.txt
+# Secretos: JAMÁS al bundle (las env se configuran en Vercel y en Convex)
 .env
-
-# Tests (no viajan al bundle)
-backend/tests/
-backend/requirements-dev.txt
-backend/pytest.ini
+.env*
+frontend/.env.local

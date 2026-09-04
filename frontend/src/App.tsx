@@ -1,50 +1,45 @@
+// Raíz de la aplicación. Dos capas:
+//
+// - `App` es la puerta: consulta a Convex Auth si hay sesión y decide entre el
+//   arranque, la pantalla de acceso y la app. También es quien cierra la
+//   sesión cuando el servidor deja de aceptar al usuario (acceso revocado por
+//   un administrador o sesión que ya no reconoce) y quien recuerda el motivo
+//   para que la pantalla de acceso lo explique.
+// - `Aplicacion` es la app en sí, montada solo con sesión. Todo su estado de
+//   datos son suscripciones (useQuery) y mutaciones (useMutation): no hay
+//   fetch, ni token que renovar, ni sondeo de salud, ni stream que parsear.
+//   El turno del asistente se sigue leyendo la fila del mensaje, que el agente
+//   va actualizando (estado, plan, hops, sources, content, verificacion).
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Session } from '@supabase/supabase-js';
-import {
-  fetchHealth,
-  fetchMe,
-  fetchSessionMessages,
-  fetchSessions,
-  normalizeSources,
-  onAccessRevoked,
-  onUnauthorized,
-  sendFeedback,
-  streamChat,
-} from './api';
-import { Chat } from './components/Chat';
+import { useConvexAuth } from '@convex-dev/auth/react';
+import { useConvexConnectionState, useMutation, useQueries, useQuery } from 'convex/react';
+import { api } from '../convex/_generated/api';
+import type { Id } from '../convex/_generated/dataModel';
 import { AuthScreen } from './components/AuthScreen';
+import { Chat } from './components/Chat';
 import { DocumentsPanel } from './components/DocumentsPanel';
 import { Header } from './components/Header';
+import { LimiteErrores } from './components/LimiteErrores';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SourcesPanel } from './components/SourcesPanel';
+import { avisarSiEsFatal, onSalidaForzada, useAcceso, type MotivoSalida } from './lib/auth';
+import { codigoDeError, mensajeDeError } from './lib/errores';
 import type { CitationRef } from './lib/markdown';
-import {
-  hasValidSession,
-  loadSession,
-  onSessionChange,
-  renewAccessToken,
-  signOut,
-} from './lib/session';
+import { mensajeDesdeDoc, type MensajeDoc } from './lib/mensajes';
 import type {
   ChatMessage,
-  Health,
+  EstadoConexion,
   Me,
   ModoPensamiento,
-  ServerMessage,
   SessionInfo,
   SourceFocus,
 } from './types';
 
-const HEALTH_INTERVAL_MS = 15_000;
-
-/**
- * Cada cuánto, como mucho, se pide un token nuevo ante 401 seguidos. Es solo
- * un freno para no martillear a Supabase: agotarlo NO cierra la sesión.
- */
-const RENEW_THROTTLE_MS = 10_000;
-/** 401 seguidos que se toleran creyendo a Supabase antes de cerrar sesión. */
-const MAX_RECHAZOS = 2;
+/** Cada cuánto se relee el reloj mientras hay un turno en curso. Sirve solo
+ *  para detectar un turno colgado (ver TURNO_MAX_MS en lib/mensajes.ts). */
+const RELOJ_MS = 15_000;
 
 function newLocalId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -53,88 +48,205 @@ function newLocalId(): string {
   return `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function displayName(session: Session | null): string {
-  const fullName = session?.user.user_metadata?.full_name;
-  if (typeof fullName === 'string' && fullName.trim() !== '') return fullName.trim();
-  const emailName = session?.user.email?.split('@')[0] ?? '';
+function displayName(email: string): string {
+  const emailName = email.split('@')[0] ?? '';
   const words = emailName.split(/[._-]+/).filter(Boolean);
   if (words.length === 0) return 'investigador';
   return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
 }
 
-function toChatMessage(server: ServerMessage): ChatMessage {
-  return {
-    localId: server.id || newLocalId(),
-    id: server.id || null,
-    role: server.role === 'user' ? 'user' : 'assistant',
-    content: server.content ?? '',
-    sources: normalizeSources(server.sources),
+/** Hora actual, releída cada `intervaloMs` mientras `activo`. */
+function useAhora(activo: boolean, intervaloMs: number): number {
+  const [ahora, setAhora] = useState(() => Date.now());
+  useEffect(() => {
+    if (!activo) return;
+    setAhora(Date.now());
+    const timer = window.setInterval(() => setAhora(Date.now()), intervaloMs);
+    return () => window.clearInterval(timer);
+  }, [activo, intervaloMs]);
+  return ahora;
+}
+
+/**
+ * Par de mensajes que se pinta mientras la mutación de envío está en vuelo y
+ * hasta que la suscripción entrega los mensajes reales. Sin él, entre pulsar
+ * Enter y que llegue la fila habría un instante sin nada, y en una
+ * conversación nueva además el cambio de sesión vaciaría el hilo un momento.
+ */
+interface Pendiente {
+  localId: string;
+  texto: string;
+  /** Id del mensaje del asistente, cuando la mutación ya respondió. */
+  messageId: Id<'messages'> | null;
+  /** La mutación falló: el par se queda con el motivo hasta el siguiente envío. */
+  error: string | null;
+  creadoEn: number;
+}
+
+function mensajesPendientes(p: Pendiente): ChatMessage[] {
+  const base = {
+    sources: [],
     hops: [],
+    plan: [],
     verificacion: null,
-    streaming: false,
-    error: null,
     feedback: null,
+    creadoEn: p.creadoEn,
   };
+  return [
+    {
+      ...base,
+      localId: `${p.localId}-u`,
+      id: null,
+      role: 'user',
+      content: p.texto,
+      estado: 'listo',
+      streaming: false,
+      error: null,
+    },
+    {
+      ...base,
+      localId: `${p.localId}-a`,
+      id: null,
+      role: 'assistant',
+      content: '',
+      estado: p.error === null ? 'pensando' : 'error',
+      streaming: p.error === null,
+      error: p.error,
+    },
+  ];
 }
 
 export default function App() {
-  // --- sesión de usuario (Supabase Auth) ---
-  // authLoading: se está leyendo la sesión persistida (evita el parpadeo de la
-  // pantalla de acceso al recargar con sesión válida).
-  const [authLoading, setAuthLoading] = useState(true);
-  const [session, setSession] = useState<Session | null>(null);
-  const [me, setMe] = useState<Me | null>(null);
+  const { isLoading, isAuthenticated } = useConvexAuth();
+  const { salir } = useAcceso();
+
+  /** La sesión dejó de valer sin que el usuario la cerrara. */
   const [expired, setExpired] = useState(false);
   /** Expulsado por bloqueo de la cuenta: la pantalla de acceso lo explica. */
   const [revoked, setRevoked] = useState(false);
 
-  const hasSessionRef = useRef(false);
-  const lastRenewRef = useRef(0);
-  // 401 seguidos tras haber intentado renovar. Ver handleUnauthorized.
-  const rechazosRef = useRef(0);
+  const estuvoDentroRef = useRef(false);
+  // Salidas que decide la app (botón, revocación): no son una caducidad.
+  const salidaAvisadaRef = useRef(false);
 
   useEffect(() => {
-    let alive = true;
-    void loadSession().then((s) => {
-      if (!alive) return;
-      setSession(s);
-      setAuthLoading(false);
-    });
-    // login, logout y TOKEN_REFRESHED (en esta y en otras pestañas)
-    const off = onSessionChange((s) => {
-      if (!alive) return;
-      setSession(s);
-      setAuthLoading(false);
-      if (s !== null) {
-        setExpired(false);
-        setRevoked(false); // quien entra de nuevo ya no arrastra el aviso
-      }
-    });
-    return () => {
-      alive = false;
-      off();
-    };
-  }, []);
+    if (isLoading) return;
+    if (isAuthenticated) {
+      estuvoDentroRef.current = true;
+      salidaAvisadaRef.current = false;
+      // Quien entra de nuevo ya no arrastra ningún aviso.
+      setExpired(false);
+      setRevoked(false);
+      return;
+    }
+    // Fuera. Si estábamos dentro y nadie pulsó salir ni nos echaron, la
+    // renovación del token falló: sesión caducada.
+    if (estuvoDentroRef.current && !salidaAvisadaRef.current) setExpired(true);
+    estuvoDentroRef.current = false;
+  }, [isLoading, isAuthenticated]);
 
-  useEffect(() => {
-    hasSessionRef.current = session !== null;
-  }, [session]);
+  const cerrarSesion = useCallback(
+    async (motivo: MotivoSalida | 'manual') => {
+      salidaAvisadaRef.current = true;
+      setRevoked(motivo === 'revocado');
+      setExpired(motivo === 'expirado');
+      await salir();
+    },
+    [salir],
+  );
 
-  const userId = session?.user.id ?? null;
-  const userEmail = session?.user.email ?? '';
+  // Acceso revocado o sesión no reconocida, detectados por cualquier query o
+  // mutación (ver lib/auth.ts): se sale al instante y se explica el motivo.
+  useEffect(() => onSalidaForzada((motivo) => void cerrarSesion(motivo)), [cerrarSesion]);
 
-  // --- estado global ---
-  const [health, setHealth] = useState<Health | null>(null);
-  const [healthError, setHealthError] = useState(false);
+  // Leyendo la sesión persistida: ni app ni pantalla de acceso todavía (con
+  // sesión válida el salto directo evita un parpadeo del formulario).
+  if (isLoading) {
+    return (
+      <div className="auth-boot" role="status" aria-label="Cargando">
+        <span className="auth-boot-dot" aria-hidden="true" />
+      </div>
+    );
+  }
 
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [sessionsLoaded, setSessionsLoaded] = useState(false);
-  const [sessionsError, setSessionsError] = useState(false);
+  // Sin sesión: solo la pantalla de acceso. Ninguna suscripción se abre
+  // hasta que haya sesión (Aplicacion no se monta).
+  if (!isAuthenticated) {
+    return <AuthScreen expired={expired} revoked={revoked} />;
+  }
 
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [loadingMessages, setLoadingMessages] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
+  const salirManual = () => void cerrarSesion('manual');
+  return (
+    <LimiteErrores onSignOut={salirManual}>
+      <Aplicacion onSignOut={salirManual} />
+    </LimiteErrores>
+  );
+}
+
+interface AplicacionProps {
+  onSignOut: () => void;
+}
+
+function Aplicacion({ onSignOut }: AplicacionProps) {
+  // --- identidad y rol ---
+  const yo = useQuery(api.usuarios.yo);
+  const me = useMemo<Me | null>(
+    () =>
+      yo
+        ? {
+            id: yo._id,
+            email: typeof yo.email === 'string' ? yo.email : '',
+            // Cualquier valor inesperado degrada al rol con menos permisos.
+            rol: yo.rol === 'admin' ? 'admin' : 'lector',
+          }
+        : null,
+    [yo],
+  );
+  const userEmail = me?.email ?? '';
+
+  // --- conexión (sustituye al sondeo de /api/health) ---
+  const conexion = useConvexConnectionState();
+  const estadoConexion: EstadoConexion = conexion.isWebSocketConnected
+    ? 'en_linea'
+    : conexion.hasEverConnected
+      ? 'sin_conexion'
+      : 'conectando';
+
+  // --- conversaciones ---
+  const sesionesQuery = useQuery(api.sesiones.listar);
+  const sessions = useMemo<SessionInfo[]>(
+    () =>
+      (sesionesQuery ?? []).map((s) => ({
+        id: s._id,
+        titulo: typeof s.titulo === 'string' ? s.titulo : '',
+        creadoEn: typeof s.creadoEn === 'number' ? s.creadoEn : 0,
+      })),
+    [sesionesQuery],
+  );
+
+  const [currentSessionId, setCurrentSessionId] = useState<Id<'sessions'> | null>(null);
+  // useQueries y no useQuery a propósito: useQuery relanza el error al pintar
+  // y lo atraparía el límite de errores, que vacía la app entera. Aquí el
+  // error es un valor. Importa porque `no_encontrado` es un caso normal: al
+  // borrar la conversación activa la suscripción refleja el borrado ANTES de
+  // que la mutación resuelva, y lo mismo pasa si se borra desde otra pestaña.
+  // Ese caso vuelve al estado vacío; cualquier otro fallo se pinta dentro del
+  // hilo, como hacía la carga con fetch.
+  const resultados = useQueries(
+    currentSessionId !== null
+      ? { mensajes: { query: api.mensajes.deSesion, args: { sessionId: currentSessionId } } }
+      : {},
+  );
+  const crudo: unknown = resultados.mensajes;
+  const errorMensajes = crudo instanceof Error ? crudo : null;
+  // deSesion devuelve los documentos de `messages` tal cual; el tipo
+  // estructural es el que lee mensajeDesdeDoc.
+  const mensajesQuery = Array.isArray(crudo) ? (crudo as MensajeDoc[]) : undefined;
+
+  const enviar = useMutation(api.mensajes.enviar);
+  const calificar = useMutation(api.mensajes.calificar);
+  const borrarSesion = useMutation(api.sesiones.borrar);
+
   // Modo de pensamiento elegido. Se recuerda entre recargas porque quien
   // trabaja con literatura suele quedarse en extendido toda la sesion.
   const [modo, setModo] = useState<ModoPensamiento>(() => {
@@ -144,6 +256,19 @@ export default function App() {
       return 'normal';
     }
   });
+
+  /** Valoraciones dadas en esta pestaña, por id de mensaje. La tabla
+   *  `feedback` es aparte y la query de mensajes puede no traerla. */
+  const [feedbackLocal, setFeedbackLocal] = useState<Record<string, 1 | -1>>({});
+
+  const [pendiente, setPendiente] = useState<Pendiente | null>(null);
+  // Copia del pendiente para las promesas en vuelo: si el usuario cambió de
+  // conversación mientras viajaba la mutación, su resultado ya no se aplica.
+  const pendienteRef = useRef<Pendiente | null>(null);
+  const fijarPendiente = useCallback((p: Pendiente | null) => {
+    pendienteRef.current = p;
+    setPendiente(p);
+  }, []);
 
   // Panel de fuentes: mensaje seleccionado + foco de cita.
   const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
@@ -162,387 +287,173 @@ export default function App() {
   const [docsOpen, setDocsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const abortRef = useRef<AbortController | null>(null);
-  const sessionRequestRef = useRef(0);
-
-  // --- salud del backend, con sondeo periódico ---
-  // Reutilizable: el panel de documentos la invoca tras indexar/borrar para
-  // refrescar el contador de productos del footer.
-  const refreshHealth = useCallback(async () => {
-    try {
-      const h = await fetchHealth();
-      setHealth(h);
-      setHealthError(false);
-    } catch {
-      setHealthError(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (userId === null) return; // sin sesión no hay app que vigilar
-    void refreshHealth();
-    const timer = setInterval(() => void refreshHealth(), HEALTH_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [refreshHealth, userId]);
-
-  // --- sesiones ---
-  const refreshSessions = useCallback(async () => {
-    try {
-      const list = await fetchSessions();
-      setSessions(list);
-      setSessionsError(false);
-      // Una petición con éxito significa que el token sirve: se olvida la
-      // cuenta de rechazos para no acumularla entre incidentes distintos.
-      rechazosRef.current = 0;
-    } catch {
-      setSessionsError(true);
-    } finally {
-      setSessionsLoaded(true);
-    }
-  }, []);
-
-  // Las conversaciones son privadas: solo se piden con sesión, y se vuelven a
-  // pedir al cambiar de usuario.
-  useEffect(() => {
-    if (userId === null) return;
-    void refreshSessions();
-  }, [refreshSessions, userId]);
-
-  // Reintento cuando el backend vuelve. Sin esto, un fallo de un segundo
-  // (un redeploy, un reinicio en local, la red del portátil) dejaba el error
-  // "¿Está el backend en marcha?" pegado en el sidebar hasta que alguien
-  // recargaba la página a mano: la carga solo se disparaba al montar o al
-  // cambiar de usuario. La sesión caducada NO pasa por aquí, la resuelve el
-  // ciclo de 401 (onUnauthorized) expulsando a la pantalla de acceso, así que
-  // lo único que llega hasta este punto es un fallo de transporte o un 5xx,
-  // que es exactamente lo que se puede reintentar solo.
-  useEffect(() => {
-    if (userId === null || !sessionsError || healthError || health === null) return;
-    void refreshSessions();
-  }, [userId, sessionsError, healthError, health, refreshSessions]);
-
-  // --- identidad y rol (GET /api/me) ---
-  useEffect(() => {
-    if (userId === null) return;
-    let alive = true;
-    void fetchMe()
-      .then((info) => {
-        if (alive) setMe(info);
-      })
-      .catch(() => {
-        // Sin /api/me no se conoce el rol: se asume el de menos permisos
-        // (el sidebar no pinta insignia y Documentos queda en solo lectura).
-        if (alive) setMe(null);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [userId]);
-
-  // Cambio de usuario o cierre de sesión: nada del usuario anterior sobrevive
-  // en memoria (mensajes, conversaciones, panel de fuentes).
-  useEffect(() => {
-    abortRef.current?.abort();
-    sessionRequestRef.current++;
-    setMessages([]);
-    setSessions([]);
-    setSessionsLoaded(false);
-    setSessionsError(false);
-    setCurrentSessionId(null);
-    setSelectedMsgId(null);
-    setSourceFocus(null);
-    setLoadingMessages(false);
-    if (userId === null) setMe(null);
-  }, [userId]);
-
-  /**
-   * 401 del backend. La sesión SOLO se cierra si de verdad murió: mientras el
-   * navegador conserve una sesión vigente se mantiene al usuario dentro, aunque
-   * el backend rechace peticiones (un 401 puede venir de un problema del
-   * servidor, no del usuario). Así, una vez dentro, solo se sale al pulsar
-   * cerrar sesión.
-   */
-  const handleUnauthorized = useCallback(async () => {
-    if (!hasSessionRef.current) return; // ya estamos fuera
-    const now = Date.now();
-    if (now - lastRenewRef.current > RENEW_THROTTLE_MS) {
-      lastRenewRef.current = now;
-      const token = await renewAccessToken();
-      if (token !== null) return; // token nuevo: la siguiente petición irá bien
-    }
-    // Una sesión que Supabase considera válida pero que el backend rechaza es,
-    // en la práctica, una sesión inválida: el usuario se queda "dentro" con
-    // TODAS las peticiones en 401, sin listado de conversaciones y sin poder
-    // preguntar, y sin nada que le explique por qué ni forma de salir. Ese
-    // punto muerto se daba porque aquí se cortaba en seco al confiar en
-    // hasValidSession(). Se le concede el beneficio de la duda un par de
-    // veces (un 401 aislado puede ser una carrera con la renovación del
-    // token), y si el backend insiste se cierra sesión igual.
-    if (await hasValidSession() && rechazosRef.current < MAX_RECHAZOS) {
-      rechazosRef.current += 1;
-      return;
-    }
-    rechazosRef.current = 0;
-    hasSessionRef.current = false;
-    setExpired(true);
-    await signOut();
-    setSession(null);
-  }, []);
-
-  useEffect(
-    () => onUnauthorized(() => void handleUnauthorized()),
-    [handleUnauthorized],
-  );
-
-  /**
-   * 403 con `code: "blocked"`: un administrador revocó el acceso de esta
-   * cuenta. Es la ÚNICA excepción a la regla de arriba y sale por la puerta
-   * contraria: aquí no se renueva el token ni se comprueba la sesión, porque
-   * el token sigue siendo válido y aun así no sirve de nada. Se cierra la
-   * sesión al instante y se explica el motivo en la pantalla de acceso.
-   *
-   * El backend manda su propio texto ("Tu acceso ha sido revocado"); la
-   * pantalla usa una copia más explícita sobre quién lo hizo y qué hacer.
-   */
-  const handleAccessRevoked = useCallback(async () => {
-    if (!hasSessionRef.current) return; // ya estamos fuera
-    hasSessionRef.current = false;
-    setExpired(false);
-    setRevoked(true);
-    setDocsOpen(false);
-    setSettingsOpen(false);
-    await signOut();
-    setSession(null);
-  }, []);
-
-  useEffect(
-    () => onAccessRevoked(() => void handleAccessRevoked()),
-    [handleAccessRevoked],
-  );
-
-  const handleSignOut = useCallback(async () => {
-    hasSessionRef.current = false;
-    setExpired(false);
-    setRevoked(false);
-    await signOut();
-    setSession(null);
-  }, []);
-
-  const stopStreaming = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
-
   const selectSession = useCallback(
-    async (id: string) => {
+    (id: Id<'sessions'>) => {
       if (id === currentSessionId) return;
-      stopStreaming();
-      const requestId = ++sessionRequestRef.current;
+      fijarPendiente(null);
       setCurrentSessionId(id);
       setSelectedMsgId(null);
       setSourceFocus(null);
-      setMessages([]);
-      setLoadingMessages(true);
-      try {
-        const serverMessages = await fetchSessionMessages(id);
-        if (sessionRequestRef.current !== requestId) return; // el usuario cambió de sesión
-        setMessages(serverMessages.map(toChatMessage));
-      } catch {
-        if (sessionRequestRef.current !== requestId) return;
-        setMessages([
-          {
-            localId: newLocalId(),
-            id: null,
-            role: 'assistant',
-            content: '',
-            sources: [],
-            hops: [],
-            verificacion: null,
-            streaming: false,
-            error: 'No se pudieron cargar los mensajes de esta conversación.',
-            feedback: null,
-          },
-        ]);
-      } finally {
-        if (sessionRequestRef.current === requestId) setLoadingMessages(false);
-      }
     },
-    [currentSessionId, stopStreaming],
+    [currentSessionId, fijarPendiente],
   );
 
   const newConversation = useCallback(() => {
-    stopStreaming();
-    sessionRequestRef.current++;
+    fijarPendiente(null);
     setCurrentSessionId(null);
-    setMessages([]);
     setSelectedMsgId(null);
     setSourceFocus(null);
-    setLoadingMessages(false);
-  }, [stopStreaming]);
+  }, [fijarPendiente]);
 
-  // --- helpers de mensajes ---
-  const updateMessage = useCallback(
-    (localId: string, fn: (m: ChatMessage) => ChatMessage) => {
-      setMessages((prev) => prev.map((m) => (m.localId === localId ? fn(m) : m)));
-    },
-    [],
+  // La conversación no se puede leer. Si es porque ya no existe (borrada aquí
+  // o desde otra pestaña), al estado vacío. Si el servidor echó al usuario,
+  // lib/auth cierra la sesión. El resto se pinta en el hilo (abajo).
+  useEffect(() => {
+    if (errorMensajes === null) return;
+    if (avisarSiEsFatal(errorMensajes)) return;
+    if (codigoDeError(errorMensajes) === 'no_encontrado') newConversation();
+  }, [errorMensajes, newConversation]);
+
+  // --- mensajes de la conversación actual ---
+  // El reloj solo corre mientras la fila de algún turno sigue abierta.
+  const turnoAbierto = (mensajesQuery ?? []).some(
+    (d) => d.role === 'assistant' && d.estado !== undefined && d.estado !== 'listo' && d.estado !== 'error',
   );
+  const ahora = useAhora(turnoAbierto, RELOJ_MS);
 
-  // --- envío con streaming SSE ---
+  const messages = useMemo<ChatMessage[]>(() => {
+    if (errorMensajes !== null && codigoDeError(errorMensajes) !== 'no_encontrado') {
+      return [
+        {
+          localId: 'carga-fallida',
+          id: null,
+          role: 'assistant',
+          content: '',
+          sources: [],
+          hops: [],
+          plan: [],
+          verificacion: null,
+          estado: 'error',
+          streaming: false,
+          error: mensajeDeError(
+            errorMensajes,
+            'No se pudieron cargar los mensajes de esta conversación.',
+          ),
+          feedback: null,
+          creadoEn: 0,
+        },
+      ];
+    }
+    const docs = mensajesQuery ?? [];
+    const lista = docs.map((d) => mensajeDesdeDoc(d, ahora, feedbackLocal[d._id] ?? null));
+    // El par optimista se retira en cuanto la suscripción trae el mensaje
+    // real, en el mismo render: sin parpadeo entre uno y otro.
+    if (
+      pendiente !== null &&
+      (pendiente.messageId === null || !docs.some((d) => d._id === pendiente.messageId))
+    ) {
+      lista.push(...mensajesPendientes(pendiente));
+    }
+    return lista;
+  }, [ahora, errorMensajes, feedbackLocal, mensajesQuery, pendiente]);
+
+  useEffect(() => {
+    if (pendiente === null || pendiente.messageId === null) return;
+    if ((mensajesQuery ?? []).some((d) => d._id === pendiente.messageId)) fijarPendiente(null);
+  }, [fijarPendiente, mensajesQuery, pendiente]);
+
+  // La conversación seleccionada dejó de existir (borrada desde otra pestaña
+  // o desde el propio panel): se vuelve al estado vacío en vez de quedarse
+  // mirando una lista que ya no se puede leer.
+  useEffect(() => {
+    if (currentSessionId === null || sesionesQuery === undefined || pendiente !== null) return;
+    if (sesionesQuery.some((s) => s._id === currentSessionId)) return;
+    setCurrentSessionId(null);
+    setSelectedMsgId(null);
+    setSourceFocus(null);
+  }, [currentSessionId, pendiente, sesionesQuery]);
+
+  const loadingMessages =
+    currentSessionId !== null &&
+    mensajesQuery === undefined &&
+    errorMensajes === null &&
+    pendiente === null;
+  // Composer bloqueado mientras el asistente trabaja en ESTA conversación.
+  // Otra conversación puede seguir usándose.
+  const isStreaming = messages.some((m) => m.role === 'assistant' && m.streaming);
+
+  // --- envío ---
   const handleSend = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       // loadingMessages bloquea el envío (el composer también se deshabilita
-      // en Chat): enviar durante la carga del historial descartaría esa carga
-      // y la conversación quedaría solo con el par nuevo.
+      // en Chat): enviar durante la carga del historial mezclaría el par
+      // nuevo con una lista que aún no ha llegado.
       if (!trimmed || isStreaming || loadingMessages) return;
 
-      const assistantLocalId = newLocalId();
-      const userMsg: ChatMessage = {
-        localId: newLocalId(),
-        id: null,
-        role: 'user',
-        content: trimmed,
-        sources: [],
-        hops: [],
-        verificacion: null,
-        streaming: false,
-        error: null,
-        feedback: null,
-      };
-      const draft: ChatMessage = {
-        localId: assistantLocalId,
-        id: null,
-        role: 'assistant',
-        content: '',
-        sources: [],
-        hops: [],
-        verificacion: null,
-        streaming: true,
-        error: null,
-        feedback: null,
-      };
-
-      // No hay cargas de mensajes en vuelo que invalidar: toda carga de
-      // selectSession mantiene loadingMessages en true mientras dura, y el
-      // guard de arriba impide llegar aquí en ese estado. Las cargas ya
-      // invalidadas (newConversation) se descartan por sessionRequestRef.
-
-      setMessages((prev) => [...prev, userMsg, draft]);
+      const localId = newLocalId();
+      const nuevo: Pendiente = { localId, texto: trimmed, messageId: null, error: null, creadoEn: Date.now() };
+      fijarPendiente(nuevo);
       setSelectedMsgId(null);
       setSourceFocus(null);
-      setIsStreaming(true);
-
-      const controller = new AbortController();
-      abortRef.current = controller;
-      let finished = false;
 
       try {
-        await streamChat(
-          currentSessionId,
-          trimmed,
-          {
-            onSession: (id) => {
-              setCurrentSessionId((prev) => prev ?? id);
-            },
-            onHop: (hop) => {
-              updateMessage(assistantLocalId, (m) => ({ ...m, hops: [...m.hops, hop] }));
-            },
-            onVerificacion: (informe) => {
-              updateMessage(assistantLocalId, (m) => ({ ...m, verificacion: informe }));
-            },
-            onSources: (incoming) => {
-              updateMessage(assistantLocalId, (m) => {
-                const merged = [...m.sources];
-                for (const s of incoming) {
-                  const dup = merged.some(
-                    (x) =>
-                      x.source_file === s.source_file &&
-                      x.page === s.page &&
-                      x.snippet === s.snippet,
-                  );
-                  if (!dup) merged.push(s);
-                }
-                return { ...m, sources: merged };
-              });
-            },
-            onToken: (t) => {
-              updateMessage(assistantLocalId, (m) => ({ ...m, content: m.content + t }));
-            },
-            onDone: (messageId) => {
-              finished = true;
-              // message_id puede venir "" si el backend no pudo persistir el
-              // mensaje: id null deja el feedback deshabilitado (MessageItem
-              // solo lo pinta con id, y handleFeedback exige id no vacío).
-              updateMessage(assistantLocalId, (m) => ({
-                ...m,
-                id: messageId || null,
-                streaming: false,
-              }));
-            },
-            onError: (detail) => {
-              finished = true;
-              updateMessage(assistantLocalId, (m) => ({
-                ...m,
-                streaming: false,
-                error: detail || 'Error del servidor durante la generación.',
-              }));
-            },
-          },
-          controller.signal,
+        // Crea la sesión si hace falta, inserta el par de mensajes (el del
+        // asistente en `pensando`) y agenda al agente. A partir de aquí todo
+        // llega por la suscripción a mensajes.deSesion.
+        const r = await enviar({
+          sessionId: currentSessionId ?? undefined,
+          texto: trimmed,
           modo,
-        );
-
-        // El stream terminó sin evento done/error (conexión cortada).
-        if (!finished) {
-          updateMessage(assistantLocalId, (m) =>
-            m.streaming
-              ? {
-                  ...m,
-                  streaming: false,
-                  error:
-                    m.content === ''
-                      ? 'La conexión se interrumpió antes de recibir la respuesta.'
-                      : 'La respuesta se interrumpió antes de completarse.',
-                }
-              : m,
-          );
-        }
+        });
+        if (pendienteRef.current?.localId !== localId) return; // el usuario cambió de conversación
+        setCurrentSessionId((prev) => prev ?? r.sessionId);
+        fijarPendiente({ ...nuevo, messageId: r.messageId });
       } catch (err) {
-        const aborted = controller.signal.aborted;
-        const detail =
-          err instanceof Error && err.message ? err.message : 'Error de red desconocido';
-        updateMessage(assistantLocalId, (m) => ({
-          ...m,
-          streaming: false,
-          error: aborted
-            ? m.content === ''
-              ? 'Generación detenida.'
-              : null
-            : `No se pudo completar la solicitud: ${detail}`,
-        }));
-      } finally {
-        if (abortRef.current === controller) abortRef.current = null;
-        setIsStreaming(false);
-        // El título de la sesión puede haberse creado/actualizado en el backend.
-        void refreshSessions();
+        if (pendienteRef.current?.localId !== localId) return;
+        if (avisarSiEsFatal(err)) return;
+        fijarPendiente({
+          ...nuevo,
+          error: mensajeDeError(err, 'No se pudo enviar la pregunta. Vuelve a intentarlo.'),
+        });
       }
     },
-    [currentSessionId, isStreaming, loadingMessages, refreshSessions, updateMessage],
+    [currentSessionId, enviar, fijarPendiente, isStreaming, loadingMessages, modo],
+  );
+
+  // --- borrado de conversación ---
+  const handleDeleteSession = useCallback(
+    async (id: Id<'sessions'>) => {
+      try {
+        await borrarSesion({ sessionId: id });
+      } catch (err) {
+        if (avisarSiEsFatal(err)) return;
+        throw new Error(mensajeDeError(err, 'No se pudo borrar la conversación.'));
+      }
+      if (currentSessionId === id) newConversation();
+    },
+    [borrarSesion, currentSessionId, newConversation],
   );
 
   // --- feedback ---
   const handleFeedback = useCallback(
     async (msg: ChatMessage, rating: 1 | -1) => {
-      if (!msg.id || msg.feedback !== null) return;
-      updateMessage(msg.localId, (m) => ({ ...m, feedback: rating }));
+      if (msg.id === null || msg.feedback !== null) return;
+      const id = msg.id;
+      setFeedbackLocal((prev) => ({ ...prev, [id]: rating }));
       try {
-        await sendFeedback(msg.id, rating);
-      } catch {
-        // revierte si el POST falla
-        updateMessage(msg.localId, (m) => ({ ...m, feedback: null }));
+        await calificar({ messageId: id, rating });
+      } catch (err) {
+        // revierte si el servidor lo rechaza
+        setFeedbackLocal((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        avisarSiEsFatal(err);
       }
     },
-    [updateMessage],
+    [calificar],
   );
 
   // --- panel de fuentes ---
@@ -598,26 +509,10 @@ export default function App() {
 
   const currentTitle =
     currentSessionId !== null
-      ? sessions.find((s) => s.id === currentSessionId)?.title ?? 'Conversación'
+      ? sessions.find((s) => s.id === currentSessionId)?.titulo || 'Conversación'
       : messages.length > 0
         ? 'Nueva conversación'
         : null;
-
-  // Leyendo la sesión persistida: ni app ni pantalla de acceso todavía (con
-  // sesión válida el salto directo evita un parpadeo del formulario).
-  if (authLoading) {
-    return (
-      <div className="auth-boot" role="status" aria-label="Cargando">
-        <span className="auth-boot-dot" aria-hidden="true" />
-      </div>
-    );
-  }
-
-  // Sin sesión: solo la pantalla de acceso. Ninguna llamada a /api/* sale
-  // hasta que haya token (los efectos están condicionados a userId).
-  if (session === null) {
-    return <AuthScreen expired={expired} revoked={revoked} />;
-  }
 
   return (
     <div className="app">
@@ -625,15 +520,14 @@ export default function App() {
         open={sidebarOpen}
         sessions={sessions}
         currentSessionId={currentSessionId}
-        loaded={sessionsLoaded}
-        loadError={sessionsError}
-        health={health}
-        healthError={healthError}
+        loaded={sesionesQuery !== undefined}
+        conexion={estadoConexion}
         documentsOpen={docsOpen}
         settingsOpen={settingsOpen}
         userEmail={userEmail}
-        role={me?.role ?? null}
-        onSelect={(id) => void selectSession(id)}
+        role={me?.rol ?? null}
+        onSelect={selectSession}
+        onDelete={handleDeleteSession}
         onNew={newConversation}
         onOpenDocuments={openDocuments}
         onOpenSettings={openSettings}
@@ -655,7 +549,7 @@ export default function App() {
           onToggleSources={() => setSourcesOpen((v) => !v)}
         />
         <Chat
-          userName={displayName(session)}
+          userName={displayName(userEmail)}
           messages={messages}
           loadingMessages={loadingMessages}
           isStreaming={isStreaming}
@@ -670,7 +564,6 @@ export default function App() {
               // Sin almacenamiento (modo privado): el modo dura la sesion.
             }
           }}
-          onStop={stopStreaming}
           onFeedback={(m, r) => void handleFeedback(m, r)}
           onCitation={handleCitation}
           onShowSources={handleShowSources}
@@ -694,13 +587,7 @@ export default function App() {
       {docsOpen && (
         <div className="scrim scrim-docs" onClick={closeDocuments} aria-hidden="true" />
       )}
-      <DocumentsPanel
-        open={docsOpen}
-        onClose={closeDocuments}
-        onHealthRefresh={() => void refreshHealth()}
-        uploadLimitMb={health?.upload_limit_mb}
-        canManage={me?.role === 'admin'}
-      />
+      <DocumentsPanel open={docsOpen} onClose={closeDocuments} canManage={me?.rol === 'admin'} />
 
       {settingsOpen && (
         <div className="scrim scrim-docs" onClick={closeSettings} aria-hidden="true" />
@@ -708,10 +595,10 @@ export default function App() {
       <SettingsPanel
         open={settingsOpen}
         onClose={closeSettings}
-        role={me?.role ?? null}
-        currentUserId={userId}
+        role={me?.rol ?? null}
+        currentUserId={me?.id ?? null}
         userEmail={userEmail}
-        onSignOut={() => void handleSignOut()}
+        onSignOut={onSignOut}
       />
     </div>
   );

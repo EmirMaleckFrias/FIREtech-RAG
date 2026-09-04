@@ -1,18 +1,20 @@
-// Slide-over de gestión de documentos indexados (SPEC.md, "Gestión de
-// documentos"). Siempre montado,como SourcesPanel, y oculto vía la clase
-// docs-closed, así el estado de subida/polling sobrevive a cerrar el panel.
+// Slide-over de gestión de documentos indexados. Siempre montado, como
+// SourcesPanel, y oculto vía la clase docs-closed, así el estado de una subida
+// sobrevive a cerrar el panel.
 //
 // Decisiones:
-// - Roles (SPEC.md, "Autenticación multiusuario"): todos ven la lista completa,
-//   pero subir y borrar es exclusivo de admin. Con canManage en false no se
-//   monta ni la dropzone ni los botones de borrar: la UI no ofrece nada que el
-//   backend vaya a rechazar con 403.
-// - Progreso de subida REAL con XMLHttpRequest (ver uploadDocument en api.ts);
-//   si el navegador no puede computarlo, barra indeterminada con shimmer.
-// - Polling de GET /api/documents cada 4 s SOLO mientras haya documentos en
-//   "processing" y (el panel esté abierto o la subida la iniciamos nosotros).
-//   Tres fallos seguidos del sondeo lo detienen (aviso con "Reintentar"):
-//   nunca hay polling infinito contra un backend caído.
+// - Roles: todos ven la lista completa, pero subir, reindexar y borrar es
+//   exclusivo de admin. Con canManage en false no se monta ni la dropzone ni
+//   los botones: la UI no ofrece nada que el servidor vaya a rechazar.
+// - La lista es una suscripción (documentos.listar): el paso de "procesando"
+//   a "listo" llega solo. Desaparece el sondeo cada 4 s y su tope de fallos,
+//   que existían porque el backend HTTP no podía avisar.
+// - Subida en dos pasos: el fichero va al almacenamiento de Convex por una
+//   URL firmada (con progreso REAL vía XMLHttpRequest, ver lib/subida.ts) y
+//   después documentos.registrar recibe el storageId, el nombre y el sha256
+//   calculado en el navegador. Como el original queda guardado, reindexar ya
+//   no puede fallar por "el archivo ya no está": se retira el camino de
+//   resubida que existía por el disco efímero de Vercel.
 // - Focus trap ligero: Tab cicla dentro del panel, Escape cierra (o cancela
 //   la confirmación de borrado si está abierta) y el foco vuelve al botón
 //   que abrió el panel.
@@ -21,21 +23,21 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
   type DragEvent,
   type KeyboardEvent,
 } from 'react';
-import {
-  deleteDocument,
-  fetchDocuments,
-  FileNotStoredError,
-  reindexDocument,
-  uploadDocument,
-} from '../api';
+import { useMutation, useQuery } from 'convex/react';
+import { api } from '../../convex/_generated/api';
+import type { Id } from '../../convex/_generated/dataModel';
+import { avisarSiEsFatal } from '../lib/auth';
+import { mensajeDeError } from '../lib/errores';
+import { sha256De, subirFichero } from '../lib/subida';
 import { useSheetDrag } from '../lib/useSheetDrag';
-import type { DocumentInfo } from '../types';
+import type { DocumentInfo, DocumentStatus } from '../types';
 import {
   IconAlert,
   IconCheck,
@@ -48,13 +50,12 @@ import {
   IconX,
 } from './icons';
 
-
-const POLL_INTERVAL_MS = 4_000;
-const MAX_POLL_FAILURES = 3;
 const JUST_READY_MS = 1_800;
 const ALLOWED_EXT_RE = /\.(pdf|docx|xlsx|csv|txt|md)$/i;
-/** Fallback si /api/health aún no anuncia upload_limit_mb (backends antiguos). */
-const DEFAULT_UPLOAD_LIMIT_MB = 25;
+/** Mismo valor que `limiteSubidaMb` en convex/lib/config.ts (18: el tope de
+ *  una petición HTTP de Convex son 20 MB, con margen para el sobre). Se usa
+ *  mientras estadisticas.sistema no anuncia el del despliegue. */
+const DEFAULT_UPLOAD_LIMIT_MB = 18;
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), a[href], input:not([disabled]):not([type="file"]), ' +
@@ -63,26 +64,53 @@ const FOCUSABLE_SELECTOR =
 interface DocumentsPanelProps {
   open: boolean;
   onClose: () => void;
-  /** Refresca /api/health (contador del footer) cuando cambia el índice. */
-  onHealthRefresh: () => void;
   /**
-   * Límite de subida en MB anunciado por GET /api/health (upload_limit_mb:
-   * 4 en serverless, 25 en local). undefined mientras no llegue el health o
-   * si el backend no lo expone: se asume DEFAULT_UPLOAD_LIMIT_MB.
-   */
-  uploadLimitMb?: number;
-  /**
-   * Solo el rol `admin` sube y borra (el backend responde 403 al resto). Un
-   * lector ve la lista completa, sin dropzone ni botones de borrar. También
-   * es false mientras no se conoce el rol: se asume el menor permiso.
+   * Solo el rol `admin` sube, reindexa y borra. Un lector ve la lista
+   * completa, sin dropzone ni botones. También es false mientras no se conoce
+   * el rol: se asume el menor permiso.
    */
   canManage: boolean;
 }
+
+/** Lo que el frontend lee de un registro de `documents`. Tipo estructural,
+ *  para que un campo que la query añada no rompa nada. */
+interface DocumentoDoc {
+  _id: Id<'documents'>;
+  fileName: string;
+  pages?: number;
+  chunks?: number;
+  status?: string;
+  error?: string | null;
+  ingestadoEn?: number;
+  _creationTime?: number;
+}
+
+function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
+  const status: DocumentStatus =
+    d.status === 'processing' || d.status === 'failed' ? d.status : 'ready';
+  return {
+    id: d._id,
+    fileName: d.fileName,
+    pages: typeof d.pages === 'number' ? d.pages : 0,
+    chunks: typeof d.chunks === 'number' ? d.chunks : 0,
+    status,
+    error: typeof d.error === 'string' && d.error !== '' ? d.error : null,
+    ingestadoEn:
+      typeof d.ingestadoEn === 'number'
+        ? d.ingestadoEn
+        : typeof d._creationTime === 'number'
+          ? d._creationTime
+          : 0,
+  };
+}
+
+type FaseSubida = 'subiendo' | 'registrando';
 
 interface UploadState {
   fileName: string;
   /** Fracción 0..1, o null si el navegador no computa el progreso. */
   progress: number | null;
+  fase: FaseSubida;
 }
 
 function validateFile(file: File, docs: DocumentInfo[] | null, limitMb: number): string | null {
@@ -93,69 +121,66 @@ function validateFile(file: File, docs: DocumentInfo[] | null, limitMb: number):
     const mb = (file.size / (1024 * 1024)).toFixed(1);
     return `El archivo pesa ${mb} MB y el máximo permitido es ${limitMb} MB.`;
   }
-  if (docs?.some((d) => d.file_name === file.name)) {
+  if (docs?.some((d) => d.fileName === file.name)) {
     return 'Ya existe un documento con ese nombre. Bórralo antes de volver a subirlo.';
   }
   return null;
 }
 
-function ingestedTitle(iso: string): string | undefined {
-  if (!iso) return undefined;
-  const d = new Date(iso);
+function ingestedTitle(ms: number): string | undefined {
+  if (ms <= 0) return undefined;
+  const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return undefined;
   return `Indexado el ${d.toLocaleString('es')}`;
 }
 
-export function DocumentsPanel({
-  open,
-  onClose,
-  onHealthRefresh,
-  uploadLimitMb,
-  canManage,
-}: DocumentsPanelProps) {
-  const limitMb = uploadLimitMb ?? DEFAULT_UPLOAD_LIMIT_MB;
-  const [docs, setDocs] = useState<DocumentInfo[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+export function DocumentsPanel({ open, onClose, canManage }: DocumentsPanelProps) {
+  // Suscripción permanente: barata, y así el panel abre con la lista ya
+  // puesta y ve pasar a "listo" un documento subido con el panel cerrado.
+  const docsQuery = useQuery(api.documentos.listar);
+  // El límite de subida lo anuncia el despliegue. Solo lo necesita quien
+  // sube, y solo con el panel abierto: es un agregado sobre varias tablas y
+  // no merece una suscripción viva permanente.
+  const stats = useQuery(api.estadisticas.sistema, open && canManage ? {} : 'skip');
+  const limiteAnunciado: unknown = stats?.config?.upload_limit_mb;
+  const limitMb =
+    typeof limiteAnunciado === 'number' && limiteAnunciado > 0
+      ? limiteAnunciado
+      : DEFAULT_UPLOAD_LIMIT_MB;
+
+  const urlDeSubida = useMutation(api.documentos.urlDeSubida);
+  const registrar = useMutation(api.documentos.registrar);
+  const reindexar = useMutation(api.documentos.reindexar);
+  const borrar = useMutation(api.documentos.borrar);
+
+  // Más recientes primero, como devolvía el backend anterior.
+  const docs = useMemo<DocumentInfo[] | null>(
+    () =>
+      docsQuery === undefined
+        ? null
+        : docsQuery.map(normalizeDocumento).sort((a, b) => b.ingestadoEn - a.ingestadoEn),
+    [docsQuery],
+  );
 
   const [upload, setUpload] = useState<UploadState | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const [confirmFor, setConfirmFor] = useState<string | null>(null);
+  const [confirmFor, setConfirmFor] = useState<Id<'documents'> | null>(null);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [reindexing, setReindexing] = useState<Set<string>>(new Set());
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [openErrors, setOpenErrors] = useState<Set<string>>(new Set());
   const [justReady, setJustReady] = useState<Set<string>>(new Set());
-  const [pollBroken, setPollBroken] = useState(false);
 
   const panelRef = useRef<HTMLElement>(null);
   const grabberRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Documento cuya resubida se pidió desde su fila: al elegir el archivo se
-  // borra su registro fallido antes de subir, porque /upload da 409 si el
-  // nombre ya existe. null = subida normal.
-  const reuploadForRef = useRef<string | null>(null);
   const dragCounterRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
-  /** Nombres subidos desde esta sesión: su polling sigue aunque se cierre el panel. */
-  const ownUploadsRef = useRef<Set<string>>(new Set());
-  const pollFailsRef = useRef(0);
-  const docsRef = useRef<DocumentInfo[] | null>(null);
+  const prevDocsRef = useRef<DocumentInfo[] | null>(null);
   const readyTimersRef = useRef<number[]>([]);
-  /**
-   * Secuenciación de refreshDocs (mismo patrón que sessionRequestRef en
-   * App.tsx): cada petición toma un id; si al resolver ya no es el vigente,
-   * su resultado se descarta. Un DELETE exitoso incrementa la secuencia para
-   * que un GET /api/documents en vuelo no "resucite" el documento borrado.
-   */
-  const docsRequestRef = useRef(0);
-
-  useEffect(() => {
-    docsRef.current = docs;
-  }, [docs]);
 
   // Bottom sheet en móvil: swipe-down sobre el asa cierra el panel.
   useSheetDrag(panelRef, grabberRef, onClose);
@@ -169,71 +194,30 @@ export function DocumentsPanel({
     [],
   );
 
-  const refreshDocs = useCallback(
-    async (opts?: { silent?: boolean }) => {
-      const silent = opts?.silent ?? false;
-      const requestId = ++docsRequestRef.current;
-      if (!silent) {
-        setLoading(true);
-        setLoadError(null);
-      }
-      try {
-        const list = await fetchDocuments();
-        // Respuesta obsoleta (hubo un DELETE o un refresh más reciente).
-        if (docsRequestRef.current !== requestId) return;
-        pollFailsRef.current = 0;
-        setPollBroken(false);
-
-        // Transiciones processing → ready: micro-animación de éxito y
-        // refresco del contador de productos del footer (/api/health).
-        const prev = docsRef.current;
-        if (prev !== null) {
-          const prevStatus = new Map(prev.map((d) => [d.file_name, d.status]));
-          const becameReady = list
-            .filter(
-              (d) => d.status === 'ready' && prevStatus.get(d.file_name) === 'processing',
-            )
-            .map((d) => d.file_name);
-          if (becameReady.length > 0) {
-            setJustReady((s) => new Set([...s, ...becameReady]));
-            for (const name of becameReady) {
-              const timer = window.setTimeout(() => {
-                setJustReady((s) => {
-                  const next = new Set(s);
-                  next.delete(name);
-                  return next;
-                });
-              }, JUST_READY_MS);
-              readyTimersRef.current.push(timer);
-            }
-            onHealthRefresh();
-          }
-        }
-
-        setDocs(list);
-        setLoadError(null);
-      } catch (err) {
-        if (docsRequestRef.current !== requestId) return;
-        if (silent) {
-          pollFailsRef.current += 1;
-          if (pollFailsRef.current >= MAX_POLL_FAILURES) setPollBroken(true);
-        } else {
-          setLoadError(
-            err instanceof Error ? err.message : 'No se pudo cargar la lista de documentos.',
-          );
-        }
-      } finally {
-        if (!silent && docsRequestRef.current === requestId) setLoading(false);
-      }
-    },
-    [onHealthRefresh],
-  );
-
-  // Al abrir: primera carga con skeleton; si ya hay datos, refresco silencioso.
+  // Transiciones processing -> ready: micro-animación de éxito. Se detectan
+  // comparando cada lista con la anterior, que es lo que antes hacía el
+  // sondeo; ahora las entrega la suscripción.
   useEffect(() => {
-    if (!open) return;
-    void refreshDocs({ silent: docsRef.current !== null });
-  }, [open, refreshDocs]);
+    const prev = prevDocsRef.current;
+    prevDocsRef.current = docs;
+    if (prev === null || docs === null) return;
+    const prevStatus = new Map(prev.map((d) => [d.id, d.status]));
+    const becameReady = docs
+      .filter((d) => d.status === 'ready' && prevStatus.get(d.id) === 'processing')
+      .map((d) => d.id);
+    if (becameReady.length === 0) return;
+    setJustReady((s) => new Set([...s, ...becameReady]));
+    for (const id of becameReady) {
+      const timer = window.setTimeout(() => {
+        setJustReady((s) => {
+          const next = new Set(s);
+          next.delete(id);
+          return next;
+        });
+      }, JUST_READY_MS);
+      readyTimersRef.current.push(timer);
+    }
+  }, [docs]);
 
   // Foco: al abrir entra al botón de cerrar; al cerrar vuelve a donde estaba.
   useEffect(() => {
@@ -245,29 +229,13 @@ export function DocumentsPanel({
     };
   }, [open]);
 
-  // Polling acotado: cada 4 s solo mientras haya "processing" y tenga sentido.
-  const anyProcessing = docs?.some((d) => d.status === 'processing') ?? false;
-  const hasOwnPending =
-    docs?.some(
-      (d) => d.status === 'processing' && ownUploadsRef.current.has(d.file_name),
-    ) ?? false;
-
-  useEffect(() => {
-    if (pollBroken || !anyProcessing) return;
-    if (!open && !hasOwnPending) return;
-    const timer = window.setInterval(() => {
-      void refreshDocs({ silent: true });
-    }, POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [anyProcessing, hasOwnPending, open, pollBroken, refreshDocs]);
-
   // --- subida ---
   const startUpload = useCallback(
     async (file: File) => {
       if (uploadAbortRef.current !== null) return; // ya hay una subida en curso
       setUploadError(null);
 
-      const invalid = validateFile(file, docsRef.current, limitMb);
+      const invalid = validateFile(file, docs, limitMb);
       if (invalid !== null) {
         setUploadError(invalid);
         return;
@@ -275,149 +243,126 @@ export function DocumentsPanel({
 
       const controller = new AbortController();
       uploadAbortRef.current = controller;
-      setUpload({ fileName: file.name, progress: 0 });
+      setUpload({ fileName: file.name, progress: 0, fase: 'subiendo' });
 
       try {
-        const accepted = await uploadDocument(
+        // La URL firmada y el hash se piden a la vez: el hash recorre el
+        // fichero en memoria y no depende de la red.
+        const [url, sha256] = await Promise.all([urlDeSubida({}), sha256De(file)]);
+        if (controller.signal.aborted) throw new DOMException('Subida cancelada', 'AbortError');
+        const storageId = await subirFichero(
+          url,
           file,
           (fraction) => {
             setUpload((u) => (u === null ? u : { ...u, progress: fraction }));
           },
           controller.signal,
         );
-
-        // 202: aparece de inmediato como "Procesando" y arranca el polling.
-        ownUploadsRef.current.add(accepted.file_name);
-        pollFailsRef.current = 0;
-        setPollBroken(false);
-        const optimistic: DocumentInfo = {
-          id: accepted.id,
-          file_name: accepted.file_name,
-          pages: 0,
-          chunks: 0,
-          status: accepted.status,
-          error: null,
-          ingested_at: new Date().toISOString(),
-        };
-        setDocs((prev) => {
-          const base = prev ?? [];
-          return base.some((d) => d.file_name === optimistic.file_name)
-            ? base.map((d) =>
-                d.file_name === optimistic.file_name ? { ...d, ...optimistic } : d,
-              )
-            : [optimistic, ...base];
+        // Subido: ahora el servidor lo registra y agenda la ingesta. Ya no se
+        // puede cancelar (el fichero está arriba), por eso cambia el texto.
+        setUpload((u) => (u === null ? u : { ...u, progress: 1, fase: 'registrando' }));
+        await registrar({
+          storageId: storageId as Id<'_storage'>,
+          fileName: file.name,
+          sha256,
         });
-        void refreshDocs({ silent: true });
+        // Aparece como "Procesando" en cuanto la suscripción lo entregue.
       } catch (err) {
-        if (!controller.signal.aborted) {
-          setUploadError(err instanceof Error ? err.message : 'No se pudo subir el archivo.');
+        if (controller.signal.aborted) {
+          // cancelado a mano: sin aviso
+        } else if (!avisarSiEsFatal(err)) {
+          setUploadError(
+            err instanceof DOMException
+              ? 'No se pudo subir el archivo.'
+              : mensajeDeError(
+                  err,
+                  err instanceof Error && err.message !== ''
+                    ? err.message
+                    : 'No se pudo subir el archivo.',
+                ),
+          );
         }
       } finally {
         if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
         setUpload(null);
       }
     },
-    [limitMb, refreshDocs],
+    [docs, limitMb, registrar, urlDeSubida],
   );
 
   // --- borrado con confirmación inline de dos pasos ---
   const handleDelete = useCallback(
-    async (fileName: string) => {
+    async (doc: DocumentInfo) => {
       setConfirmFor(null);
       setRowErrors((errs) => {
         const next = { ...errs };
-        delete next[fileName];
+        delete next[doc.id];
         return next;
       });
-      setDeleting((s) => new Set(s).add(fileName));
+      setDeleting((s) => new Set(s).add(doc.id));
       try {
-        await deleteDocument(fileName);
-        // Invalida cualquier GET /api/documents en vuelo: su lista aún
-        // contiene el documento recién borrado y lo resucitaría.
-        docsRequestRef.current++;
-        setDocs((prev) => (prev === null ? prev : prev.filter((d) => d.file_name !== fileName)));
-        onHealthRefresh();
-        void refreshDocs({ silent: true });
+        await borrar({ documentId: doc.id });
+        // La fila desaparece con la siguiente entrega de la suscripción, que
+        // llega antes de que esta promesa se resuelva.
       } catch (err) {
-        setRowErrors((errs) => ({
-          ...errs,
-          [fileName]: err instanceof Error ? err.message : 'No se pudo borrar el documento.',
-        }));
+        if (!avisarSiEsFatal(err)) {
+          setRowErrors((errs) => ({
+            ...errs,
+            [doc.id]: mensajeDeError(err, 'No se pudo borrar el documento.'),
+          }));
+        }
       } finally {
         setDeleting((s) => {
           const next = new Set(s);
-          next.delete(fileName);
+          next.delete(doc.id);
           return next;
         });
       }
     },
-    [onHealthRefresh, refreshDocs],
+    [borrar],
   );
 
   /**
    * Reintenta la indexación de un documento que falló.
    *
-   * Casi siempre falla por algo transitorio (un timeout de OpenAI, un corte
-   * con Qdrant), y sin esto la única salida era borrar la fila y volver a
-   * buscar el archivo: `POST /upload` responde 409 si el nombre ya existe,
-   * incluso cuando la fila está en `failed`.
-   *
-   * Si el backend contesta que ya no tiene el archivo -en Vercel los uploads
-   * van a /tmp, que es efímero- se dice exactamente eso y se abre el selector
-   * de archivos, en vez de dejar un error sin salida.
+   * Casi siempre falla por algo transitorio (un timeout del gateway, un
+   * corte a mitad de embeber), y sin esto la única salida era borrar la fila
+   * y volver a buscar el archivo. El fichero original está en el
+   * almacenamiento, así que el servidor lo relee de ahí.
    */
   const handleReindex = useCallback(
-    async (fileName: string) => {
+    async (doc: DocumentInfo) => {
       setRowErrors((errs) => {
         const next = { ...errs };
-        delete next[fileName];
+        delete next[doc.id];
         return next;
       });
-      setReindexing((s) => new Set(s).add(fileName));
+      setReindexing((s) => new Set(s).add(doc.id));
       try {
-        const status = await reindexDocument(fileName);
-        setDocs((prev) =>
-          prev === null
-            ? prev
-            : prev.map((d) =>
-                d.file_name === fileName ? { ...d, status, error: null } : d,
-              ),
-        );
-        onHealthRefresh();
-        void refreshDocs({ silent: true });
+        await reindexar({ documentId: doc.id });
       } catch (err) {
-        if (err instanceof FileNotStoredError) {
+        if (!avisarSiEsFatal(err)) {
           setRowErrors((errs) => ({
             ...errs,
-            [fileName]: `${err.message} Elige el archivo para volver a intentarlo.`,
-          }));
-          // La resubida exige que el nombre no exista, así que se borra la
-          // fila fallida primero. Es segura de borrar: quedó en 0 chunks.
-          reuploadForRef.current = fileName;
-          fileInputRef.current?.click();
-        } else {
-          setRowErrors((errs) => ({
-            ...errs,
-            [fileName]:
-              err instanceof Error ? err.message : 'No se pudo reindexar el documento.',
+            [doc.id]: mensajeDeError(err, 'No se pudo reindexar el documento.'),
           }));
         }
       } finally {
         setReindexing((s) => {
           const next = new Set(s);
-          next.delete(fileName);
+          next.delete(doc.id);
           return next;
         });
       }
     },
-    [onHealthRefresh, refreshDocs],
+    [reindexar],
   );
 
-  const toggleErrorDetail = (fileName: string) => {
+  const toggleErrorDetail = (id: string) => {
     setOpenErrors((s) => {
       const next = new Set(s);
-      if (next.has(fileName)) next.delete(fileName);
-      else next.add(fileName);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -449,46 +394,7 @@ export function DocumentsPanel({
   const handleFilePicked = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files && e.target.files.length > 0 ? e.target.files[0] : null;
     e.target.value = ''; // permite re-elegir el mismo archivo
-    const reuploadFor = reuploadForRef.current;
-    reuploadForRef.current = null;
-    if (!file) return;
-    if (reuploadFor === null) {
-      void startUpload(file);
-      return;
-    }
-    // Resubida pedida desde una fila fallida: se borra su registro antes de
-    // subir, porque /upload da 409 si el nombre ya existe. Solo se borra si
-    // el archivo elegido es el mismo: cambiar de archivo a mitad dejaría un
-    // documento borrado y otro con nombre distinto, que no es lo que nadie
-    // pidió.
-    if (file.name !== reuploadFor) {
-      setRowErrors((errs) => ({
-        ...errs,
-        [reuploadFor]:
-          `Elegiste "${file.name}" y el documento a reintentar es ` +
-          `"${reuploadFor}". No se ha tocado nada.`,
-      }));
-      return;
-    }
-    void (async () => {
-      try {
-        await deleteDocument(reuploadFor);
-        docsRequestRef.current++;
-        setDocs((prev) =>
-          prev === null ? prev : prev.filter((d) => d.file_name !== reuploadFor),
-        );
-      } catch (err) {
-        setRowErrors((errs) => ({
-          ...errs,
-          [reuploadFor]:
-            err instanceof Error
-              ? `No se pudo limpiar el registro anterior: ${err.message}`
-              : 'No se pudo limpiar el registro anterior.',
-        }));
-        return;
-      }
-      await startUpload(file);
-    })();
+    if (file) void startUpload(file);
   };
 
   // --- focus trap ligero + Escape ---
@@ -516,14 +422,7 @@ export function DocumentsPanel({
     }
   };
 
-  const retryPolling = () => {
-    pollFailsRef.current = 0;
-    setPollBroken(false);
-    void refreshDocs({ silent: true });
-  };
-
-  const showSkeleton = loading && docs === null;
-  const showUnavailable = !loading && loadError !== null && docs === null;
+  const showSkeleton = docs === null;
 
   return (
     <aside
@@ -590,13 +489,15 @@ export function DocumentsPanel({
                     <span className="upload-file" title={upload.fileName}>
                       {upload.fileName}
                     </span>
-                    <button
-                      type="button"
-                      className="upload-cancel"
-                      onClick={() => uploadAbortRef.current?.abort()}
-                    >
-                      Cancelar
-                    </button>
+                    {upload.fase === 'subiendo' && (
+                      <button
+                        type="button"
+                        className="upload-cancel"
+                        onClick={() => uploadAbortRef.current?.abort()}
+                      >
+                        Cancelar
+                      </button>
+                    )}
                   </div>
                   <div className="upload-bar" aria-hidden="true">
                     {upload.progress === null ? (
@@ -609,7 +510,9 @@ export function DocumentsPanel({
                     )}
                   </div>
                   <span className="upload-status">
-                    {upload.progress === null ? (
+                    {upload.fase === 'registrando' ? (
+                      <span className="shimmer-text">Registrando el documento…</span>
+                    ) : upload.progress === null ? (
                       <span className="shimmer-text">Subiendo…</span>
                     ) : upload.progress >= 1 ? (
                       <span className="shimmer-text">Procesando la subida…</span>
@@ -639,16 +542,6 @@ export function DocumentsPanel({
             </div>
           )}
 
-          {/* aviso de sondeo interrumpido */}
-          {pollBroken && anyProcessing && (
-            <div className="docs-poll-warn" role="status">
-              <span>No se pudo actualizar el estado de la ingesta.</span>
-              <button type="button" onClick={retryPolling}>
-                Reintentar
-              </button>
-            </div>
-          )}
-
           {/* listado / estados */}
           {showSkeleton && (
             <div className="docs-skeleton" role="status" aria-label="Cargando documentos">
@@ -659,19 +552,6 @@ export function DocumentsPanel({
                   style={{ animationDelay: `-${i * 140}ms` }}
                 />
               ))}
-            </div>
-          )}
-
-          {showUnavailable && (
-            <div className="docs-empty">
-              <span className="docs-empty-icon" aria-hidden="true">
-                <IconAlert size={20} />
-              </span>
-              <p className="docs-empty-title">No disponible</p>
-              <p>{loadError}</p>
-              <button type="button" className="docs-retry-btn" onClick={() => void refreshDocs()}>
-                Reintentar
-              </button>
             </div>
           )}
 
@@ -691,12 +571,12 @@ export function DocumentsPanel({
           {docs !== null && docs.length > 0 && (
             <ul className="docs-list">
               {docs.map((d) => {
-                const isDeleting = deleting.has(d.file_name);
-                const isReindexing = reindexing.has(d.file_name);
-                const isConfirm = confirmFor === d.file_name;
-                const errOpen = openErrors.has(d.file_name);
-                const popped = justReady.has(d.file_name);
-                const rowError = rowErrors[d.file_name];
+                const isDeleting = deleting.has(d.id);
+                const isReindexing = reindexing.has(d.id);
+                const isConfirm = confirmFor === d.id;
+                const errOpen = openErrors.has(d.id);
+                const popped = justReady.has(d.id);
+                const rowError = rowErrors[d.id];
                 // Se muestra lo que haya, separado por puntos medios: un
                 // documento en cola aún no tiene chunks ni páginas.
                 const metaParts: string[] = [];
@@ -712,7 +592,7 @@ export function DocumentsPanel({
                 }
                 return (
                   <li
-                    key={d.file_name}
+                    key={d.id}
                     className={`doc-card ${popped ? 'doc-card-ready-flash' : ''}`}
                   >
                     <div className="doc-row">
@@ -720,8 +600,8 @@ export function DocumentsPanel({
                         <IconDocument size={15} />
                       </span>
                       <span className="doc-info">
-                        <span className="doc-file" title={ingestedTitle(d.ingested_at)}>
-                          {d.file_name}
+                        <span className="doc-file" title={ingestedTitle(d.ingestadoEn)}>
+                          {d.fileName}
                         </span>
                         {metaParts.length > 0 && (
                           <span className="doc-meta">
@@ -742,7 +622,7 @@ export function DocumentsPanel({
                             <button
                               type="button"
                               className="doc-confirm-btn doc-confirm-yes"
-                              onClick={() => void handleDelete(d.file_name)}
+                              onClick={() => void handleDelete(d)}
                             >
                               Sí
                             </button>
@@ -774,7 +654,7 @@ export function DocumentsPanel({
                               <button
                                 type="button"
                                 className="doc-badge doc-badge-failed"
-                                onClick={() => toggleErrorDetail(d.file_name)}
+                                onClick={() => toggleErrorDetail(d.id)}
                                 aria-expanded={errOpen}
                                 title={d.error ?? 'Error durante la ingesta'}
                               >
@@ -792,9 +672,9 @@ export function DocumentsPanel({
                                 type="button"
                                 className="doc-action-btn"
                                 disabled={isReindexing}
-                                onClick={() => void handleReindex(d.file_name)}
+                                onClick={() => void handleReindex(d)}
                                 title="Reintentar la indexación"
-                                aria-label={`Reintentar la indexación de ${d.file_name}`}
+                                aria-label={`Reintentar la indexación de ${d.fileName}`}
                               >
                                 {isReindexing ? (
                                   <IconSpinner size={14} />
@@ -811,7 +691,7 @@ export function DocumentsPanel({
                                 <span
                                   className="doc-lock"
                                   role="status"
-                                  aria-label={`Borrando ${d.file_name}`}
+                                  aria-label={`Borrando ${d.fileName}`}
                                 >
                                   <IconSpinner size={14} />
                                 </span>
@@ -819,9 +699,9 @@ export function DocumentsPanel({
                                 <button
                                   type="button"
                                   className="doc-action-btn"
-                                  onClick={() => setConfirmFor(d.file_name)}
+                                  onClick={() => setConfirmFor(d.id)}
                                   title="Borrar del índice"
-                                  aria-label={`Borrar ${d.file_name} del índice`}
+                                  aria-label={`Borrar ${d.fileName} del índice`}
                                 >
                                   <IconTrash size={15} />
                                 </button>

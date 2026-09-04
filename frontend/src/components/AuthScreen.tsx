@@ -1,11 +1,14 @@
-// Pantalla de acceso (SPEC.md, "Autenticación multiusuario"). Sustituye al
-// antiguo gate de clave compartida: aquí se entra con correo y contraseña de
-// Supabase Auth.
+// Pantalla de acceso. Se entra con correo y contraseña de Convex Auth
+// (convex/auth.ts) y, si el despliegue lo ofrece, con Google.
 //
 // Decisiones:
-// - El dominio se valida en cliente ANTES de llamar a Supabase: el trigger de
-//   Postgres lo rechazaría igual, pero el error viaja mucho más rápido y sin
-//   quemar cuota de altas.
+// - El dominio se valida en cliente ANTES de llamar al servidor: la regla
+//   vive también en `createOrUpdateUser`, pero el error viaja mucho más rápido
+//   y no gasta un alta.
+// - Los errores del servidor se muestran desde `data.mensaje` si son un
+//   ConvexError y, si no, con un texto genérico que dice qué hacer. Nada de
+//   reconocer cadenas en inglés (ver lib/errores.ts): Convex redacta a
+//   "Server Error" cualquier excepción que no sea un ConvexError.
 // - Los inputs son de 16px: por debajo de ese tamaño iOS Safari hace zoom al
 //   enfocarlos y descoloca la pantalla.
 // - Un solo formulario para las dos pestañas (mismos campos): al cambiar de
@@ -13,33 +16,39 @@
 
 import { useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { ALLOWED_DOMAIN, DOMAIN_ERROR, isAllowedEmail, signIn, signUp } from '../lib/session';
-import { supabaseConfigError } from '../lib/supabase';
+import {
+  ALLOWED_DOMAIN,
+  DOMAIN_ERROR,
+  MIN_PASSWORD,
+  isAllowedEmail,
+  useAcceso,
+  useGoogleDisponible,
+} from '../lib/auth';
+import { convexConfigError } from '../lib/convex';
 import { IconAlert, IconLock, IconSpinner } from './icons';
 
 type Tab = 'signin' | 'signup';
 
-/** Mínimo de Supabase por defecto; se valida antes de salir a la red. */
-const MIN_PASSWORD = 6;
-
 interface AuthScreenProps {
-  /** true si se llega aquí por un 401 del backend (sesión caducada). */
+  /** true si la sesión dejó de ser válida sin que el usuario la cerrara. */
   expired?: boolean;
   /**
-   * true si un administrador revocó el acceso de la cuenta (403 con
-   * `code: "blocked"`). Manda sobre `expired`: el motivo es otro y volver a
+   * true si un administrador revocó el acceso de la cuenta (ConvexError
+   * `acceso_revocado`). Manda sobre `expired`: el motivo es otro y volver a
    * entrar no lo arregla.
    */
   revoked?: boolean;
 }
 
 export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps) {
+  const { entrar, crearCuenta, entrarConGoogle } = useAcceso();
+  const googleDisponible = useGoogleDisponible();
+
   const [tab, setTab] = useState<Tab>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
 
   const emailId = useId();
   const passwordId = useId();
@@ -51,7 +60,6 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
     if (next === tab) return;
     setTab(next);
     setError(null);
-    setInfo(null);
     emailRef.current?.focus();
   };
 
@@ -61,7 +69,6 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
 
     const mail = email.trim().toLowerCase();
     setError(null);
-    setInfo(null);
 
     if (mail === '') {
       setError('Escribe tu correo de trabajo.');
@@ -82,21 +89,25 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
 
     setBusy(true);
     try {
-      const result = isSignup ? await signUp(mail, password) : await signIn(mail, password);
-      if (!result.ok) {
-        setError(result.message);
-        return;
-      }
-      if (result.needsConfirmation) {
-        setInfo('Te enviamos un correo para confirmar tu cuenta.');
-        setPassword('');
-        return;
-      }
-      // Con sesión: onAuthStateChange despierta a App y esta pantalla se
+      const result = isSignup ? await crearCuenta(mail, password) : await entrar(mail, password);
+      if (!result.ok) setError(result.message);
+      // Con sesión: useConvexAuth despierta a App y esta pantalla se
       // desmonta sola, sin recargar la página.
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleGoogle = async () => {
+    if (busy) return;
+    setError(null);
+    setBusy(true);
+    const result = await entrarConGoogle();
+    if (!result.ok) {
+      setError(result.message);
+      setBusy(false);
+    }
+    // Si arrancó, el navegador se va a Google: no hay nada que rehabilitar.
   };
 
   return (
@@ -109,10 +120,10 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
 
         <p className="auth-lead">Asistente documental para el equipo.</p>
 
-        {supabaseConfigError !== null && (
+        {convexConfigError !== null && (
           <p className="auth-error" role="alert">
             <IconAlert size={14} />
-            <span>{supabaseConfigError}</span>
+            <span>{convexConfigError}</span>
           </p>
         )}
 
@@ -211,12 +222,6 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
             </p>
           )}
 
-          {info !== null && (
-            <p className="auth-info" role="status">
-              {info}
-            </p>
-          )}
-
           <button type="submit" className="auth-submit" disabled={busy}>
             {busy ? (
               <>
@@ -228,6 +233,24 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
             )}
           </button>
         </form>
+
+        {/* Solo si el despliegue tiene credenciales de Google: un boton que
+            falla al pulsarlo es peor que no tener el boton. */}
+        {googleDisponible && (
+          <>
+            <div className="auth-divider" aria-hidden="true">
+              <span>o</span>
+            </div>
+            <button
+              type="button"
+              className="auth-alt"
+              onClick={() => void handleGoogle()}
+              disabled={busy}
+            >
+              Entrar con Google
+            </button>
+          </>
+        )}
 
         <p className="auth-domain-note">
           Solo se permiten correos <strong>@{ALLOWED_DOMAIN}</strong>. Los archivos son

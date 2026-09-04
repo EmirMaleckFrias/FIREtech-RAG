@@ -1,37 +1,42 @@
-import type { Health, SessionInfo, UserRole } from '../types';
-import { IconDocument, IconPlus, IconSettings } from './icons';
+import { useState, type KeyboardEvent } from 'react';
+import type { Id } from '../../convex/_generated/dataModel';
+import { ROLE_LABEL, type EstadoConexion, type SessionInfo, type UserRole } from '../types';
+import { IconDocument, IconPlus, IconSettings, IconSpinner, IconTrash } from './icons';
 
 interface SessionSidebarProps {
   open: boolean;
   sessions: SessionInfo[];
-  currentSessionId: string | null;
+  currentSessionId: Id<'sessions'> | null;
+  /** La suscripcion a sesiones.listar ya entrego su primera lista. */
   loaded: boolean;
-  loadError: boolean;
-  health: Health | null;
-  healthError: boolean;
+  /** Estado del WebSocket con Convex (sustituye al sondeo de /api/health). */
+  conexion: EstadoConexion;
   /** Estado del slide-over de documentos (para aria-expanded del botón). */
   documentsOpen: boolean;
   /** Estado del slide-over de ajustes (para aria-expanded del botón). */
   settingsOpen: boolean;
-  /** Correo de la sesión de Supabase (se trunca con ellipsis si no cabe). */
+  /** Correo de la cuenta (se trunca con ellipsis si no cabe). */
   userEmail: string;
-  /** Rol de GET /api/me; null mientras no se conoce (no se pinta insignia). */
+  /** Rol de usuarios.yo; null mientras no se conoce (no se pinta insignia). */
   role: UserRole | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: Id<'sessions'>) => void;
+  /** Borra la conversación con sus mensajes. Lanza con un mensaje legible. */
+  onDelete: (id: Id<'sessions'>) => Promise<void>;
   onNew: () => void;
   onOpenDocuments: () => void;
   onOpenSettings: () => void;
 }
 
-const ROLE_LABEL: Record<UserRole, string> = {
-  admin: 'Administrador',
-  vendedor: 'Lector',
+const CONEXION: Record<EstadoConexion, { texto: string; clase: string }> = {
+  conectando: { texto: 'Conectando…', clase: 'dot-gray' },
+  en_linea: { texto: 'En línea', clase: 'dot-green' },
+  sin_conexion: { texto: 'Sin conexión', clase: 'dot-red' },
 };
 
 /** Etiqueta de grupo por fecha relativa, estilo ChatGPT/Claude. */
-function groupLabel(iso: string, now: Date): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return 'Anteriores';
+function groupLabel(ms: number, now: Date): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime()) || ms <= 0) return 'Anteriores';
   const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const diffDays = Math.round((startOf(now) - startOf(d)) / 86_400_000);
   if (diffDays <= 0) return 'Hoy';
@@ -50,7 +55,7 @@ function groupSessions(sessions: SessionInfo[]): SessionGroup[] {
   const now = new Date();
   const groups: SessionGroup[] = [];
   for (const s of sessions) {
-    const label = groupLabel(s.created_at, now);
+    const label = groupLabel(s.creadoEn, now);
     const last = groups[groups.length - 1];
     if (last && last.label === label) last.items.push(s);
     else groups.push({ label, items: [s] });
@@ -63,37 +68,49 @@ export function SessionSidebar({
   sessions,
   currentSessionId,
   loaded,
-  loadError,
-  health,
-  healthError,
+  conexion,
   documentsOpen,
   settingsOpen,
   userEmail,
   role,
   onSelect,
+  onDelete,
   onNew,
   onOpenDocuments,
   onOpenSettings,
 }: SessionSidebarProps) {
-  const ok = !healthError && health !== null && health.status === 'ok' && health.qdrant;
+  // Borrado con confirmación inline en dos pasos, como en el panel de
+  // documentos: nunca window.confirm. Una sola confirmación abierta a la vez.
+  const [confirmFor, setConfirmFor] = useState<Id<'sessions'> | null>(null);
+  const [deleting, setDeleting] = useState<Id<'sessions'> | null>(null);
+  const [deleteError, setDeleteError] = useState<{ id: Id<'sessions'>; text: string } | null>(null);
 
-  let statusText: string;
-  let dotClass: string;
-  if (healthError) {
-    statusText = 'Backend sin conexión';
-    dotClass = 'dot-red';
-  } else if (health === null) {
-    statusText = 'Conectando…';
-    dotClass = 'dot-gray';
-  } else if (!ok) {
-    statusText = 'Backend con problemas';
-    dotClass = 'dot-amber';
-  } else {
-    statusText = 'En línea';
-    dotClass = 'dot-green';
-  }
-
+  const estado = CONEXION[conexion];
   const groups = groupSessions(sessions);
+
+  const handleDelete = async (id: Id<'sessions'>) => {
+    setConfirmFor(null);
+    setDeleteError(null);
+    setDeleting(id);
+    try {
+      await onDelete(id);
+    } catch (err) {
+      setDeleteError({
+        id,
+        text: err instanceof Error && err.message !== '' ? err.message : 'No se pudo borrar la conversación.',
+      });
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  // Escape recoge la confirmación abierta antes de que llegue a nadie más.
+  const handleKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === 'Escape' && confirmFor !== null) {
+      e.stopPropagation();
+      setConfirmFor(null);
+    }
+  };
 
   return (
     <aside className={`sidebar ${open ? '' : 'sidebar-closed'}`}>
@@ -108,8 +125,8 @@ export function SessionSidebar({
           <span>Nueva conversación</span>
         </button>
 
-        <nav className="session-list" aria-label="Conversaciones">
-          {!loaded && !loadError && (
+        <nav className="session-list" aria-label="Conversaciones" onKeyDown={handleKeyDown}>
+          {!loaded && (
             <div
               className="session-skeleton"
               role="status"
@@ -126,13 +143,7 @@ export function SessionSidebar({
             </div>
           )}
 
-          {loadError && (
-            <div className="sidebar-empty">
-              No se pudieron cargar las conversaciones. ¿Está el backend en marcha?
-            </div>
-          )}
-
-          {loaded && !loadError && sessions.length === 0 && (
+          {loaded && sessions.length === 0 && (
             <div className="sidebar-empty">
               <p className="sidebar-empty-title">Aún no hay conversaciones</p>
               <p>Escribe tu primera pregunta sobre los documentos para empezar.</p>
@@ -142,19 +153,76 @@ export function SessionSidebar({
           {groups.map((g) => (
             <div key={`${g.label}-${g.items[0].id}`} className="session-group">
               <div className="session-group-label">{g.label}</div>
-              {g.items.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  className={`session-item ${s.id === currentSessionId ? 'session-active' : ''}`}
-                  onClick={() => onSelect(s.id)}
-                  title={s.title ?? 'Conversación sin título'}
-                >
-                  <span className="session-title">
-                    {s.title || 'Conversación sin título'}
-                  </span>
-                </button>
-              ))}
+              {g.items.map((s) => {
+                const active = s.id === currentSessionId;
+                const titulo = s.titulo || 'Conversación sin título';
+                return (
+                  <div
+                    key={s.id}
+                    className={`session-row ${active ? 'session-row-active' : ''}`}
+                  >
+                    {confirmFor === s.id ? (
+                      <span
+                        className="session-confirm"
+                        role="group"
+                        aria-label={`Confirmar el borrado de ${titulo}`}
+                      >
+                        <span className="session-confirm-text">¿Borrar?</span>
+                        <button
+                          type="button"
+                          className="doc-confirm-btn doc-confirm-yes"
+                          onClick={() => void handleDelete(s.id)}
+                        >
+                          Sí
+                        </button>
+                        {/* el foco entra en "No": Escape y Tab siguen dentro y
+                            la salida segura es la primera */}
+                        <button
+                          type="button"
+                          className="doc-confirm-btn doc-confirm-no"
+                          onClick={() => setConfirmFor(null)}
+                          autoFocus
+                        >
+                          No
+                        </button>
+                      </span>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className={`session-item ${active ? 'session-active' : ''}`}
+                          onClick={() => onSelect(s.id)}
+                          title={titulo}
+                        >
+                          <span className="session-title">{titulo}</span>
+                        </button>
+                        {deleting === s.id ? (
+                          <span
+                            className="session-del session-del-busy"
+                            role="status"
+                            aria-label={`Borrando ${titulo}`}
+                          >
+                            <IconSpinner size={13} />
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="session-del"
+                            onClick={() => setConfirmFor(s.id)}
+                            title="Borrar conversación"
+                            aria-label={`Borrar la conversación ${titulo}`}
+                          >
+                            <IconTrash size={13} />
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {deleteError !== null && deleteError.id === s.id && (
+                      <div className="session-row-error">{deleteError.text}</div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ))}
         </nav>
@@ -173,7 +241,7 @@ export function SessionSidebar({
           </button>
 
           {/* Ajustes es para todos: dentro, un lector solo ve "Mi cuenta"
-              (contraseña y cierre de sesión) y un admin además Usuarios y
+              (apariencia y cierre de sesión) y un admin además Usuarios y
               Sistema */}
           <button
             type="button"
@@ -196,9 +264,9 @@ export function SessionSidebar({
             )}
           </div>
 
-          <div className="sidebar-footer" title="Estado del backend (GET /api/health)">
-            <span className={`health-dot ${dotClass}`} aria-hidden="true" />
-            <span className="sidebar-status-text">{statusText}</span>
+          <div className="sidebar-footer" title="Estado de la conexión con Convex">
+            <span className={`health-dot ${estado.clase}`} aria-hidden="true" />
+            <span className="sidebar-status-text">{estado.texto}</span>
           </div>
         </div>
       </div>

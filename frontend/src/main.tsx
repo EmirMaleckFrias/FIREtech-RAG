@@ -1,7 +1,9 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { ConvexAuthProvider } from '@convex-dev/auth/react';
 import '@fontsource-variable/inter';
 import App from './App';
+import { convex } from './lib/convex';
 import { observarSistema } from './lib/theme';
 import './styles.css';
 
@@ -15,14 +17,21 @@ if (!rootElement) {
   throw new Error('No se encontró el elemento #root');
 }
 
+// ConvexAuthProvider sustituye a ConvexProvider: ademas de dar el cliente a
+// useQuery/useMutation, guarda y renueva los tokens de Convex Auth y expone
+// useConvexAuth (isLoading / isAuthenticated), que es lo que App consulta.
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <ConvexAuthProvider client={convex}>
+      <App />
+    </ConvexAuthProvider>
   </StrictMode>,
 );
 
-// Service worker (solo producción): network-first para navegaciones, /api
-// jamás se intercepta (SSE incluido), cache-first para /assets/ hasheados.
+// Service worker (solo producción): network-first para navegaciones y
+// cache-first para /assets/ hasheados. Solo cachea estáticos del propio
+// origen: la conexión con Convex es un WebSocket a otro origen y no pasa por
+// él, así que no hay nada de datos que pueda quedarse rancio en caché.
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     // La query no es decorativa: el SW toma de ahí el nombre de sus cachés,

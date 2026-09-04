@@ -1,6 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { filasCobertura } from '../lib/cobertura';
 import { Markdown, type CitationRef } from '../lib/markdown';
-import type { ChatMessage } from '../types';
+import { etiquetaFase, hopEnCurso, hopFallido, puntosDelPlan } from '../lib/mensajes';
+import type { ChatMessage, Hop } from '../types';
+import { CoberturaPregunta, PlanEnVivo } from './Cobertura';
 import {
   IconAlert,
   IconChevronDown,
@@ -20,6 +23,21 @@ interface MessageItemProps {
   onShowSources: (msgLocalId: string) => void;
 }
 
+/** Texto a la derecha de una consulta en la lista de busquedas.
+ *
+ *  Un hop antiguo (solo n y query) no lleva nada. Uno fallido dice que no se
+ *  pudo comprobar, que no es lo mismo que "sin resultados": lo segundo afirma
+ *  que se busco y no estaba. El hop del inventario (cubierto con 0
+ *  resultados) tampoco dice "sin resultados", porque no buscaba fragmentos. */
+function detalleHop(h: Hop, enCurso: boolean): string | null {
+  if (hopEnCurso(h, enCurso)) return 'buscando';
+  if (hopFallido(h, enCurso)) return 'no se pudo comprobar';
+  if (h.estado === 'sin_resultados') return 'sin resultados';
+  if (typeof h.resultados !== 'number') return null;
+  if (h.resultados === 0) return h.estado === 'cubierto' ? null : 'sin resultados';
+  return `${h.resultados} ${h.resultados === 1 ? 'fragmento' : 'fragmentos'}`;
+}
+
 export function MessageItem({
   msg,
   isPanelTarget,
@@ -27,8 +45,16 @@ export function MessageItem({
   onCitation,
   onShowSources,
 }: MessageItemProps) {
-  // Expansión manual del razonamiento una vez colapsado (post-streaming).
+  // Expansión manual del razonamiento una vez colapsado (turno cerrado).
   const [hopsOpen, setHopsOpen] = useState(false);
+
+  // Cobertura al terminar: del informe del verificador si lo hay, si no de
+  // los hops persistidos. Vacia en mensajes antiguos y con el pipeline
+  // apagado, y entonces no se pinta nada: la vista queda como antes.
+  const filas = useMemo(
+    () => filasCobertura(msg.plan, msg.hops, msg.verificacion?.cobertura),
+    [msg.plan, msg.hops, msg.verificacion],
+  );
 
   if (msg.role === 'user') {
     return (
@@ -38,8 +64,21 @@ export function MessageItem({
     );
   }
 
-  const thinking = msg.streaming && msg.content === '';
-  const showHops = msg.streaming || hopsOpen;
+  // `streaming` es "el turno sigue en curso": el agente escribe el avance en
+  // la fila del mensaje y esta vista se vuelve a pintar con cada cambio. El
+  // texto llega de golpe al pasar a `listo`, asi que mientras no llega el
+  // bloque de razonamiento y la fase son lo unico que se mueve.
+  const enCurso = msg.streaming;
+  const showHops = enCurso || hopsOpen;
+  // Modo normal (plan = [e0], la pregunta literal) NO tiene "partes de la
+  // pregunta": se ensena la consulta lanzada, como siempre. La vista por
+  // puntos aparece solo cuando el planificador dividio la pregunta.
+  const variasPartes = puntosDelPlan(msg.plan).length > 0;
+  // Con plan, el bloque de razonamiento existe desde que llega el plan (antes
+  // del primer hop) y en vivo muestra los puntos con su estado en vez de la
+  // lista cruda de consultas.
+  const mostrarRazonamiento = msg.hops.length > 0 || (enCurso && variasPartes);
+  const fase = etiquetaFase(msg.estado, variasPartes);
 
   return (
     <div className={`msg msg-assistant ${isPanelTarget ? 'msg-panel-target' : ''}`}>
@@ -53,12 +92,12 @@ export function MessageItem({
           vivo a resumen colapsado, para que la altura colapse con una
           transición (grid-template-rows 1fr→0fr) en vez de saltar.
         */}
-        {msg.hops.length > 0 && (
-          <div className={`reasoning ${msg.streaming ? 'reasoning-live' : 'reasoning-done'}`}>
-            {msg.streaming ? (
+        {mostrarRazonamiento && (
+          <div className={`reasoning ${enCurso ? 'reasoning-live' : 'reasoning-done'}`}>
+            {enCurso ? (
               <div className="reasoning-head">
                 <IconSpinner size={13} />
-                <span className="shimmer-text">Buscando en los documentos…</span>
+                <span className="shimmer-text">{fase}</span>
               </div>
             ) : (
               <button
@@ -80,41 +119,43 @@ export function MessageItem({
               aria-hidden={!showHops}
             >
               <div className="reasoning-clip">
-                <div className="reasoning-steps">
-                  {msg.hops.map((h, idx) => (
-                    <div
-                      key={`${h.n}-${h.query}`}
-                      className="reasoning-step"
-                      style={{ animationDelay: `${Math.min(idx, 8) * 40}ms` }}
-                    >
-                      <IconSearch size={12} />
-                      <code className="reasoning-query">{h.query}</code>
-                    </div>
-                  ))}
-                </div>
+                {enCurso && variasPartes ? (
+                  <PlanEnVivo plan={msg.plan} hops={msg.hops} enCurso={enCurso} />
+                ) : (
+                  <div className="reasoning-steps">
+                    {msg.hops.map((h, idx) => {
+                      const detalle = detalleHop(h, enCurso);
+                      return (
+                        <div
+                          key={`${h.n}-${h.query}`}
+                          className="reasoning-step"
+                          style={{ animationDelay: `${Math.min(idx, 8) * 40}ms` }}
+                        >
+                          {hopEnCurso(h, enCurso) ? <IconSpinner size={12} /> : <IconSearch size={12} />}
+                          <code className="reasoning-query">{h.query}</code>
+                          {detalle !== null && <span className="reasoning-count">{detalle}</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </div>
         )}
 
-        {thinking && msg.hops.length === 0 && (
+        {/* Fase sin bloque de razonamiento: pensando antes del plan, o
+            redactando/revisando una pregunta que no fue a los documentos. */}
+        {enCurso && !mostrarRazonamiento && (
           <div className="thinking">
             <IconSpinner size={13} />
-            <span className="shimmer-text">Pensando…</span>
+            <span className="shimmer-text">{fase}</span>
           </div>
         )}
 
         {msg.content !== '' && (
-          <div className={`msg-content ${msg.streaming ? 'msg-streaming' : ''}`}>
-            <Markdown
-              text={msg.content}
-              onCitation={(ref) => onCitation(msg.localId, ref)}
-              tail={
-                msg.streaming ? (
-                  <span className="caret stream-caret" aria-hidden="true" />
-                ) : undefined
-              }
-            />
+          <div className="msg-content">
+            <Markdown text={msg.content} onCitation={(ref) => onCitation(msg.localId, ref)} />
           </div>
         )}
 
@@ -125,13 +166,19 @@ export function MessageItem({
           </div>
         )}
 
-        {/* Informe de atribución. Solo con la respuesta cerrada: durante el
-            streaming el texto aún cambia y el veredicto llega después. */}
-        {!msg.streaming && msg.verificacion !== null && (
+        {/* Cobertura de la pregunta: que partes tienen evidencia y cuales no
+            estan en los documentos. Va antes del informe de atribucion porque
+            responde a la pregunta mas basica ("¿se busco todo lo que pedi?")
+            y el informe a la mas fina ("¿cada frase esta sostenida?"). */}
+        {!enCurso && <CoberturaPregunta filas={filas} />}
+
+        {/* Informe de atribución. Solo con la respuesta cerrada: el veredicto
+            llega con el texto, en el mismo cambio de estado. */}
+        {!enCurso && msg.verificacion !== null && (
           <VerificationBadge informe={msg.verificacion} />
         )}
 
-        {!msg.streaming && (msg.id !== null || msg.sources.length > 0) && (
+        {!enCurso && (msg.id !== null || msg.sources.length > 0) && (
           <div className={`msg-footer ${msg.feedback !== null ? 'msg-footer-voted' : ''}`}>
             {msg.sources.length > 0 && (
               <button

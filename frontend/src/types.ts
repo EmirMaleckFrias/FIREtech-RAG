@@ -1,59 +1,64 @@
-// Tipos compartidos del frontend, alineados con el contrato de SPEC.md.
+// Tipos compartidos del frontend, alineados con el contrato de la migración a
+// Convex (convex/CONTRATO.md: "Funciones de datos" y "Estado del turno").
+//
+// Conviven dos familias de formas, y es a propósito:
+// - Lo que el agente guarda dentro de `messages` (Source, Hop, Verificacion,
+//   CoberturaPunto, PlanItem) va en snake_case porque el contrato lo fija así:
+//   son las mismas formas que ya viajaban por SSE y el agente las escribe
+//   idénticas. No se renombran.
+// - Lo que sale de las tablas (sesiones, documentos, usuarios) va en camelCase
+//   y en español, como los campos de convex/schema.ts, y los ids son los `_id`
+//   de Convex en vez de los uuid de Postgres.
 
-export interface Health {
-  status: string;
-  qdrant: boolean;
-  collection_points: number;
-  /**
-   * Límite de subida en MB (4 en producción serverless, 25 en local).
-   * Opcional: backends antiguos no lo envían y el cliente asume 25.
-   */
-  upload_limit_mb?: number;
-}
+import type { Id } from '../convex/_generated/dataModel';
 
-/** Roles de negocio (profiles.role).
+/** Roles de negocio (users.rol).
  *
- * OJO con el desajuste, es deliberado y temporal: el identificador almacenado
- * sigue siendo `vendedor` porque la base solo acepta admin/vendedor hasta que
- * se aplique supabase/migrations/010_rol_lector.sql, y hoy nadie del equipo
- * tiene acceso al proyecto de Supabase para correrla. Lo que el usuario LEE ya
- * es "Lector" (ver ROLE_LABEL). No renombres el identificador a `lector` antes
- * de aplicar 009: el check constraint rechazaría la escritura y el boton de
- * degradar en Ajustes fallaria. */
-export type UserRole = 'admin' | 'vendedor';
+ * `lector` sustituye al antiguo `vendedor`: en Supabase el identificador no se
+ * pudo cambiar porque la migración 010 nunca llegó a aplicarse, y el esquema
+ * de Convex nace ya con el nombre que el producto quería. */
+export type UserRole = 'admin' | 'lector';
 
-/** Identidad del usuario del token, tal como la devuelve GET /api/me. */
+/** Etiqueta visible de cada rol. Única definición: antes estaba duplicada en
+ *  SessionSidebar y SettingsPanel, que es la forma habitual de que las dos
+ *  copias acaben diciendo cosas distintas. */
+export const ROLE_LABEL: Record<UserRole, string> = {
+  admin: 'Administrador',
+  lector: 'Lector',
+};
+
+/** Identidad del usuario en sesión (usuarios.yo). */
 export interface Me {
-  id: string;
+  id: Id<'users'>;
   email: string;
-  role: UserRole;
+  rol: UserRole;
 }
 
 /**
- * Cuenta de usuario tal como la devuelve GET /api/users (solo admin).
- * `created_at` es la fecha de alta; el backend las entrega ya ordenadas.
+ * Cuenta de usuario tal como la devuelve usuarios.listar (solo admin).
  *
  * Los contadores son SOLO números: las conversaciones son privadas y el panel
  * de ajustes nunca muestra su contenido, ni siquiera a un administrador.
  */
 export interface UserAccount {
-  id: string;
+  id: Id<'users'>;
   email: string;
-  role: UserRole;
+  rol: UserRole;
   /**
    * Acceso revocado por un administrador. La cuenta y sus conversaciones se
-   * conservan: es reversible (PATCH con `blocked: false`), al revés que el
-   * borrado. Un backend antiguo no manda el campo y se asume false.
+   * conservan: es reversible (usuarios.actualizar con `bloqueado: false`), al
+   * revés que el borrado.
    */
-  blocked: boolean;
-  created_at: string;
-  /** Último acceso; null si la cuenta nunca ha entrado. */
-  last_sign_in_at: string | null;
-  sessions_count: number;
-  messages_count: number;
+  bloqueado: boolean;
+  /** Fecha de alta en ms; null si el registro no la trae. */
+  creadoEn: number | null;
+  /** Último acceso en ms; null si la cuenta nunca ha entrado. */
+  ultimoAccesoEn: number | null;
+  sesiones: number;
+  mensajes: number;
 }
 
-/** Estado del sistema para el panel de ajustes (GET /api/stats, solo admin). */
+/** Estado del sistema para el panel de ajustes (estadisticas.sistema, solo admin). */
 export interface AdminStats {
   index: {
     chunks: number;
@@ -73,16 +78,22 @@ export interface AdminStats {
   config: {
     model: string;
     embedding_model: string;
-    max_hops: number;
+    prompt_version: string;
     upload_limit_mb: number;
   };
 }
 
+/** Conversación tal como la devuelve sesiones.listar. */
 export interface SessionInfo {
-  id: string;
-  title: string | null;
-  created_at: string;
+  id: Id<'sessions'>;
+  titulo: string;
+  creadoEn: number;
 }
+
+/** Estado de la conexión WebSocket con Convex. Sustituye al sondeo de
+ *  /api/health: ya no hay backend HTTP que vigilar, y si el socket está
+ *  abierto las suscripciones llegan; si no, nada llega. */
+export type EstadoConexion = 'conectando' | 'en_linea' | 'sin_conexion';
 
 /** Cuánto se le deja buscar y deliberar al agente. No cambia las reglas de
  *  fidelidad: un modo rápido que además miente no sirve de nada. */
@@ -105,28 +116,72 @@ export interface Source {
   /** Referencia corta ("Allegri et al., 2023"); vacia si no se pudo extraer. */
   citation?: string;
   doi?: string;
-  /** Localizador ya resuelto por el backend: "pag. 12", "seccion: Metodos". */
+  /** Localizador ya resuelto por el agente: "pag. 12", "seccion: Metodos". */
   locator?: string;
+  /** Puntos del plan que recuperaron este fragmento ("e0", "e2"...). */
+  plan_items?: string[];
+  /** Grado que le dio el calificador respecto a su punto del plan. Vacio =
+   *  sin calificar (calificador apagado o caido): NO significa "no". */
+  grado?: Grado;
 }
 
+/** Grado de relevancia de un fragmento para su punto del plan. */
+export type Grado = 'directa' | 'parcial' | '';
+
+/** Punto del plan de evidencia (columna `plan` del mensaje). El ancla `e0` es
+ *  siempre la pregunta literal del usuario; los demas son los sub-puntos que
+ *  el planificador decidio buscar por separado. */
+export interface PlanItem {
+  id: string;
+  query: string;
+  query_en?: string;
+  /** Que evidencia hace falta, en lenguaje claro. Es lo que se le muestra a
+   *  quien pregunta (los ids son internos). */
+  evidence_needed: string;
+}
+
+/** Estado de un punto del plan tras el verificador (contrato D/F). */
+export type EstadoCobertura = 'cubierto' | 'parcial' | 'evidencia_no_usada' | 'sin_resultados';
+
+/** Cómo se recuperó la evidencia de un hop.
+ *
+ *  `error` significa que la búsqueda lanzó o no llegó a tiempo, y NO es "no
+ *  está en los documentos": la UI lo pinta como "no se pudo comprobar". Se
+ *  aceptan las dos grafías porque los mensajes anteriores a la migración
+ *  guardan las inglesas (`hybrid`, `dense`) y el agente de Convex escribe las
+ *  de convex/search/hybrid.ts. */
+export type Recuperacion = 'hibrida' | 'densa' | 'lexica' | 'error' | 'hybrid' | 'dense';
+
+/** Busqueda del agente. Solo `n` y `query` estan garantizados: los mensajes
+ *  antiguos persistieron unicamente esos dos campos, y el resto son
+ *  opcionales para poder leerlos igual. */
 export interface Hop {
   n: number;
   query: string;
+  /** 'plan' si la lanzo un punto del plan; 'extra' si la decidio el modelo. */
+  origen?: 'plan' | 'extra';
+  /** Id del punto del plan al que sirve ("e1"). Lo llevan los hops del plan
+   *  y tambien los extra en los que el modelo declaro el punto: esos
+   *  actualizan el estado de ese punto en la UI. Vacio si no hay punto. */
+  plan_item?: string;
+  evidence_needed?: string;
+  resultados?: number;
+  /** Referencias cortas de los documentos que aportaron fragmentos. */
+  documentos?: string[];
+  estado?: 'cubierto' | 'sin_resultados';
+  recuperacion?: Recuperacion;
+  relevancia_verificada?: boolean;
+  ms?: number;
+  /** Solo en hops de plan ya cerrados: estado de cobertura que le dio el
+   *  verificador. Permite reconstruir la cobertura de un mensaje antiguo
+   *  aunque el informe no se hubiera guardado. */
+  estado_final?: EstadoCobertura;
+  usado_en_respuesta?: boolean;
 }
 
-/** Mensaje tal como lo devuelve GET /api/sessions/{id}/messages */
-export interface ServerMessage {
-  id: string;
-  role: string;
-  content: string;
-  sources: unknown;
-  created_at: string;
-}
-
-/** Mensaje en el estado local del chat (incluye estado de streaming y feedback). */
 /** Veredicto de una afirmación frente al fragmento que citó.
  *
- * `sin_verificar` es el estado por defecto del backend y NO significa
+ * `sin_verificar` es el estado por defecto del agente y NO significa
  * "correcta": significa que nadie la comprobó (modelo caído, JSON inválido o
  * respuesta por encima del tope). Pintarlo como aprobado sería exactamente el
  * fallo que el verificador existe para evitar. */
@@ -148,7 +203,7 @@ export interface Afirmacion {
   fragmento_id: string;
 }
 
-/** Informe de atribución de una respuesta (evento SSE `verificacion`). */
+/** Informe de atribución de una respuesta (columna `verificacion`). */
 export interface Verificacion {
   afirmaciones: Afirmacion[];
   evidencia_sin_cubrir: string[];
@@ -158,43 +213,68 @@ export interface Verificacion {
   fidelidad: number | null;
   ok: boolean;
   nota: string;
+  /** Cobertura por punto del plan (sin `e0`). Vacia si no hubo plan o el
+   *  informe es anterior al contrato. */
+  cobertura: CoberturaPunto[];
 }
 
+/** Estado de cobertura de un punto del plan segun el verificador. */
+export interface CoberturaPunto {
+  id: string;
+  evidence_needed: string;
+  estado: EstadoCobertura;
+  n_fragmentos: number;
+  documentos: string[];
+  /** Indices (en `afirmaciones`) de las afirmaciones que usaron su evidencia. */
+  afirmaciones: number[];
+}
+
+/** Fase del turno del asistente (columna `estado` del mensaje). El agente la
+ *  va escribiendo y el cliente se resuscribe: `pensando` -> `buscando` ->
+ *  `redactando` -> `revisando` -> `listo` | `error`. El texto de la respuesta
+ *  NO aparece hasta `listo`: la barrera de revisión lo retiene. */
+export type EstadoTurno = 'pensando' | 'buscando' | 'redactando' | 'revisando' | 'listo' | 'error';
+
+/** Mensaje en el estado local del chat. */
 export interface ChatMessage {
-  /** Clave estable local (los mensajes en streaming aún no tienen id de servidor). */
+  /** Clave estable local. Es el `_id` en los mensajes ya guardados y una
+   *  clave provisional en el par optimista que se pinta mientras la mutación
+   *  de envío está en vuelo. */
   localId: string;
-  /** id de servidor (llega en el evento `done` o al cargar la sesión). */
-  id: string | null;
+  /** id de Convex; null solo en el par optimista. */
+  id: Id<'messages'> | null;
   role: 'user' | 'assistant';
   content: string;
   sources: Source[];
   hops: Hop[];
+  /** Plan de evidencia. Vacio en modo normal sin planificador, en preguntas
+   *  que no van a los documentos y en mensajes anteriores al contrato. */
+  plan: PlanItem[];
   /** Informe del verificador. null mientras no llega o si está desactivado. */
   verificacion: Verificacion | null;
+  estado: EstadoTurno;
+  /** true mientras `estado` no es final (listo o error). Es derivado, no se
+   *  guarda: existe para que los componentes que ya distinguian "en curso"
+   *  sigan haciendolo igual que con el streaming. */
   streaming: boolean;
   error: string | null;
   feedback: 1 | -1 | null;
+  /** Momento de creacion en ms. Con el permite detectar un turno colgado. */
+  creadoEn: number;
 }
 
-/** Estado de ingesta de un documento (GET /api/documents). */
+/** Estado de ingesta de un documento (documents.status). */
 export type DocumentStatus = 'processing' | 'ready' | 'failed';
 
-/** Documento indexado tal como lo devuelve GET /api/documents. */
+/** Documento indexado tal como lo devuelve documentos.listar. */
 export interface DocumentInfo {
-  id: string;
-  file_name: string;
+  id: Id<'documents'>;
+  fileName: string;
   pages: number;
   chunks: number;
   status: DocumentStatus;
   error: string | null;
-  ingested_at: string;
-}
-
-/** Respuesta 202 de POST /api/documents/upload. */
-export interface UploadAccepted {
-  id: string;
-  file_name: string;
-  status: DocumentStatus;
+  ingestadoEn: number;
 }
 
 /** Señal para enfocar una fuente concreta en el panel derecho (clic en una cita). */

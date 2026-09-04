@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSheetDrag } from '../lib/useSheetDrag';
+import { ANCLA } from '../lib/cobertura';
 import { citationFileKey, citationPages, extractCitations } from '../lib/markdown';
-import type { ChatMessage, Source, SourceFocus } from '../types';
+import type { ChatMessage, PlanItem, Source, SourceFocus } from '../types';
 import { IconChevronDown, IconDocument } from './icons';
 
 interface SourcesPanelProps {
@@ -131,6 +132,32 @@ function chunkBadge(chunkType: string | undefined): string | null {
   return null;
 }
 
+/** Etiqueta del grado que dio el calificador. Vacio = sin calificar, y
+ *  entonces no se pinta nada: "sin etiqueta" no debe leerse como "no sirve". */
+function gradoLabel(grado: Source['grado']): string | null {
+  if (grado === 'directa') return 'Directa';
+  if (grado === 'parcial') return 'Parcial';
+  return null;
+}
+
+/** Puntos del plan a los que sirvio la fuente, sin el ancla e0 (la pregunta
+ *  entera): "sirvio para 1 punto" siendo ese punto la propia pregunta no
+ *  informa de nada. Devuelve el texto corto y el tooltip con los
+ *  evidence_needed cuando se conoce el plan (mensaje de esta sesion). */
+function sirvioPara(
+  s: Source,
+  plan: PlanItem[],
+): { texto: string; tooltip: string } | null {
+  const ids = (s.plan_items ?? []).filter((id) => id !== ANCLA);
+  if (ids.length === 0) return null;
+  const porId = new Map(plan.map((p) => [p.id, p.evidence_needed]));
+  const nombres = ids.map((id) => porId.get(id)).filter((x): x is string => !!x);
+  return {
+    texto: `sirvio para ${ids.length} ${ids.length === 1 ? 'punto' : 'puntos'}`,
+    tooltip: nombres.length > 0 ? nombres.join('\n') : 'Puntos del plan de evidencia',
+  };
+}
+
 function prefersReducedMotion(): boolean {
   return (
     typeof window !== 'undefined' &&
@@ -152,6 +179,7 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
   const msgKey = message?.localId ?? null;
   const content = message?.content ?? '';
   const rawSources = message?.sources;
+  const plan = message?.plan ?? [];
 
   // Bottom sheet en móvil: swipe-down sobre el asa cierra el panel.
   useSheetDrag(panelRef, grabberRef, onClose);
@@ -249,6 +277,8 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
     const isOpen = expandedCards.has(item.key);
     const dimmed = citedCount > 0 && !item.cited;
     const pct = scorePercent(s.score);
+    const grado = gradoLabel(s.grado);
+    const puntos = sirvioPara(s, plan);
 
     // Subtítulo archivo, páginas y contexto documental.
     const metaParts: { text: string; className?: string; title?: string }[] = [];
@@ -264,6 +294,9 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
     }
     if (s.document_type) metaParts.push({ text: s.document_type });
     if (s.language) metaParts.push({ text: s.language });
+    if (puntos !== null) {
+      metaParts.push({ text: puntos.texto, className: 'source-meta-plan', title: puntos.tooltip });
+    }
 
     return (
       <div
@@ -287,6 +320,18 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
             <span className="source-title-line">
               <span className="source-title">{title}</span>
               {item.cited && <span className="badge-cited">Citada</span>}
+              {grado !== null && (
+                <span
+                  className={`badge-grado badge-grado-${s.grado}`}
+                  title={
+                    s.grado === 'directa'
+                      ? 'El calificador juzgo que este fragmento responde directamente a su punto'
+                      : 'El calificador juzgo que este fragmento responde solo en parte a su punto'
+                  }
+                >
+                  {grado}
+                </span>
+              )}
               {badge !== null && <span className="badge-type">{badge}</span>}
             </span>
             {metaParts.length > 0 && (
