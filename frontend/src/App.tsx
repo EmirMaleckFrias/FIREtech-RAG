@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useConvexAuth } from '@convex-dev/auth/react';
 import { useConvexConnectionState, useMutation, useQueries, useQuery } from 'convex/react';
+import type { RequestForQueries } from 'convex/react';
 import { api } from '../convex/_generated/api';
 import type { Id } from '../convex/_generated/dataModel';
 import { AuthScreen } from './components/AuthScreen';
@@ -232,11 +233,21 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   // que la mutación resuelva, y lo mismo pasa si se borra desde otra pestaña.
   // Ese caso vuelve al estado vacío; cualquier otro fallo se pinta dentro del
   // hilo, como hacía la carga con fetch.
-  const resultados = useQueries(
-    currentSessionId !== null
-      ? { mensajes: { query: api.mensajes.deSesion, args: { sessionId: currentSessionId } } }
-      : {},
-  );
+  // El objeto de consultas va MEMORIZADO: useQueries lo compara por identidad
+  // y con un objeto nuevo en cada render volvía a fijar las consultas en cada
+  // pintado, lo que disparaba "Too many re-renders" nada más entrar (medido en
+  // producción el 4 sep 2026: la app entera caía al límite de errores).
+  const consultasMensajes = useMemo(() => {
+    // Construido sobre un objeto tipado y no como unión con `{}`: TypeScript
+    // ensancha esa unión a `{ mensajes?: undefined }`, que no encaja en
+    // RequestForQueries.
+    const consultas: RequestForQueries = {};
+    if (currentSessionId !== null) {
+      consultas.mensajes = { query: api.mensajes.deSesion, args: { sessionId: currentSessionId } };
+    }
+    return consultas;
+  }, [currentSessionId]);
+  const resultados = useQueries(consultasMensajes);
   const crudo: unknown = resultados.mensajes;
   const errorMensajes = crudo instanceof Error ? crudo : null;
   // deSesion devuelve los documentos de `messages` tal cual; el tipo
