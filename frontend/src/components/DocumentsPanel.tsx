@@ -83,6 +83,7 @@ interface DocumentoDoc {
   error?: string | null;
   ingestadoEn?: number;
   _creationTime?: number;
+  origen?: string | null;
 }
 
 function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
@@ -101,7 +102,60 @@ function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
         : typeof d._creationTime === 'number'
           ? d._creationTime
           : 0,
+    origen: d.origen === 'notion' || d.origen === 'subida' ? d.origen : null,
   };
+}
+
+/** Lo que el panel lee de `notion.admin.estado`. Estructural, como DocumentoDoc. */
+interface EstadoNotion {
+  configurado: boolean;
+  periodicaMinutos: number;
+  paginas: number;
+  paginasConError: number;
+  documentos: number;
+  ultimas: Array<{
+    empezadoEn: number;
+    terminadoEn: number | null;
+    estado: 'running' | 'ok' | 'error';
+    paginas: number;
+    nuevos: number;
+    actualizados: number;
+    borrados: number;
+    errores: string[];
+  }>;
+}
+
+function haceCuanto(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const min = Math.round(diff / 60_000);
+  if (min < 1) return 'hace un momento';
+  if (min < 60) return `hace ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 48) return `hace ${h} h`;
+  return `hace ${Math.round(h / 24)} días`;
+}
+
+/** Una frase de estado para el bloque de Notion. */
+function describirNotion(n: EstadoNotion): string {
+  const ultima = n.ultimas[0];
+  const partes: string[] = [];
+  if (ultima === undefined) {
+    partes.push('Sin sincronizar todavía');
+  } else if (ultima.estado === 'running') {
+    partes.push(`Sincronizando desde ${haceCuanto(ultima.empezadoEn)}`);
+  } else {
+    partes.push(
+      `Última sincronización ${haceCuanto(ultima.terminadoEn ?? ultima.empezadoEn)}` +
+        (ultima.estado === 'error' ? ' con errores' : ''),
+    );
+  }
+  partes.push(`${n.paginas.toLocaleString('es')} ${n.paginas === 1 ? 'página' : 'páginas'}`);
+  partes.push(`${n.documentos.toLocaleString('es')} ${n.documentos === 1 ? 'documento' : 'documentos'}`);
+  if (n.paginasConError > 0) {
+    partes.push(`${n.paginasConError} con error`);
+  }
+  if (n.periodicaMinutos <= 0) partes.push('periódica apagada');
+  return partes.join(' · ');
 }
 
 type FaseSubida = 'subiendo' | 'registrando';
@@ -152,6 +206,31 @@ export function DocumentsPanel({ open, onClose, canManage }: DocumentsPanelProps
   const registrar = useMutation(api.documentos.registrar);
   const reindexar = useMutation(api.documentos.reindexar);
   const borrar = useMutation(api.documentos.borrar);
+
+  // Notion: solo para admin y con el panel abierto, como las estadísticas.
+  // La suscripción hace que el paso de "sincronizando" a la cifra final
+  // llegue solo, sin sondeo.
+  const notion = useQuery(api.notion.admin.estado, open && canManage ? {} : 'skip') as
+    | EstadoNotion
+    | undefined;
+  const sincronizarNotion = useMutation(api.notion.admin.sincronizarAhora);
+  const [notionPending, setNotionPending] = useState(false);
+  const [notionError, setNotionError] = useState<string | null>(null);
+  const notionRunning = notion?.ultimas[0]?.estado === 'running';
+
+  const handleNotionSync = useCallback(async () => {
+    setNotionError(null);
+    setNotionPending(true);
+    try {
+      await sincronizarNotion({});
+    } catch (err) {
+      if (!avisarSiEsFatal(err)) {
+        setNotionError(mensajeDeError(err, 'No se pudo lanzar la sincronización con Notion.'));
+      }
+    } finally {
+      setNotionPending(false);
+    }
+  }, [sincronizarNotion]);
 
   // Más recientes primero, como devolvía el backend anterior.
   const docs = useMemo<DocumentInfo[] | null>(
@@ -461,6 +540,56 @@ export function DocumentsPanel({ open, onClose, canManage }: DocumentsPanelProps
             </p>
           )}
 
+          {/* Notion (solo admin): estado de la sincronización y lanzarla ya.
+              Reutiliza la caja de la nota de solo lectura: misma jerarquía
+              visual, es información de contexto, no una acción principal. */}
+          {canManage && notion !== undefined && (
+            <div className="docs-readonly-note" role="status" aria-live="polite">
+              <span style={{ flex: 1 }}>
+                {notion.configurado ? (
+                  <>
+                    <strong>Notion</strong>
+                    {' · '}
+                    {describirNotion(notion)}
+                    {notionError !== null && (
+                      <>
+                        <br />
+                        <span className="doc-row-error">{notionError}</span>
+                      </>
+                    )}
+                    {notion.ultimas[0]?.errores.length ? (
+                      <>
+                        <br />
+                        <span title={notion.ultimas[0].errores.join('\n')}>
+                          {notion.ultimas[0].errores.length}{' '}
+                          {notion.ultimas[0].errores.length === 1 ? 'aviso' : 'avisos'} en la última
+                          corrida
+                        </span>
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <strong>Notion</strong>
+                    {' · '}
+                    No configurado: faltan NOTION_TOKEN y NOTION_DATABASE_ID en el despliegue.
+                  </>
+                )}
+              </span>
+              {notion.configurado && (
+                <button
+                  type="button"
+                  className="doc-confirm-btn doc-confirm-no"
+                  disabled={notionPending || notionRunning}
+                  onClick={() => void handleNotionSync()}
+                  title="Traer ahora los cambios de la base de Notion"
+                >
+                  {notionRunning ? 'Sincronizando' : 'Sincronizar ahora'}
+                </button>
+              )}
+            </div>
+          )}
+
           {/* zona de subida (solo admin) */}
           {canManage && (
             <div className="docs-upload">
@@ -590,6 +719,8 @@ export function DocumentsPanel({ open, onClose, canManage }: DocumentsPanelProps
                     `${d.pages.toLocaleString('es')} ${d.pages === 1 ? 'pág.' : 'págs.'}`,
                   );
                 }
+                // Etiqueta discreta: lo trajo la sincronización, no una subida.
+                if (d.origen === 'notion') metaParts.push('Notion');
                 return (
                   <li
                     key={d.id}

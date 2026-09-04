@@ -104,6 +104,10 @@ export const listar = query({
       ingestadoEn: d.ingestadoEn,
       titulo: d.titulo ?? null,
       citation: d.citation ?? null,
+      // Para la etiqueta "Notion" del panel: un documento que llegó por la
+      // sincronización no se sube ni se borra a mano, lo gobierna Notion.
+      origen: d.origen ?? null,
+      notionPageId: d.notionPageId ?? null,
     }));
   },
 });
@@ -140,34 +144,7 @@ export const registrar = mutation({
   },
   handler: async (ctx, args) => {
     const admin = await administrador(ctx, "subir documentos");
-
-    const nombre = sanearNombre(args.fileName);
-    if (!nombre) throw errorDatos("invalido", "Nombre de archivo inválido.");
-    const ext = extensionDe(nombre);
-    if (!(EXTENSIONES_PERMITIDAS as readonly string[]).includes(ext)) {
-      throw errorDatos(
-        "invalido",
-        `Extensión '${ext || "(ninguna)"}' no permitida. Permitidas: ` +
-          `${[...EXTENSIONES_PERMITIDAS].sort().join(", ")}.`,
-      );
-    }
-    const sha256 = args.sha256.trim().toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(sha256)) {
-      throw errorDatos("invalido", "El sha256 debe ser hexadecimal de 64 caracteres.");
-    }
-
-    const meta = await ctx.db.system.get(args.storageId);
-    if (!meta) {
-      throw errorDatos("invalido", "El archivo no está en el almacenamiento: vuelve a subirlo.");
-    }
-    if (meta.size === 0) throw errorDatos("invalido", "El archivo está vacío.");
-    const limiteMb = ajustes().limiteSubidaMb;
-    if (meta.size > limiteMb * 1024 * 1024) {
-      throw errorDatos(
-        "invalido",
-        `Archivo demasiado grande (${meta.size} bytes; máx. ${limiteMb} MB en este despliegue).`,
-      );
-    }
+    const { nombre, sha256 } = await validarRegistro(ctx, args);
 
     const existentes = await ctx.db
       .query("documents")
@@ -194,6 +171,8 @@ export const registrar = mutation({
         subidoPor: admin._id,
         ingestadoEn: ahora,
         storageId: args.storageId,
+        origen: "subida",
+        notionPageId: undefined,
       });
       documentId = fallido._id;
     } else {
@@ -206,9 +185,94 @@ export const registrar = mutation({
         subidoPor: admin._id,
         ingestadoEn: ahora,
         storageId: args.storageId,
+        origen: "subida",
       });
     }
 
+    await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.ingestar, { documentId });
+    return documentId;
+  },
+});
+
+/** Registra un fichero que trajo una sincronización (hoy, Notion) y arranca
+ *  su ingesta. Misma validación que `registrar`, sin usuario: lo llama la
+ *  acción `notion.sync.sincronizar`, que corre desde el cron sin identidad.
+ *
+ *  Reutilización de fila, más ancha que en `registrar`: además del `failed`,
+ *  se reutiliza un documento con el MISMO nombre y el MISMO origen y página,
+ *  porque eso es la versión nueva del mismo fichero (la página se editó y el
+ *  adjunto o el texto cambió). Reutilizar la fila es lo que hace que la
+ *  ingesta retire los fragmentos de la versión anterior (`borrarChunks` en
+ *  modo `antiguos` va por `documentRef`); una fila nueva los dejaría
+ *  huérfanos y respondiendo en las búsquedas. Un nombre ocupado por otro
+ *  documento (una subida manual, u otra página) sigue siendo `conflicto`, y
+ *  la sincronización elige otro nombre. */
+export const registrarDesdeOrigen = internalMutation({
+  args: {
+    storageId: v.id("_storage"),
+    fileName: v.string(),
+    sha256: v.string(),
+    origen: v.union(v.literal("subida"), v.literal("notion")),
+    notionPageId: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<Id<"documents">> => {
+    const { nombre, sha256 } = await validarRegistro(ctx, args);
+
+    const existentes = await ctx.db
+      .query("documents")
+      .withIndex("porNombre", (q) => q.eq("fileName", nombre))
+      .collect();
+    const mismaPagina = (d: Doc<"documents">) =>
+      d.origen === args.origen &&
+      args.notionPageId !== undefined &&
+      d.notionPageId === args.notionPageId;
+    // Se reutiliza la fila de esta misma página, o una subida manual fallida
+    // (como hace `registrar`). NUNCA la fila fallida de OTRA página de Notion:
+    // esa página sigue teniendo el id en su lista y, al resincronizarse,
+    // borraría o reingiriría lo que ahora sería de esta.
+    const reutilizable =
+      existentes.find((d) => mismaPagina(d)) ??
+      existentes.find((d) => d.status === "failed" && d.origen !== "notion");
+    const bloquea = existentes.find(
+      (d) => d !== reutilizable && (d.status !== "failed" || d.origen === "notion"),
+    );
+    if (bloquea) {
+      throw errorDatos("conflicto", `'${nombre}' ya está indexado. Bórralo primero.`);
+    }
+
+    const ahora = Date.now();
+    if (reutilizable) {
+      if (reutilizable.storageId && reutilizable.storageId !== args.storageId) {
+        await borrarFichero(ctx, reutilizable.storageId);
+      }
+      await ctx.db.patch(reutilizable._id, {
+        sha256,
+        pages: 0,
+        chunks: 0,
+        status: "processing",
+        error: undefined,
+        subidoPor: undefined,
+        ingestadoEn: ahora,
+        storageId: args.storageId,
+        origen: args.origen,
+        notionPageId: args.notionPageId,
+      });
+      await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.ingestar, {
+        documentId: reutilizable._id,
+      });
+      return reutilizable._id;
+    }
+    const documentId = await ctx.db.insert("documents", {
+      fileName: nombre,
+      sha256,
+      pages: 0,
+      chunks: 0,
+      status: "processing",
+      ingestadoEn: ahora,
+      storageId: args.storageId,
+      origen: args.origen,
+      notionPageId: args.notionPageId,
+    });
     await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.ingestar, { documentId });
     return documentId;
   },
@@ -300,6 +364,44 @@ export const borrarChunksRestantes = internalMutation({
 // ---------------------------------------------------------------------------
 // Ayudantes con base
 // ---------------------------------------------------------------------------
+/** Validación común de un registro: nombre saneado con extensión permitida,
+ *  sha256 hexadecimal y fichero presente, no vacío y bajo el límite. Es la
+ *  misma para la subida manual y para la sincronización, para que un fichero
+ *  que Notion trae no pueda saltarse una regla que la subida sí impone. */
+async function validarRegistro(
+  ctx: MutationCtx,
+  args: { storageId: Id<"_storage">; fileName: string; sha256: string },
+): Promise<{ nombre: string; sha256: string }> {
+  const nombre = sanearNombre(args.fileName);
+  if (!nombre) throw errorDatos("invalido", "Nombre de archivo inválido.");
+  const ext = extensionDe(nombre);
+  if (!(EXTENSIONES_PERMITIDAS as readonly string[]).includes(ext)) {
+    throw errorDatos(
+      "invalido",
+      `Extensión '${ext || "(ninguna)"}' no permitida. Permitidas: ` +
+        `${[...EXTENSIONES_PERMITIDAS].sort().join(", ")}.`,
+    );
+  }
+  const sha256 = args.sha256.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw errorDatos("invalido", "El sha256 debe ser hexadecimal de 64 caracteres.");
+  }
+
+  const meta = await ctx.db.system.get(args.storageId);
+  if (!meta) {
+    throw errorDatos("invalido", "El archivo no está en el almacenamiento: vuelve a subirlo.");
+  }
+  if (meta.size === 0) throw errorDatos("invalido", "El archivo está vacío.");
+  const limiteMb = ajustes().limiteSubidaMb;
+  if (meta.size > limiteMb * 1024 * 1024) {
+    throw errorDatos(
+      "invalido",
+      `Archivo demasiado grande (${meta.size} bytes; máx. ${limiteMb} MB en este despliegue).`,
+    );
+  }
+  return { nombre, sha256 };
+}
+
 /** Borra hasta `LOTE_CHUNKS` fragmentos del documento. Devuelve `true` si el
  *  lote salió lleno, o sea, si puede quedar más. */
 async function borrarLoteDeChunks(

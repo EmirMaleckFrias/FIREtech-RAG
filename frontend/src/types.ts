@@ -275,6 +275,9 @@ export interface DocumentInfo {
   status: DocumentStatus;
   error: string | null;
   ingestadoEn: number;
+  /** De dónde salió: subida manual o sincronización con Notion. null en los
+   *  registros anteriores a que existiera el campo. */
+  origen: 'subida' | 'notion' | null;
 }
 
 /** Señal para enfocar una fuente concreta en el panel derecho (clic en una cita). */

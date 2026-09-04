@@ -531,6 +531,10 @@ describe("documentos", () => {
       ingestadoEn: expect.any(Number),
       titulo: "Un paper",
       citation: null,
+      // Origen del fichero (subida o notion) y su página, desde la
+      // sincronización con Notion; null en los registros anteriores.
+      origen: null,
+      notionPageId: null,
     });
   });
 

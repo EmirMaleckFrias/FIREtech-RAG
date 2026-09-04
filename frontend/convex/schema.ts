@@ -174,11 +174,51 @@ export default defineSchema({
     // esto eran facets sobre el payload.
     language: v.optional(v.string()),
     documentType: v.optional(v.string()),
+    // De dónde salió el fichero. Ausente = subida manual anterior a la
+    // sincronización con Notion. Con `notion`, `notionPageId` es la página de
+    // la que se bajó (texto renderizado o adjunto) y quien lo gestiona es
+    // `convex/notion/sync.ts`: si la página se archiva, el documento se va.
+    origen: v.optional(v.union(v.literal("subida"), v.literal("notion"))),
+    notionPageId: v.optional(v.string()),
   })
     // El nombre de archivo identifica el documento dentro del despliegue: es
     // el que usaban las rutas de subida, reindexado y borrado.
     .index("porNombre", ["fileName"])
     .index("porEstado", ["status"]),
+
+  // Una fila por página de la base de Notion que se ha sincronizado. Es la
+  // memoria que permite saltar páginas sin cambios (`lastEdited` es el
+  // `last_edited_time` que devuelve Notion, tal cual, como cadena ISO: se
+  // compara por igualdad, no por orden) y saber qué documentos borrar cuando
+  // la página desaparece.
+  notionPaginas: defineTable({
+    pageId: v.string(),
+    titulo: v.string(),
+    lastEdited: v.string(),
+    // Todos los documentos que salieron de esta página: el texto renderizado
+    // y los adjuntos. `documentoTextoId` señala cuál es el del texto, para
+    // reutilizar su fila al resincronizar sin confundirlo con un adjunto .md.
+    documentIds: v.array(v.id("documents")),
+    documentoTextoId: v.optional(v.id("documents")),
+    sincronizadoEn: v.number(),
+    // Último fallo al procesar la página, o "archivada" si NOTION_DELETE_ARCHIVED
+    // está apagado y la página ya no está en la base. Una fila con error se
+    // reintenta en la siguiente corrida aunque `lastEdited` no cambie.
+    error: v.optional(v.string()),
+  }).index("porPageId", ["pageId"]),
+
+  // Corridas de la sincronización con Notion, para el bloque de estado que ve
+  // el administrador. Se conservan solo las últimas 20 (ver notion/datos.ts).
+  notionSincronizaciones: defineTable({
+    empezadoEn: v.number(),
+    terminadoEn: v.optional(v.number()),
+    paginas: v.number(),
+    nuevos: v.number(),
+    actualizados: v.number(),
+    borrados: v.number(),
+    errores: v.array(v.string()),
+    estado: v.union(v.literal("running"), v.literal("ok"), v.literal("error")),
+  }),
 
   // Los fragmentos indexados: lo que era la colección de Qdrant.
   chunks: defineTable({

@@ -71,6 +71,14 @@ export interface Ajustes {
   // Dominio de correo permitido para darse de alta.
   dominioPermitido: string;
   limiteSubidaMb: number;
+  // Sincronización con Notion (convex/notion/). Notion es la fuente de verdad
+  // del corpus: sin token o sin base de datos la función existe pero está
+  // apagada, y `notionSyncMinutes` en 0 apaga la periódica (la manual del
+  // administrador sigue funcionando).
+  notionToken: string;
+  notionDatabaseId: string;
+  notionSyncMinutes: number;
+  notionBorrarArchivados: boolean;
 }
 
 export function ajustes(): Ajustes {
@@ -140,6 +148,18 @@ export function ajustes(): Ajustes {
     // (Antes 18 MB por confundir la subida con el tope de 20 MB de una
     // petición HTTP de Convex, que no interviene en este camino.)
     limiteSubidaMb: numero("UPLOAD_LIMIT_MB", 100),
+    notionToken: texto("NOTION_TOKEN"),
+    // Se acepta el id con o sin guiones y también la URL de la base pegada
+    // tal cual: `notion/api.ts` lo normaliza. Aquí solo se lee.
+    notionDatabaseId: texto("NOTION_DATABASE_ID"),
+    // 60 por defecto: el cron de convex/crons.ts corre cada hora y la acción
+    // se autoexcluye si la última corrida terminó hace menos de esto. Un
+    // valor negativo cuenta como 0 (apagado).
+    notionSyncMinutes: Math.max(0, numero("NOTION_SYNC_MINUTES", 60)),
+    // Una página archivada o retirada de la base deja de ser corpus: si Notion
+    // es la fuente de verdad, lo que sale de Notion sale del índice. En false
+    // la fila queda marcada y los documentos se conservan.
+    notionBorrarArchivados: booleano("NOTION_DELETE_ARCHIVED", true),
   };
 }
 
