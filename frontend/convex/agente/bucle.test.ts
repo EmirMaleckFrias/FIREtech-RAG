@@ -641,7 +641,11 @@ describe("camino documental, modo normal", () => {
     expect(modelo.llamadas[0].reasoning_effort).toBe("high");
   });
 
-  test("si la conversación se borra mientras el agente trabaja, termina sin recrear el mensaje", async () => {
+  test("si la conversación se borra mientras el agente trabaja, ABANDONA: no recrea el mensaje ni sigue gastando", async () => {
+    // Antes terminaba la respuesta entera (redactaba y revisaba) para
+    // descubrir al publicar que no había fila. Ahora la primera escritura que
+    // no encuentra el turno lo da por abandonado y se para ahí, que es el
+    // mismo mecanismo con el que funciona el botón de parar.
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
@@ -654,8 +658,8 @@ describe("camino documental, modo normal", () => {
 
     const mensajes = await t.run(async (ctx) => ctx.db.query("messages").collect());
     expect(mensajes.map((x) => x.role)).toEqual(["user"]);
-    expect(stream).toHaveBeenCalledTimes(1);
-    expect(revisar).toHaveBeenCalledTimes(1);
+    expect(stream).not.toHaveBeenCalled();
+    expect(revisar).not.toHaveBeenCalled();
   });
 });
 

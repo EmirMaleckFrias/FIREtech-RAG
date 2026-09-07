@@ -242,7 +242,16 @@ export interface CoberturaPunto {
  *  va escribiendo y el cliente se resuscribe: `pensando` -> `buscando` ->
  *  `redactando` -> `revisando` -> `listo` | `error`. El texto de la respuesta
  *  NO aparece hasta `listo`: la barrera de revisión lo retiene. */
-export type EstadoTurno = 'pensando' | 'buscando' | 'redactando' | 'revisando' | 'listo' | 'error';
+export type EstadoTurno =
+  | 'pensando'
+  | 'buscando'
+  | 'redactando'
+  | 'revisando'
+  | 'listo'
+  | 'error'
+  /** La usuaria lo detuvo con el botón de parar. Final, y NO es un error: el
+   *  turno no publica texto y conserva lo que llevara buscado. */
+  | 'cancelado';
 
 /** Mensaje en el estado local del chat. */
 export interface ChatMessage {

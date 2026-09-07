@@ -115,6 +115,7 @@ const ORDEN: Record<EstadoTurno, number> = {
   revisando: 3,
   listo: 4,
   error: 4,
+  cancelado: 4,
 };
 
 function estadoDe(indice: number, actual: number, turnoCerrado: boolean): EstadoPaso {
@@ -184,9 +185,10 @@ export function pasosDelTurno(msg: Pick<ChatMessage, 'estado' | 'hops' | 'plan' 
     comprobar,
   ];
 
-  if (msg.estado === 'error') {
+  if (msg.estado === 'error' || msg.estado === 'cancelado') {
     // Solo lo que consta: la pregunta se entendió si hubo plan o búsquedas,
-    // y se buscó si hay hops. Lo demás no se afirma.
+    // y se buscó si hay hops. Lo demás no se afirma. Un turno detenido se lee
+    // igual: se enseña lo que llegó a hacer, no lo que iba a hacer.
     const hubo = msg.hops.length > 0 || msg.plan.length > 0;
     return pasos
       .filter((p) => (p.clave === 'entender' && hubo) || (p.clave === 'buscar' && msg.hops.length > 0))

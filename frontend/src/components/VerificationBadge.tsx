@@ -9,9 +9,11 @@
 //   por defecto del backend ante un fallo del modelo o un tope alcanzado, así
 //   que pintarlo en verde sería justo la garantía falsa que el verificador
 //   existe para evitar.
-// - **Cerrado por defecto salvo que haya algo que mirar.** Quien lee una
-//   respuesta limpia no debería tener que cerrar un panel; quien lee una con
-//   problemas no debería tener que buscarlos.
+// - **Cerrado por defecto, siempre.** Antes se abría solo cuando había algo
+//   que mirar, y con respuestas largas eso era medio metro de scroll cada vez:
+//   una respuesta de 50 afirmaciones con tres parciales desplegaba las
+//   cincuenta. La cabecera ya dice QUÉ pasa (cuántas parciales, cuántas sin
+//   comprobar) y en qué color; el detalle se abre al pulsarla.
 // - No hay porcentaje grande de "fidelidad" en la cabecera a propósito: una
 //   cifra sobre 3 afirmaciones invita a compararla entre respuestas como si
 //   fuera una nota, y no lo es.
@@ -24,7 +26,8 @@ interface VerificationBadgeProps {
   informe: Verificacion;
 }
 
-/** Cómo se presenta cada veredicto. `grave` decide si abre el panel solo. */
+/** Cómo se presenta cada veredicto. `grave` decide el color y el resumen de
+ *  la cabecera (ya no si el panel se abre solo: nunca lo hace). */
 const ESTILO: Record<Veredicto, { etiqueta: string; clase: string; grave: boolean }> = {
   sostenida: { etiqueta: 'Sostenida', clase: 'verif-ok', grave: false },
   parcial: { etiqueta: 'Parcial', clase: 'verif-parcial', grave: true },
@@ -41,8 +44,9 @@ function cuenta(afirmaciones: Afirmacion[], veredicto: Veredicto): number {
 export function VerificationBadge({ informe }: VerificationBadgeProps) {
   const { afirmaciones } = informe;
   const problemas = afirmaciones.filter((a) => ESTILO[a.veredicto].grave);
-  // Abre solo si hay algo que mirar: lo limpio no interrumpe.
-  const [abierto, setAbierto] = useState(problemas.length > 0);
+  // Cerrado, con avisos o sin ellos: el detalle es tan largo como la respuesta
+  // y quien quiera verlo pulsa la cabecera.
+  const [abierto, setAbierto] = useState(false);
 
   // Puntos del plan con evidencia recuperada que la respuesta no uso. No
   // cambia el color ni abre el panel (no es un fallo de fidelidad: nada de lo
@@ -94,6 +98,7 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
         className="verif-cabecera"
         aria-expanded={abierto}
         onClick={() => setAbierto((v) => !v)}
+        title={abierto ? 'Ocultar el detalle' : 'Ver el detalle de cada afirmación'}
       >
         {limpio ? <IconCheck size={13} /> : <IconAlert size={13} />}
         <span className="verif-resumen">{resumen}</span>

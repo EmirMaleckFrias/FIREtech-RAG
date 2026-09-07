@@ -161,6 +161,10 @@
   --fmt-imagen: #a78bfa;
   --fmt-texto: #78716c;
 
+  /* El árbol de la marca, aclarado para pintarlo como máscara sobre el fondo
+     oscuro (ver .msg-avatar). El morado de marca es #3d1973. */
+  --logo-arbol: #c0a3f0;
+
   --green: #4ade80;
   --red: #f87171;
   --amber: #f59e0b;
@@ -969,6 +973,26 @@ textarea {
   transition: box-shadow 0.2s ease;
 }
 
+/* En OSCURO no hay disco: el PNG del árbol trae su propia transparencia y se
+   usa como máscara, pintado en lavanda clara. Con el disco blanco, a 26 px
+   sobre un fondo casi negro, lo que se veía era una moneda blanca y no un
+   árbol; y sin disco pero con su morado original (#3d1973) el árbol se pierde
+   contra #101010. La máscara da las dos cosas: el árbol solo, y legible.
+   Va en un ::before para que el anillo de "estás viendo sus fuentes"
+   (box-shadow, que una máscara recortaría) siga funcionando. */
+:root[data-theme='dark'] .msg-avatar {
+  background: none;
+}
+
+:root[data-theme='dark'] .msg-avatar::before {
+  content: '';
+  width: 100%;
+  height: 100%;
+  background: var(--logo-arbol);
+  -webkit-mask: url('/arbol-marca.png') center / 78% no-repeat;
+  mask: url('/arbol-marca.png') center / 78% no-repeat;
+}
+
 .msg-panel-target .msg-avatar {
   box-shadow: 0 0 0 3px var(--accent-soft-2);
 }
@@ -1030,6 +1054,26 @@ textarea {
 }
 
 /* error del mensaje */
+/* Turno que la usuaria detuvo. Tono neutro: no es un error, es una decisión
+   suya, y el texto lo dice sin dramatizar. */
+.msg-detenido {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.msg-detenido svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.composer-aviso {
+  color: var(--red);
+}
+
 .msg-error {
   display: flex;
   align-items: flex-start;
@@ -1584,6 +1628,114 @@ textarea {
 }
 
 /* tablas: bordes hairline, header sutil, scroll horizontal propio */
+/* Diagrama Mermaid dentro de una respuesta. El SVG lo genera Mermaid con el
+   tema del momento; aquí solo se le da sitio: centrado, sin desbordar el ancho
+   del mensaje y con scroll propio si el grafo sale ancho (nunca scroll
+   horizontal de la página). */
+.md-mermaid {
+  margin: 1em 0;
+  padding: 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow-x: auto;
+  text-align: center;
+}
+
+.md-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Mientras se carga Mermaid (solo la primera vez de la sesión). */
+.md-mermaid-cargando {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+}
+
+.md-mermaid-cargando .skeleton {
+  width: 60%;
+  height: 12px;
+  border-radius: 999px;
+}
+
+/* Diagrama de flujo dentro de una respuesta (```flujo). Un paso por fila,
+   colgados de un riel vertical, con las ramas sangradas y sin número: es el
+   mismo lenguaje visual que la línea de tiempo del turno, para que la
+   aplicación no tenga dos formas distintas de dibujar una secuencia. */
+.md-flujo {
+  margin: 0.9em 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.md-flujo-paso {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0 4px 2px;
+}
+
+/* el riel: de marca a marca, nunca por debajo del último paso */
+.md-flujo-paso:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 26px;
+  bottom: -4px;
+  width: 1px;
+  background: var(--border-strong);
+}
+
+.md-flujo-marca {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.md-flujo-texto {
+  min-width: 0;
+  padding-top: 1px;
+}
+
+/* Rama de una decisión: sangrada, sin número y con un codo que la cuelga del
+   paso anterior. */
+.md-flujo-rama {
+  padding-left: 26px;
+}
+
+.md-flujo-rama::before {
+  left: 38px;
+}
+
+.md-flujo-rama .md-flujo-marca {
+  width: 13px;
+  height: 13px;
+  margin-top: 5px;
+  border: 0;
+  border-left: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0 0 0 4px;
+  background: none;
+}
+
 .md-table-wrap {
   overflow-x: auto;
   margin: 0.8em 0;

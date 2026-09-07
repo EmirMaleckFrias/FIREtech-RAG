@@ -182,3 +182,21 @@ describe('etiquetaFase', () => {
     expect(etiquetaFase('pensando', false)).toBe('Pensando…');
   });
 });
+
+describe('un turno detenido por la usuaria', () => {
+  const detenido = { role: 'assistant' as const, estado: 'cancelado', creadoEn: AHORA - 1000 };
+
+  it('es final: el composer se libera y el reloj no lo pisa', () => {
+    expect(estadoDeMensaje(detenido, AHORA)).toBe('cancelado');
+    // Ni pasado el tope del perro guardián: no es un turno colgado.
+    expect(estadoDeMensaje(detenido, AHORA + TURNO_MAX_MS + 1000)).toBe('cancelado');
+  });
+
+  it('no es un error: no lleva mensaje de error y no está en curso', () => {
+    const m = mensajeDesdeDoc({ ...detenido, _id: id('m1'), content: '' }, AHORA, null);
+    expect(m.estado).toBe('cancelado');
+    expect(m.streaming).toBe(false);
+    expect(m.error).toBeNull();
+    expect(m.content).toBe('');
+  });
+});

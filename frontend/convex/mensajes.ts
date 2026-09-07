@@ -205,6 +205,12 @@ export const actualizarTurno = internalMutation({
   handler: async (ctx, { messageId, cambios }): Promise<boolean> => {
     const m = await ctx.db.get(messageId);
     if (!m) return false;
+    // Detenido por la usuaria: no se escribe NADA más. Es la garantía dura de
+    // `detener`, y va aquí y no en el agente porque este es el único camino de
+    // escritura del turno: aunque la acción siga en vuelo (una acción de
+    // Convex no se puede matar desde fuera), su respuesta ya no puede
+    // aparecer. Devuelve `false` para que el bucle deje de trabajar.
+    if (m.estado === "cancelado") return false;
     // `patch` con un valor `undefined` BORRA el campo. Los campos que no
     // llegan no deben tocarse, así que se quitan antes.
     const parche = Object.fromEntries(
@@ -212,6 +218,43 @@ export const actualizarTurno = internalMutation({
     ) as typeof cambios;
     if (Object.keys(parche).length > 0) await ctx.db.patch(messageId, parche);
     return true;
+  },
+});
+
+/** Detiene un turno en marcha, como el botón de parar de cualquier chat.
+ *
+ *  Cancelación COOPERATIVA, que es la única posible aquí: el agente corre como
+ *  una acción de Convex y una acción no se puede abortar desde fuera. Lo que
+ *  hace esto es marcar el turno `cancelado`; a partir de ese momento
+ *  `actualizarTurno` rechaza toda escritura del agente, así que:
+ *
+ *  - la interfaz lo ve al instante por la suscripción, sin esperar a nada;
+ *  - el texto que el agente estuviera redactando NUNCA se publica (y eso
+ *    respeta el principio de que nada sin auditar llega al navegador: un
+ *    borrador a medio revisar no es una respuesta);
+ *  - lo que ya se había escrito (plan, búsquedas, fuentes) se conserva, que es
+ *    lo que la usuaria quiere ver cuando para: qué llevaba encontrado;
+ *  - el agente lo detecta en su siguiente escritura y abandona sin gastar más.
+ *
+ *  Idempotente: parar un turno ya cerrado no es un error (se puede pulsar
+ *  justo cuando la respuesta aterriza), solo devuelve `detenido: false`. */
+export const detener = mutation({
+  args: { messageId: v.id("messages") },
+  handler: async (ctx, { messageId }): Promise<{ detenido: boolean; estado: string }> => {
+    const u = await usuario(ctx);
+    const m = await ctx.db.get(messageId);
+    if (!m || m.role !== "assistant") {
+      throw errorDatos("no_encontrado", "No se encontró la respuesta que quieres detener.");
+    }
+    // Propiedad: la conversación tiene que ser suya (mismo criterio que
+    // `calificar`, y un mensaje ajeno responde `no_encontrado`, no "prohibido").
+    await sesionDe(ctx, m.sessionId, u._id);
+    const estado = m.estado ?? "listo";
+    if (estado === "listo" || estado === "error" || estado === "cancelado") {
+      return { detenido: false, estado };
+    }
+    await ctx.db.patch(messageId, { estado: "cancelado" });
+    return { detenido: true, estado: "cancelado" };
   },
 });
 
@@ -340,7 +383,9 @@ export const marcarColgado = internalMutation({
   handler: async (ctx, { messageId }): Promise<boolean> => {
     const m = await ctx.db.get(messageId);
     if (!m || m.role !== "assistant") return false;
-    if (m.estado === "listo" || m.estado === "error") return false;
+    // `cancelado` también es final: un turno que la usuaria paró no se
+    // reescribe como error de tiempo diez minutos después.
+    if (m.estado === "listo" || m.estado === "error" || m.estado === "cancelado") return false;
     await ctx.db.patch(messageId, {
       estado: "error",
       error:

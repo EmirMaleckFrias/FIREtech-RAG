@@ -34,6 +34,7 @@ const ESTADOS: readonly EstadoTurno[] = [
   'revisando',
   'listo',
   'error',
+  'cancelado',
 ];
 
 /** Lo que el frontend lee de un documento `messages`. Es un tipo estructural
@@ -65,7 +66,10 @@ function estadoDeclarado(doc: Pick<MensajeDoc, 'role' | 'estado' | 'error'>): Es
 }
 
 export function esFinal(estado: EstadoTurno): boolean {
-  return estado === 'listo' || estado === 'error';
+  // `cancelado` es final: un turno detenido por la usuaria no vuelve a
+  // moverse, así que el composer se libera y el perro guardián del reloj no
+  // lo convierte en un error de tiempo.
+  return estado === 'listo' || estado === 'error' || estado === 'cancelado';
 }
 
 /** Estado a pintar, con el tope de tiempo aplicado. */

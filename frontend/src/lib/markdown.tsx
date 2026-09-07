@@ -8,6 +8,7 @@
 // activarían por accidente.
 
 import type { ReactNode } from 'react';
+import { Diagrama, respaldoDeMermaid } from '../components/Diagrama';
 import { IconDocument } from '../components/icons';
 
 export interface CitationRef {
@@ -239,6 +240,43 @@ function isHr(s: string): boolean {
   return /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(s);
 }
 
+/** Cerca que se pinta con Mermaid. */
+const ES_MERMAID = /^(?:mermaid|mmd)$/;
+/** Cerca que se pinta como lista de pasos conectados, sin librería. */
+const ES_FLUJO = /^(?:flujo|diagrama|algoritmo|flow)$/;
+
+export interface PasoFlujo {
+  texto: string;
+  /** Es una rama de la decisión anterior ("Si se confirma: ...", "- ..."). */
+  rama: boolean;
+}
+
+/**
+ * Los pasos de un bloque de diagrama: una línea, un paso.
+ *
+ * Una línea que empieza por una marca de viñeta o una flecha, o que abre con
+ * "Si ...:", es una RAMA del paso anterior y se pinta sangrada y sin número:
+ * en un algoritmo clínico las condiciones cuelgan de la decisión, no son el
+ * paso siguiente. Las líneas en blanco no cuentan.
+ *
+ * Puro a propósito: es lo que se puede probar sin DOM.
+ */
+export function parsearFlujo(cuerpo: string): PasoFlujo[] {
+  const pasos: PasoFlujo[] = [];
+  for (const cruda of cuerpo.split('\n')) {
+    const linea = cruda.trim();
+    if (linea === '') continue;
+    // Sintaxis de mermaid que el modelo puede colar por costumbre: se ignora
+    // la cabecera del grafo, no se pinta como un paso.
+    if (/^(?:graph|flowchart|sequenceDiagram|classDiagram)\b/i.test(linea)) continue;
+    const sinMarca = linea.replace(/^(?:-->|->|→|--|-|\*|•)\s*/, '').trim();
+    if (sinMarca === '') continue;
+    const rama = sinMarca !== linea || /^si\b[^:]{0,80}:/i.test(sinMarca);
+    pasos.push({ texto: sinMarca, rama });
+  }
+  return pasos;
+}
+
 function isFence(s: string): boolean {
   return /^\s*```/.test(s);
 }
@@ -313,6 +351,7 @@ function renderBlocks(
 
     // Bloque de código ```
     if (isFence(line)) {
+      const lenguaje = line.trim().replace(/^`{3,}/, '').trim().toLowerCase();
       const code: string[] = [];
       i++;
       while (i < lines.length && !isFence(lines[i])) {
@@ -320,6 +359,38 @@ function renderBlocks(
         i++;
       }
       i++; // consume cierre (o EOF)
+      // Diagrama de verdad (Mermaid), cargado solo si una respuesta lo trae:
+      // ver components/Diagrama.tsx. Si Mermaid no carga o el código no
+      // compila, ese componente cae a la lista de pasos de abajo.
+      if (ES_MERMAID.test(lenguaje)) {
+        const codigo = code.join('\n');
+        out.push(
+          <Diagrama key={nextKey()} codigo={codigo} respaldo={respaldoDeMermaid(codigo)} />,
+        );
+        continue;
+      }
+      // Diagrama en llano: un paso por línea, conectados, sin dependencias.
+      // Se conserva porque es lo que el modelo escribe cuando la secuencia es
+      // lineal, y porque es el respaldo de Mermaid.
+      const pasos = ES_FLUJO.test(lenguaje) ? parsearFlujo(code.join('\n')) : [];
+      if (pasos.length > 0) {
+        const fKey = nextKey();
+        out.push(
+          <ol key={fKey} className="md-flujo">
+            {pasos.map((paso, k) => (
+              <li key={k} className={`md-flujo-paso ${paso.rama ? 'md-flujo-rama' : ''}`}>
+                <span className="md-flujo-marca" aria-hidden="true">
+                  {paso.rama ? '' : String(pasos.slice(0, k + 1).filter((x) => !x.rama).length)}
+                </span>
+                <span className="md-flujo-texto">
+                  {renderInline(paso.texto, onCitation, `f${fKey}-${k}`)}
+                </span>
+              </li>
+            ))}
+          </ol>,
+        );
+        continue;
+      }
       out.push(
         <pre key={nextKey()} className="md-pre">
           <code>{code.join('\n')}</code>

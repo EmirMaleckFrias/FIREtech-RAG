@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import type { CitationRef } from '../lib/markdown';
 import { debeEnviar, usePreferencias } from '../lib/preferencias';
 import type { ChatMessage, ModoPensamiento } from '../types';
-import { IconArrowUp, IconCheck, IconChevronDown, IconSpinner } from './icons';
+import { IconArrowUp, IconCheck, IconChevronDown, IconStop } from './icons';
 import { MessageItem } from './MessageItem';
 import { WelcomeIntro, WelcomeSuggestions } from './Welcome';
 
@@ -16,6 +16,10 @@ interface ChatProps {
   modo: ModoPensamiento;
   onModoChange: (modo: ModoPensamiento) => void;
   onFeedback: (msg: ChatMessage, rating: 1 | -1) => void;
+  /** Detener la respuesta en marcha (botón de parar). */
+  onStop: () => void;
+  /** Detener falló: se dice debajo del cuadro de texto. */
+  stopError?: string | null;
   /** Mensaje por id de respuesta cuando guardar la valoración falló. */
   feedbackErrores?: Record<string, string>;
   onCitation: (msgLocalId: string, ref: CitationRef) => void;
@@ -63,6 +67,8 @@ export function Chat({
   onCitation,
   onShowSources,
   feedbackErrores = {},
+  onStop,
+  stopError = null,
 }: ChatProps) {
   const [draft, setDraft] = useState('');
   const preferencias = usePreferencias();
@@ -342,18 +348,19 @@ export function Chat({
               )}
             </div>
             {isStreaming ? (
-              /* El agente corre en el servidor y el contrato no tiene forma de
-                 cancelarlo, asi que no se ofrece un "detener" que no haria
-                 nada: el boton espera, y la respuesta llega aunque se cierre
-                 la pestaña. */
+              /* Parar, como en cualquier chat. La cancelación es cooperativa:
+                 `mensajes.detener` marca el turno y desde ese momento el
+                 agente, que corre en el servidor y no se puede abortar desde
+                 aquí, no puede escribir nada más; el borrador a medio revisar
+                 NO se publica (ver convex/mensajes.ts). */
               <button
                 type="button"
-                className="send-btn"
-                disabled
-                title="El asistente está respondiendo"
-                aria-label="El asistente está respondiendo"
+                className="send-btn send-stop"
+                onClick={onStop}
+                title="Detener la respuesta"
+                aria-label="Detener la respuesta"
               >
-                <IconSpinner />
+                <IconStop size={13} />
               </button>
             ) : (
               <button
@@ -368,6 +375,11 @@ export function Chat({
             )}
           </div>
         </form>
+        {stopError !== null && (
+          <p className="composer-note composer-aviso" role="status">
+            {stopError}
+          </p>
+        )}
         {!showWelcome && (
           <div className="composer-meta">
             <span className="composer-hint" aria-hidden="true">

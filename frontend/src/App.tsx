@@ -262,6 +262,7 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
 
   const enviar = useMutation(api.mensajes.enviar);
   const calificar = useMutation(api.mensajes.calificar);
+  const detener = useMutation(api.mensajes.detener);
   const borrarSesion = useMutation(api.sesiones.borrar);
 
   // Modo de pensamiento elegido. Se recuerda entre recargas porque quien
@@ -279,6 +280,11 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   const [feedbackLocal, setFeedbackLocal] = useState<Record<string, 1 | -1>>({});
   /** Mensaje por respuesta cuando guardar la valoración falló. */
   const [feedbackError, setFeedbackError] = useState<Record<string, string>>({});
+  /** Detener la respuesta falló: se dice bajo el cuadro de texto. */
+  const [stopError, setStopError] = useState<string | null>(null);
+  /** Se pulsó parar antes de que el envío devolviera el id del mensaje: se
+   *  guarda el localId del par pendiente y se detiene en cuanto llega. */
+  const detencionPedida = useRef<string | null>(null);
 
   const [pendiente, setPendiente] = useState<Pendiente | null>(null);
   // Copia del pendiente para las promesas en vuelo: si el usuario cambió de
@@ -447,6 +453,8 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
 
       const localId = newLocalId();
       const nuevo: Pendiente = { localId, texto: trimmed, messageId: null, error: null, creadoEn: Date.now() };
+      detencionPedida.current = null;
+      setStopError(null);
       fijarPendiente(nuevo);
       setSelectedMsgId(null);
       setSourceFocus(null);
@@ -463,6 +471,11 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
         if (pendienteRef.current?.localId !== localId) return; // el usuario cambió de conversación
         setCurrentSessionId((prev) => prev ?? r.sessionId);
         fijarPendiente({ ...nuevo, messageId: r.messageId });
+        // Pulsó parar mientras el envío estaba en vuelo: ya hay id, se detiene.
+        if (detencionPedida.current === localId) {
+          detencionPedida.current = null;
+          void detener({ messageId: r.messageId }).catch(() => undefined);
+        }
       } catch (err) {
         if (pendienteRef.current?.localId !== localId) return;
         if (avisarSiEsFatal(err)) return;
@@ -472,8 +485,32 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
         });
       }
     },
-    [currentSessionId, enviar, fijarPendiente, isStreaming, loadingMessages, modo],
+    [currentSessionId, detener, enviar, fijarPendiente, isStreaming, loadingMessages, modo],
   );
+
+  // --- parar ---
+  /**
+   * Detiene la respuesta en marcha. La cancelación es cooperativa: la mutación
+   * marca el turno y el agente, que corre en el servidor y no se puede abortar
+   * desde aquí, deja de poder escribir en él. Si el envío aún está en vuelo no
+   * hay id todavía: se apunta y se detiene al llegar (ver `handleSend`).
+   */
+  const handleStop = useCallback(async () => {
+    const enCurso = messages.find((m) => m.role === 'assistant' && m.streaming);
+    if (!enCurso) return;
+    setStopError(null);
+    if (enCurso.id === null) {
+      detencionPedida.current = pendienteRef.current?.localId ?? null;
+      return;
+    }
+    try {
+      await detener({ messageId: enCurso.id });
+    } catch (err) {
+      if (!avisarSiEsFatal(err)) {
+        setStopError(mensajeDeError(err, 'No se pudo detener la respuesta. Vuelve a intentarlo.'));
+      }
+    }
+  }, [detener, messages]);
 
   // --- borrado de conversación ---
   const handleDeleteSession = useCallback(
@@ -632,6 +669,8 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
           }}
           onFeedback={(m, r) => void handleFeedback(m, r)}
           feedbackErrores={feedbackError}
+          onStop={() => void handleStop()}
+          stopError={stopError}
           onCitation={handleCitation}
           onShowSources={handleShowSources}
         />

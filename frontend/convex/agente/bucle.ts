@@ -182,14 +182,24 @@ export const correr = internalAction({
     // escrituras CRÍTICAS (publicar, o marcar el error) sí se reintentan con
     // espera, porque si la final falla el mensaje se quedaba en "revisando"
     // para siempre sin contenido ni error: lo cazó la revisión adversarial.
+    // El turno dejó de ser nuestro: la usuaria lo detuvo (`mensajes.detener`)
+    // o borró la conversación. Se distingue de "la escritura falló" a
+    // propósito: un fallo transitorio de la base se reintenta y el trabajo
+    // sigue, pero un turno abandonado no se vuelve a tocar.
+    let abandonado = false;
     const actualizar = async (cambios: Record<string, unknown>, critico = false): Promise<boolean> => {
+      if (abandonado) return false;
       const intentos = critico ? 4 : 1;
       for (let i = 1; i <= intentos; i++) {
         try {
-          await ctx.runMutation(internal.mensajes.actualizarTurno, {
+          const sigue = await ctx.runMutation(internal.mensajes.actualizarTurno, {
             messageId: args.messageId,
             cambios,
           });
+          if (!sigue) {
+            abandonado = true;
+            return false;
+          }
           return true;
         } catch (exc) {
           console.error(`No se pudo escribir el avance del mensaje (intento ${i}/${intentos})`, args.messageId, exc);
@@ -245,6 +255,7 @@ export const correr = internalAction({
 
       // 2. Plan de evidencia. El ancla e0 es SIEMPRE la pregunta literal.
       await actualizar({ estado: "buscando" });
+      if (abandonado) return;
       let items: planner.PuntoPlan[] = [];
       let preguntaEn = "";
       if (modo.planifica) {
@@ -316,6 +327,7 @@ export const correr = internalAction({
       });
       const fuentes = () => fuentesPayload(acumulado.values(), mapa, grados);
       await actualizar({ hops, sources: fuentes() });
+      if (abandonado) return;
 
       // 4. Los mensajes: prompt, modo, historial, pregunta y la evidencia como
       //    intercambio de herramientas sintético (el formato que el modelo ya
@@ -329,7 +341,9 @@ export const correr = internalAction({
       ];
 
       // 5. Redacción, con búsquedas extra acotadas.
+      // Detenida antes de redactar: no se gasta ni una llamada más.
       await actualizar({ estado: "redactando" });
+      if (abandonado) return;
       let hopsExtra = 0;
       let hopsSinAvance = 0;
       // Las consultas del plan ya se ejecutaron: repetirlas, en cualquiera de
@@ -639,6 +653,7 @@ export const correr = internalAction({
 
       // 6. Barrera de fidelidad. El borrador sigue privado hasta aquí.
       await actualizar({ estado: "revisando" });
+      if (abandonado) return;
       const requerida: Record<string, string> = Object.fromEntries(
         plan.map((p) => [p.id, p.evidenceNeeded]),
       );
@@ -740,6 +755,11 @@ export const correr = internalAction({
         }, true);
       }
     } catch (exc) {
+      if (abandonado) {
+        // Se detuvo mientras trabajaba: no es un fallo y no se escribe nada.
+        console.info(`Turno detenido por la usuaria; el agente lo abandona (${args.messageId}).`);
+        return;
+      }
       console.error("El agente falló", args.messageId, exc);
       await actualizar({
         estado: "error",

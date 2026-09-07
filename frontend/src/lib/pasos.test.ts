@@ -148,3 +148,17 @@ describe('resumen y agregados', () => {
     for (const p of piezas) expect(p).not.toMatch(/[·|]/);
   });
 });
+
+describe('turno detenido', () => {
+  it('solo enseña los pasos que llegaron a ocurrir, como el error', () => {
+    const pasos = pasosDelTurno(mensaje({ estado: 'cancelado', streaming: false }));
+    expect(pasos.map((p) => [p.clave, p.estado])).toEqual([
+      ['entender', 'hecho'],
+      ['buscar', 'hecho'],
+    ]);
+  });
+
+  it('detenido antes de buscar no afirma ningún paso', () => {
+    expect(pasosDelTurno(mensaje({ estado: 'cancelado', streaming: false, hops: [], plan: [] }))).toEqual([]);
+  });
+});

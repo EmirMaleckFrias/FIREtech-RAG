@@ -7,6 +7,7 @@ import { CoberturaPregunta, PlanEnVivo } from './Cobertura';
 import { LineaDeTiempo, ResumenPasos } from './Pasos';
 import {
   IconAlert,
+  IconStop,
   IconChevronDown,
   IconDocument,
   IconSearch,
@@ -133,6 +134,19 @@ export function MessageItem({
             <IconAlert size={15} />
             <span>{msg.error}</span>
           </div>
+        )}
+
+        {/* La detuvo la usuaria. No es un error y no se pinta como tal; lo que
+            llegara a buscar sigue arriba, en los pasos. */}
+        {msg.estado === 'cancelado' && (
+          <p className="msg-detenido">
+            <IconStop size={12} />
+            <span>
+              {msg.hops.length > 0
+                ? 'La detuviste. Arriba está lo que llegó a buscar.'
+                : 'La detuviste antes de que empezara a buscar.'}
+            </span>
+          </p>
         )}
 
         {/* Cobertura de la pregunta: que partes tienen evidencia y cuales no

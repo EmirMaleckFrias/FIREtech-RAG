@@ -140,6 +140,11 @@ export default defineSchema({
         v.literal("revisando"),
         v.literal("listo"),
         v.literal("error"),
+        // La usuaria lo detuvo (`mensajes.detener`). Estado FINAL: el turno
+        // no publica texto, conserva lo que llevara buscado, y ninguna
+        // escritura posterior del agente lo puede pisar (ver
+        // `mensajes.actualizarTurno`).
+        v.literal("cancelado"),
       ),
     ),
     error: v.optional(v.string()),

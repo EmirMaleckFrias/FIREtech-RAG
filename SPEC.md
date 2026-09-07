@@ -106,6 +106,7 @@ quien llama (`permisos.ts`): sin sesión, `no_autenticado`; con la cuenta bloque
 | `mensajes.deSesion` | query `{sessionId}` | usuario, propia | Los últimos 200 mensajes en orden, filas completas. |
 | `mensajes.enviar` | mutation `{sessionId?, texto, modo}` | usuario, propia | Crea la sesión si falta (título = primeros 60 caracteres), guarda la pregunta, crea el mensaje del asistente en `pensando` y agenda `agente.bucle.correr`. Devuelve `{sessionId, messageId}`. Texto vacío o de más de 4000 caracteres: `invalido`. |
 | `mensajes.calificar` | mutation `{messageId, rating: 1 \| -1, comentario?}` | usuario, propia | Un voto por usuario y mensaje; repetir reemplaza. |
+| `mensajes.detener` | mutation `{messageId}` | usuario, propia | Para el turno en marcha: lo deja en `cancelado`. Ver sección 6. Un turno ya cerrado devuelve `{detenido: false}` sin error; uno ajeno, `no_encontrado`. |
 | `documentos.listar` | query | usuario | Su corpus: `{_id, fileName, pages, chunks, status, error, ingestadoEn, titulo, citation, avisos, sha256, origen, notionPageId}[]` en orden de ingesta. Nunca el de otra persona. |
 | `documentos.limite` | query | usuario | El límite de subida en MB, para anunciarlo. |
 | `documentos.urlDeSubida` | mutation | usuario | URL firmada del almacenamiento. |
@@ -189,11 +190,20 @@ no recrea el mensaje si la conversación se borró mientras tanto):
 | `revisando` | nada nuevo | barrera de fidelidad |
 | `listo` | `content`, `sources`, `hops` (con `estado_final` y `usado_en_respuesta` en los del plan), `verificacion`, `metrics` | publicación |
 | `error` | `error` (mensaje recortado a 500 caracteres), `metrics` | cualquier excepción |
+| `cancelado` | nada: se conserva lo ya escrito | la usuaria pulsó parar (`mensajes.detener`) |
 
 **`content` queda vacío hasta `listo`.** El texto llega de golpe.
 
 Una pregunta no documental (saludo, pregunta sobre el asistente) pasa de `pensando` a `listo`
 con `sources: []`, `hops: []`, `plan: []` y sin `verificacion`.
+
+**Parar.** `mensajes.detener` deja el turno en `cancelado`, que es un estado FINAL. La
+cancelación es cooperativa, porque una acción de Convex no se puede abortar desde fuera: lo que
+la hace real es que `actualizarTurno` rechace toda escritura sobre un turno cancelado, así que
+el borrador que el agente estuviera revisando NUNCA se publica (principio 5) y lo ya escrito
+(plan, hops, sources) se conserva, que es lo que quiere ver quien para. El agente lo detecta en
+su siguiente escritura, abandona sin gastar más y no marca error. `cancelado` no lleva texto ni
+mensaje de error: no es un fallo, es una decisión de quien pregunta.
 
 Un turno que sigue en un estado no final pasados 630 s desde su creación (540 s de presupuesto
 más margen) se cierra desde el servidor: `mensajes.enviar` agenda `mensajes.marcarColgado`,
@@ -352,10 +362,32 @@ no cuenta como búsqueda extra ni como "sin avance").
 
 ### 9.1 Formato de respuesta
 
-(1) Respuesta directa, 2 a 4 frases con sus citas. (2) Evidencia por punto: cifra, unidades,
-población y sección de la que sale, con su cita. (3) "Contradicciones o matices entre
-documentos", solo si existen. (4) Lo que no está, con las fórmulas literales. Prohibido
-mencionar el plan, los ids `e0..eN`, las herramientas o los "resultados de búsqueda".
+La respuesta va en **Markdown**, y la estructura tiene que ayudar a leer, no decorar. Apartados
+con encabezado de nivel 2, en este orden, omitiendo entero el que no aplique: "## Respuesta
+directa" (2 a 4 frases que contestan la pregunta tal como se hizo, con sus citas), "## Evidencia"
+(por cada parte: el hallazgo con su cifra, unidades, población y la sección de la que sale),
+"## Contradicciones y matices" (solo si dos documentos discrepan) y "## Lo que no está" (cada
+dato ausente con su fórmula literal, nada más). Si la pregunta es concreta y la respuesta cabe
+en unas frases, **sin encabezados**.
+
+Cuándo usa cada recurso, y solo si aporta:
+
+- **Negrita** en la cifra o el término que contesta, nunca en una frase entera ni como
+  sustituto de un encabezado.
+- **Tabla** cuando compara lo mismo en dos o más documentos, cohortes, fármacos o momentos: una
+  fila por concepto, una columna por documento y la última columna con la cita de esa fila.
+- **Lista** para enumerar criterios o hallazgos sin orden.
+- **Diagrama** para una secuencia o un algoritmo, en un bloque ` ```mermaid ` con
+  `flowchart TD` (o `LR`), etiquetas entre comillas, cortas y sin punto final, y como mucho 8
+  nodos. **Las citas del diagrama van en la línea siguiente al cierre del bloque, solas**, y
+  esto no es cosmético: así el troceo del verificador (sección 10.1) toma el bloque entero como
+  UNA afirmación con esas citas, en vez de partirlo por las citas interiores en fragmentos de
+  sintaxis. Un diagrama sin citas cuenta como afirmación sin fuente y no se publica, igual que
+  una frase. Un punto seguido de espacio dentro de una etiqueta partiría el bloque en dos
+  afirmaciones, de ahí la regla de las etiquetas sin puntos.
+
+Cada fila de tabla y cada diagrama es una afirmación y se audita como tal. Está prohibido
+mencionar el plan, los ids de los puntos, las herramientas o los resultados de búsqueda.
 
 ### 9.2 Cita
 
@@ -700,7 +732,16 @@ desde `documents` en `ready`. Conteo exacto, cero LLM.
   sección, snippet, grado del calificador y puntos del plan que la trajeron. Clic en una cita
   del texto enfoca su fuente.
 - Tabla de cobertura al terminar, en lenguaje claro y sin ids internos.
-- Informe de atribución plegable, cerrado por defecto salvo que haya algo grave.
+- Informe de atribución plegable, **cerrado siempre** por defecto: con respuestas largas
+  abrirlo solo era medio metro de scroll, y la cabecera ya dice qué pasa y en qué color.
+- **Botón de parar** en el sitio del de enviar mientras el turno está en marcha
+  (`mensajes.detener`). Un turno `cancelado` se pinta con una nota neutra, no como un error, y
+  conserva sus pasos.
+- Markdown propio, sin dependencias, para todo lo de la sección 9.1. La excepción es el
+  diagrama: Mermaid se carga con `import()` dinámico solo cuando una respuesta trae uno (su
+  trozo lo cachea el service worker), en `securityLevel: 'strict'` porque el código lo escribe
+  un modelo, con el tema del momento, y si no carga o no compila cae a una lista de pasos
+  legible en vez de dejar un hueco.
 - Lista de conversaciones, crear, continuar, borrar. Feedback por mensaje.
 - Documentos: el corpus propio, en un panel y en una vista de todos con búsqueda, filtros y
   orden; subida de archivos y de carpetas enteras (arrastre o botón, con el mismo tope de 500

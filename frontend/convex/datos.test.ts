@@ -1221,3 +1221,98 @@ describe("usuarios.borrar con mucho rastro de Notion", () => {
     expect((await agendadas(t)).filter((j) => j.state.kind === "failed")).toEqual([]);
   }, 60_000);
 });
+
+// ---------------------------------------------------------------------------
+// Parar la respuesta (mensajes.detener)
+// ---------------------------------------------------------------------------
+describe("mensajes.detener", () => {
+  async function turnoEnMarcha(t: Base, correo = "ana@airobotix.net") {
+    const ana = await alta(t, correo);
+    const sesion = await nuevaSesion(t, ana.id);
+    const messageId = await nuevoMensaje(t, {
+      sessionId: sesion, userId: ana.id, role: "assistant", content: "", estado: "buscando",
+    });
+    return { ana, sesion, messageId };
+  }
+
+  test("deja el turno en `cancelado`, sin texto y sin error", async () => {
+    const t = nuevaBase();
+    const { ana, messageId } = await turnoEnMarcha(t);
+    expect(await ana.como.mutation(api.mensajes.detener, { messageId })).toEqual({
+      detenido: true, estado: "cancelado",
+    });
+    const m = await t.run((ctx) => ctx.db.get(messageId));
+    expect(m).toMatchObject({ estado: "cancelado", content: "" });
+    expect(m?.error).toBeUndefined();
+  });
+
+  test("ADVERSARIAL: tras detener, lo que el agente publique NO aparece", async () => {
+    // Es la garantía dura: la acción no se puede matar desde fuera, así que lo
+    // que la hace real es que `actualizarTurno` rechace toda escritura.
+    const t = nuevaBase();
+    const { ana, messageId } = await turnoEnMarcha(t);
+    await ana.como.mutation(api.mensajes.detener, { messageId });
+
+    const escrito = await t.mutation(internal.mensajes.actualizarTurno, {
+      messageId,
+      cambios: { estado: "listo", content: "La respuesta que ya no quería", hops: [], sources: [] },
+    });
+    expect(escrito).toBe(false);
+    const m = await t.run((ctx) => ctx.db.get(messageId));
+    expect(m).toMatchObject({ estado: "cancelado", content: "" });
+  });
+
+  test("lo que el agente YA había escrito se conserva: qué llevaba buscado", async () => {
+    const t = nuevaBase();
+    const { ana, messageId } = await turnoEnMarcha(t);
+    await t.mutation(internal.mensajes.actualizarTurno, {
+      messageId,
+      cambios: { estado: "redactando", hops: [{ n: 1, query: "p-tau217", resultados: 3 }], sources: [] },
+    });
+    await ana.como.mutation(api.mensajes.detener, { messageId });
+    const m = await t.run((ctx) => ctx.db.get(messageId));
+    expect(m?.estado).toBe("cancelado");
+    expect(m?.hops).toEqual([{ n: 1, query: "p-tau217", resultados: 3 }]);
+  });
+
+  test("es idempotente: un turno ya cerrado no es un error, solo no se toca", async () => {
+    const t = nuevaBase();
+    const { ana, sesion } = await turnoEnMarcha(t);
+    const listo = await nuevoMensaje(t, {
+      sessionId: sesion, userId: ana.id, role: "assistant", content: "Respuesta publicada.", estado: "listo",
+    });
+    expect(await ana.como.mutation(api.mensajes.detener, { messageId: listo })).toEqual({
+      detenido: false, estado: "listo",
+    });
+    expect(await t.run((ctx) => ctx.db.get(listo))).toMatchObject({
+      estado: "listo", content: "Respuesta publicada.",
+    });
+  });
+
+  test("ADVERSARIAL: nadie puede detener el turno de otra cuenta, ni un administrador", async () => {
+    const t = nuevaBase();
+    const { messageId } = await turnoEnMarcha(t);
+    const beto = await alta(t, "beto@airobotix.net");
+    const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
+    expect(await codigoDe(beto.como.mutation(api.mensajes.detener, { messageId }))).toBe("no_encontrado");
+    expect(await codigoDe(admin.como.mutation(api.mensajes.detener, { messageId }))).toBe("no_encontrado");
+    expect(await t.run((ctx) => ctx.db.get(messageId))).toMatchObject({ estado: "buscando" });
+  });
+
+  test("detener la pregunta (un mensaje de usuario) no tiene sentido: no_encontrado", async () => {
+    const t = nuevaBase();
+    const { ana, sesion } = await turnoEnMarcha(t);
+    const pregunta = await nuevoMensaje(t, {
+      sessionId: sesion, userId: ana.id, role: "user", content: "¿qué dice la guía?",
+    });
+    expect(await codigoDe(ana.como.mutation(api.mensajes.detener, { messageId: pregunta }))).toBe("no_encontrado");
+  });
+
+  test("el perro guardián del reloj no convierte un turno detenido en error de tiempo", async () => {
+    const t = nuevaBase();
+    const { ana, messageId } = await turnoEnMarcha(t);
+    await ana.como.mutation(api.mensajes.detener, { messageId });
+    expect(await t.mutation(internal.mensajes.marcarColgado, { messageId })).toBe(false);
+    expect(await t.run((ctx) => ctx.db.get(messageId))).toMatchObject({ estado: "cancelado" });
+  });
+});

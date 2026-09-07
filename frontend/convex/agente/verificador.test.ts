@@ -1163,3 +1163,57 @@ describe("veredictos previos", () => {
     expect(revisor.sinSenal(r)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Un diagrama Mermaid dentro de la respuesta
+// ---------------------------------------------------------------------------
+// El prompt pide que las citas del diagrama vayan en la línea siguiente al
+// cierre del bloque, solas. Eso es lo que hace que el troceo lo tome como UNA
+// afirmación con esas citas, en vez de partirlo en fragmentos de sintaxis, y
+// es la razón de que un diagrama no pueda colar contenido sin auditar.
+describe("diagramas", () => {
+  const DIAGRAMA = [
+    "```mermaid",
+    "flowchart TD",
+    '  A["PA en consulta 140/90 o más"] --> B["Confirmar con MAPA"]',
+    '  B -->|se confirma| C["Iniciar tratamiento"]',
+    "```",
+  ].join("\n");
+
+  test("con sus citas tras el cierre es UNA afirmación auditada, no varios trozos de sintaxis", () => {
+    const ch = frag("c1", "El algoritmo indica confirmar con MAPA antes de tratar.", "guia.pdf", 4);
+    const { trozos, hayCitas } = _trocear(`${DIAGRAMA}\n${cita(ch)}`);
+    expect(hayCitas).toBe(true);
+    expect(trozos).toHaveLength(1);
+    expect(trozos[0].citas).toEqual([cita(ch)]);
+    // El texto que ve el juez es el bloque entero, con sus etiquetas legibles.
+    expect(trozos[0].texto).toContain("Confirmar con MAPA");
+    expect(trozos[0].texto).toContain("flowchart TD");
+  });
+
+  test("ADVERSARIAL: un diagrama SIN cita no se cuela: cuenta como afirmación sin fuente", async () => {
+    const ch = frag("c1", "Texto de la guía.", "guia.pdf", 4);
+    const r = await verificar(`Esto es el algoritmo ${cita(ch)}.\n\n${DIAGRAMA}`, [ch]);
+    // La primera frase sí resuelve; el diagrama queda en la cola sin cita.
+    const veredictosDelDiagrama = r.afirmaciones
+      .filter((a) => a.texto.includes("flowchart"))
+      .map((a) => a.veredicto);
+    expect(veredictosDelDiagrama).toEqual([SIN_CITA]);
+    expect(r.ok).toBe(false);
+  });
+
+  test("ADVERSARIAL: una etiqueta con punto y espacio partiría el bloque; el prompt las prohíbe y aquí se documenta", () => {
+    const conPunto = [
+      "```mermaid",
+      "flowchart TD",
+      '  A["Medir la PA. Confirmar luego"] --> B["Tratar"]',
+      "```",
+    ].join("\n");
+    const ch = frag("c1", "texto", "guia.pdf", 4);
+    const { trozos } = _trocear(`${conPunto}\n${cita(ch)}`);
+    // Se parte en dos: la primera mitad se queda sin cita propia y comparte la
+    // del tramo. Por eso el prompt exige etiquetas cortas y sin punto final.
+    expect(trozos.length).toBeGreaterThan(1);
+    expect(trozos.every((t) => t.citas.length === 1)).toBe(true);
+  });
+});
