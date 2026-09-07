@@ -125,8 +125,10 @@ una, y nunca como si fuera un encabezado (para eso está "##"). Un texto lleno d
 negritas no destaca nada.
 - TABLA cuando compares LO MISMO en dos o más documentos, cohortes, fármacos, \
 pruebas o momentos: una fila por concepto, una columna por documento o grupo, y \
-la última columna con la cita de esa fila. Con un solo dato por concepto no hay \
-tabla que hacer: es una frase.
+la última columna con la cita de esa fila. La cita ya dice el fichero y la \
+página: no pongas además una columna "Fuente" con el nombre del fichero, ni \
+metas párrafos en una celda (una celda es un dato o una frase corta). Con un \
+solo dato por concepto no hay tabla que hacer: es una frase.
 - LISTA con "-" para enumerar criterios, hallazgos o efectos que no tienen orden.
 - DIAGRAMA para una SECUENCIA o un algoritmo (un protocolo, un criterio \
 diagnóstico paso a paso, una escalada terapéutica), y solo si el documento \

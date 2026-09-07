@@ -105,3 +105,21 @@ describe('etiquetasDeMermaid con un mapa mental', () => {
     expect(respaldoDeMermaid(codigo)).toHaveLength(5);
   });
 });
+
+describe('variablesDeTema (paleta de los diagramas)', () => {
+  it('los dos temas definen las mismas claves, con ocho ramas y su texto', async () => {
+    const { variablesDeTema } = await import('../components/Diagrama');
+    const claro = variablesDeTema('light', '#ffffff');
+    const oscuro = variablesDeTema('dark', '#171717');
+    expect(Object.keys(claro).sort()).toEqual(Object.keys(oscuro).sort());
+    for (let i = 0; i < 8; i++) {
+      expect(claro[`cScale${i}`]).toMatch(/^#/);
+      expect(claro[`cScaleLabel${i}`]).toMatch(/^#/);
+      // El texto de cada rama no puede ser el mismo color que su relleno.
+      expect(claro[`cScale${i}`]).not.toBe(claro[`cScaleLabel${i}`]);
+      expect(oscuro[`cScale${i}`]).not.toBe(oscuro[`cScaleLabel${i}`]);
+    }
+    expect(claro.edgeLabelBackground).toBe('#ffffff');
+    expect(oscuro.edgeLabelBackground).toBe('#171717');
+  });
+});

@@ -914,9 +914,12 @@ textarea {
   border-radius: 6px;
 }
 
-/* columna centrada estilo Claude/ChatGPT */
+/* columna centrada estilo Claude/ChatGPT. 880 y no 768: con 768 quedaba
+   mucho margen vacío a los lados en pantallas normales y el texto se leía
+   comprimido; con el panel de fuentes abierto el ancho real lo fija la
+   pantalla, así que esto solo afecta a las anchas. */
 .message-list {
-  max-width: 768px;
+  max-width: 880px;
   margin: 0 auto;
   padding: 20px 24px 24px;
   display: flex;
@@ -1647,6 +1650,134 @@ textarea {
   height: auto;
 }
 
+/* El marco del diagrama lleva el botón de "ver en grande" en la esquina,
+   visible al pasar por encima (siempre, sin puntero). */
+.md-mermaid-marco {
+  position: relative;
+}
+
+.md-mermaid-marco .md-mermaid {
+  margin: 1em 0;
+}
+
+.md-mermaid-ampliar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.md-mermaid-marco:hover .md-mermaid-ampliar,
+.md-mermaid-ampliar:focus-visible {
+  opacity: 1;
+}
+
+.md-mermaid-ampliar:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+@media (hover: none) {
+  .md-mermaid-ampliar {
+    opacity: 1;
+  }
+}
+
+/* El visor: pantalla completa, barra arriba, lienzo con scroll en las dos
+   direcciones y el SVG a su tamaño natural multiplicado por el zoom. */
+.visor {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  animation: fade-in 0.15s ease both;
+}
+
+.visor-barra {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.visor-zoom {
+  min-width: 56px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.visor-zoom:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.visor-ayuda {
+  margin-left: auto;
+  margin-right: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.visor-barra .icon-btn:last-child {
+  margin-left: 0;
+}
+
+.visor-lienzo {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  cursor: grab;
+  touch-action: pan-x pan-y;
+}
+
+.visor-lienzo:active {
+  cursor: grabbing;
+}
+
+.visor-svg svg {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+}
+
+/* Bajo el lienzo, para que un clic fuera (si el lienzo no ocupa todo)
+   cierre; no recibe foco. */
+.visor-fondo {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: transparent;
+}
+
+@media (max-width: 640px) {
+  .visor-ayuda {
+    display: none;
+  }
+}
+
 /* Mientras se carga Mermaid (solo la primera vez de la sesión). */
 .md-mermaid-cargando {
   display: flex;
@@ -1736,40 +1867,70 @@ textarea {
   background: none;
 }
 
+/* Tabla de una respuesta. Lo que la hacía fea, medido en una captura real:
+   `word-break: break-word` heredado de .md troceaba "01_hipertension.pdf" en
+   seis líneas de cinco letras, la columna de la cita se salía por la derecha
+   y las celdas iban apretadas. Ahora las columnas toman su ancho natural, las
+   palabras no se parten, y si la tabla es más ancha que el mensaje se
+   desplaza dentro de su marco (nunca la página). Hilos finos entre filas, sin
+   rayas verticales, cabecera apenas tintada y celdas con aire. */
 .md-table-wrap {
   overflow-x: auto;
-  margin: 0.8em 0;
+  margin: 1em 0;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
+  background: var(--surface);
+  scrollbar-width: thin;
 }
 
 .md table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 0.92em;
-  line-height: 1.5;
+  min-width: max-content;
+  font-size: 0.95em;
+  line-height: 1.55;
+  word-break: normal;
+  overflow-wrap: normal;
+  hyphens: manual;
 }
 
 .md th,
 .md td {
-  padding: 8px 13px;
+  padding: 11px 16px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+  text-align: left;
+  /* ancho tope por celda: una celda de texto largo envuelve por palabras,
+     no por letras, y la tabla no se hace infinita */
+  max-width: 34em;
 }
 
 .md th {
   background: var(--inset);
   font-weight: 600;
-  font-size: 0.95em;
+  font-size: 0.92em;
+  color: var(--text-2);
   white-space: nowrap;
 }
 
 .md td {
   font-variant-numeric: tabular-nums;
+  min-width: 6em;
+}
+
+/* la primera columna suele ser la etiqueta de la fila */
+.md td:first-child {
+  font-weight: 500;
+  color: var(--text);
 }
 
 .md tbody tr:last-child td {
   border-bottom: none;
+}
+
+/* un chip de cita en una celda no se parte ni se recorta */
+.md td .citation-chip {
+  white-space: nowrap;
 }
 
 /* ----------------------------------------------------------------------
@@ -1830,7 +1991,7 @@ textarea {
 .composer-area {
   flex-shrink: 0;
   width: 100%;
-  max-width: 816px; /* 768 + padding lateral de la columna */
+  max-width: 928px; /* 880 + padding lateral de la columna */
   margin: 0 auto;
   padding: 6px 24px 10px;
   /* zona segura del gesto home; en desktop env() vale 0 */
