@@ -118,6 +118,12 @@ export function Biblioteca({ open, onClose, documentos, estadoInicial }: Bibliot
       </header>
 
       <div className="biblio-cuerpo">
+        {/* Un contenedor centrado, y no una regla que centre a cada hijo: con
+            `.biblio-cuerpo > * { margin-inline: auto }`, cualquier hijo que
+            declare su propio `margin: 0 ...` (la rejilla, el recuento) lo pisa
+            por tener la misma especificidad y venir después, y se quedaba
+            pegado a la izquierda mientras la banda sí se centraba. */}
+        <div className="biblio-centro">
         {docs !== null && docs.length > 0 && <BandaCorpus docs={docs} />}
 
         {total > 0 && (
@@ -252,6 +258,7 @@ export function Biblioteca({ open, onClose, documentos, estadoInicial }: Bibliot
             </ul>
           </>
         )}
+        </div>
       </div>
     </section>
   );

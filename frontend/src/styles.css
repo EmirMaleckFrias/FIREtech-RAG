@@ -69,13 +69,18 @@
 
   /* Un color por FAMILIA de formato de documento. Se usan solo como lomo de
      2 px de la ficha y como tramo de la barra de composición: sirven para
-     barrer la rejilla con la vista, no para decorar. Contrastan entre sí
-     incluso en escala de grises, porque el color nunca es el único canal (la
-     ficha lleva además su sigla escrita). */
-  --fmt-pdf: #d6001c;
-  --fmt-word: #2563eb;
-  --fmt-hoja: #16a34a;
-  --fmt-imagen: #7c3aed;
+     barrer la rejilla con la vista, no para decorar. El color nunca es el
+     único canal: la ficha lleva además su sigla escrita.
+
+     NINGUNO es el rojo de marca, y es deliberado: en esta aplicación el
+     acento de marca significa "acción" o "atención". Con el PDF en rojo, la
+     barra de composición de un corpus casi todo PDF salía como un bloque rojo
+     del 85 % y se leía como una barra de progreso o una alerta, no como "de
+     esto está hecho tu corpus". El acento se reserva para lo interactivo. */
+  --fmt-pdf: #0f766e;
+  --fmt-word: #1d4ed8;
+  --fmt-hoja: #15803d;
+  --fmt-imagen: #7e22ce;
   --fmt-texto: #a8a29e;
 
   /* semánticos */
@@ -150,7 +155,7 @@
 
   /* Aclarados para el fondo oscuro: los del tema claro caen por debajo de
      3:1 sobre #101010 y el lomo desaparecía. */
-  --fmt-pdf: #ff5a63;
+  --fmt-pdf: #2dd4bf;
   --fmt-word: #60a5fa;
   --fmt-hoja: #4ade80;
   --fmt-imagen: #a78bfa;
@@ -5404,12 +5409,17 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
   scrollbar-color: var(--border-strong) transparent;
 }
 
-/* La banda y los controles comparten el ancho de la rejilla, centrados: en una
-   pantalla de 1600 px una barra de 1600 px de ancho no se lee. */
-.biblio-cuerpo > * {
+/* Todo el contenido comparte un ancho máximo y va centrado: en una pantalla de
+   1900 px, una barra de 1900 px de ancho no se lee y una rejilla pegada a la
+   izquierda deja media pantalla vacía.
+
+   Va en un CONTENEDOR y no en una regla `.biblio-cuerpo > *`: esa regla y las
+   de cada bloque tienen la misma especificidad (una clase), así que cualquier
+   bloque que declare su propio `margin: 0 ...` y venga después en el fichero
+   le pisaba el centrado. Es el fallo clásico de márgenes entre secciones. */
+.biblio-centro {
   max-width: 1180px;
-  margin-left: auto;
-  margin-right: auto;
+  margin-inline: auto;
 }
 
 .biblio-controles {
@@ -5424,7 +5434,9 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 1 1 260px;
+  /* No crece: con `flex: 1` se comía el ancho y empujaba "Ordenar" a una
+     segunda línea él solo, en una pantalla donde todo cabía de sobra. */
+  flex: 0 1 300px;
   min-width: 0;
   padding: 8px 12px;
   border: 1px solid var(--border);
@@ -5519,6 +5531,12 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
 .biblio-rejilla {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  /* Cada ficha mide lo que mide su contenido. Sin esto, la rejilla igualaba el
+     alto de toda la fila y una ficha corta (un .xlsx sin título) quedaba con
+     un hueco muerto abajo del tamaño de la ficha más alta de su fila. El
+     borde inferior irregular es lo que hace que parezca un archivo y no una
+     rejilla mal cuadrada. */
+  align-items: start;
   gap: 10px;
   margin: 0;
   padding: 0 14px;

@@ -164,6 +164,8 @@ type OcupadoNotion = 'conectar' | 'guardar' | 'sincronizar' | 'desconectar' | nu
 
 interface NotionBloqueProps {
   open: boolean;
+  /** Los tres pasos de "cómo conectar": solo mientras el corpus está vacío. */
+  mostrarPasos: boolean;
   /** undefined mientras la suscripción no ha entregado nada. */
   estado: EstadoNotion | undefined;
   aviso: AvisoNotion | null;
@@ -183,7 +185,7 @@ interface NotionBloqueProps {
  *   resumen de la última corrida y Desconectar (dos pasos).
  * - Sincronizando: barra y "8 de 20 páginas, ahora: <título>", en vivo.
  */
-function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) {
+function NotionBloque({ open, mostrarPasos, estado, aviso, onAvisoVisto }: NotionBloqueProps) {
   const iniciar = useMutation(api.notion.oauth.iniciar);
   const listarBases = useAction(api.notion.oauth.listarBases);
   const elegirBases = useMutation(api.notion.oauth.elegirBases);
@@ -567,11 +569,17 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                 </button>
               )}
             </div>
-            <div className="notion-steps" aria-label="Cómo conectar tus documentos">
-              <div><span>1</span><strong>Conecta</strong><small>Tu espacio de trabajo</small></div>
-              <div><span>2</span><strong>Elige</strong><small>La base que compartirás</small></div>
-              <div><span>3</span><strong>Consulta</strong><small>Sus documentos en el chat</small></div>
-            </div>
+            {/* Los tres pasos son instrucciones de una sola vez. Con documentos
+                ya en el corpus, lo único que hacían era empujar la lista fuera
+                de la primera pantalla: quien abre "Documentos" viene a ver sus
+                documentos, no a leer cómo se conecta Notion. */}
+            {mostrarPasos && (
+              <div className="notion-steps" aria-label="Cómo conectar tus documentos">
+                <div><span>1</span><strong>Conecta</strong><small>Tu espacio de trabajo</small></div>
+                <div><span>2</span><strong>Elige</strong><small>La base que compartirás</small></div>
+                <div><span>3</span><strong>Consulta</strong><small>Sus documentos en el chat</small></div>
+              </div>
+            )}
             {/* La emergente está abierta: se dice dónde mirar y se ofrece
                 salir de la espera. La aplicación sigue aquí, entera. */}
             {esperandoNotion && (
@@ -1130,6 +1138,7 @@ export function DocumentsPanel({
               vivo. Ver NotionBloque. */}
           <NotionBloque
             open={open}
+            mostrarPasos={docs === null || docs.length === 0}
             estado={notion}
             aviso={notionAviso}
             onAvisoVisto={onNotionAvisoVisto}
