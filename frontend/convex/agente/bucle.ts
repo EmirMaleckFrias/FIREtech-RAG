@@ -291,7 +291,15 @@ export const correr = internalAction({
       //    modelo. Aquí es donde la variación entre corridas deja de existir:
       //    la misma pregunta recupera la misma evidencia.
       const limiteEvidenciaMs = Math.min(a.prefetchTimeoutS * 1000, restanteS() * 1000);
-      const ev = await evidencia.ejecutarPlan(ctx, plan, modo, {}, tel, limiteEvidenciaMs);
+      const ev = await evidencia.ejecutarPlan(
+        ctx,
+        args.userId,
+        plan,
+        modo,
+        {},
+        tel,
+        limiteEvidenciaMs,
+      );
       const acumulado = new Map<string, Fragmento>(ev.acumulado);
       const mapa: Record<string, string[]> = { ...ev.mapa };
       const grados: Record<string, string> = { ...ev.grados };
@@ -463,7 +471,9 @@ export const correr = internalAction({
               let contenidoTool: string;
               let inventarioOk = true;
               try {
-                const inv = await ctx.runQuery(internal.search.inventario.inventario, {});
+                const inv = await ctx.runQuery(internal.search.inventario.inventario, {
+                  propietario: args.userId,
+                });
                 contenidoTool = textoDeInventario(inv);
               } catch (exc) {
                 inventarioOk = false;
@@ -547,7 +557,7 @@ export const correr = internalAction({
                 });
               try {
                 resultado = await conTopeExtra(evidencia.buscarYCalificar(
-                  ctx, consulta, puntoDelPlan?.evidenceNeeded ?? consulta, punto, modo, filtros, tel,
+                  ctx, args.userId, consulta, puntoDelPlan?.evidenceNeeded ?? consulta, punto, modo, filtros, tel,
                 ));
                 // Un filtro exacto sobre un valor que no existe devuelve cero
                 // sin decir por qué, y el modelo concluye que el documento no
@@ -557,8 +567,10 @@ export const correr = internalAction({
                 // avisa: recuperar con un aviso es honesto, devolver cero en
                 // silencio no.
                 if (!resultado.fragmentos.length && Object.keys(filtros).length) {
+                  // Sin filtros, pero NUNCA sin propietario: el corpus de
+                  // cada persona es lo único que este reintento no relaja.
                   const sinFiltros = await conTopeExtra(evidencia.buscarYCalificar(
-                    ctx, consulta, puntoDelPlan?.evidenceNeeded ?? consulta, punto, modo, {}, tel,
+                    ctx, args.userId, consulta, puntoDelPlan?.evidenceNeeded ?? consulta, punto, modo, {}, tel,
                   ));
                   if (sinFiltros.fragmentos.length) {
                     const detalle = Object.entries(filtros).map(([k, val]) => `${k}=${JSON.stringify(val)}`).join(", ");

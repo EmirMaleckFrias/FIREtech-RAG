@@ -13,6 +13,7 @@
 // no tiene fragmentos consultables y uno en "failed" no los tiene ni los va a
 // tener. Contarlos diría "hay 12 documentos" sobre un índice que responde
 // por 10.
+import { v } from "convex/values";
 import { internalQuery } from "../_generated/server";
 
 export interface Conteo {
@@ -58,11 +59,16 @@ function porChunks(a: Conteo, b: Conteo): number {
 /** Catálogo exacto del índice: reemplaza a los facets de Qdrant.
  *  Forma idéntica a la que consumía la herramienta del agente. */
 export const inventario = internalQuery({
-  args: {},
-  handler: async (ctx): Promise<Inventario> => {
+  args: { propietario: v.id("users") },
+  handler: async (ctx, { propietario }): Promise<Inventario> => {
+    // Solo el corpus de quien pregunta: el catálogo es la respuesta a
+    // "cuántos documentos tienes indexados", y contar los de otra persona
+    // sería filtrar por la puerta de atrás los nombres de sus ficheros.
     const listos = await ctx.db
       .query("documents")
-      .withIndex("porEstado", (q) => q.eq("status", "ready"))
+      .withIndex("porPropietarioYEstado", (q) =>
+        q.eq("propietario", propietario).eq("status", "ready"),
+      )
       .collect();
 
     // Por nombre de archivo, que es lo que identifica al documento en las

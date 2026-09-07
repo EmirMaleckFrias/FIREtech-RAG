@@ -631,7 +631,6 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
       <DocumentsPanel
         open={docsOpen}
         onClose={closeDocuments}
-        canManage={me?.rol === 'admin'}
         notionAviso={notionAviso}
         onNotionAvisoVisto={() => setNotionAviso(null)}
       />

@@ -7,8 +7,9 @@ afirmación contra el fragmento que cita. Si algo no está en los documentos, lo
 rellenarlo.
 
 El acceso es con cuenta propia y correo del dominio de la empresa (`airobotix.net` por
-defecto). Los documentos son compartidos: todos los usuarios consultan el mismo índice y solo
-un administrador lo gestiona. Las conversaciones son privadas, también para los administradores.
+defecto). **Cada persona tiene su propio corpus**: sube sus documentos o conecta su propio
+Notion, y una búsqueda solo puede ver los documentos de quien pregunta. Nadie ve el corpus de
+nadie, ni siquiera un administrador. Las conversaciones son igual de privadas.
 
 Este README explica qué es el sistema y cómo arrancarlo. El contrato funcional (modos, pipeline
 de evidencia, barrera de fidelidad, formas de los datos) está en [SPEC.md](SPEC.md); la
@@ -61,9 +62,10 @@ operación diaria (cuentas, documentos, telemetría, variables) en
   (`pensando`, `buscando`, `redactando`, `revisando`, `listo` o `error`) y el navegador está
   suscrito a la conversación. Una respuesta sobrevive a que se cierre la pestaña.
 - **Cuentas y roles.** Alta con correo y contraseña del dominio permitido. Roles `admin` y
-  `lector`. Un administrador gestiona documentos y cuentas (ascender, degradar, bloquear,
-  borrar), pero no ve conversaciones ajenas. Nadie puede cambiarse, bloquearse ni borrarse a
-  sí mismo.
+  `lector`. Cualquier cuenta gestiona SU corpus (subir, reindexar, borrar, conectar Notion);
+  ser administrador sirve para gestionar cuentas y ver estadísticas agregadas, no para tocar
+  los documentos ni las conversaciones de otra persona. Nadie puede cambiarse, bloquearse ni
+  borrarse a sí mismo. Al borrar una cuenta se borra su corpus con ella.
 - **Telemetría por pregunta.** Tokens medidos del `usage` real por componente y coste
   estimado con tarifas asumidas (etiquetado siempre así), guardados con el mensaje.
 

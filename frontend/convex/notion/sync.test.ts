@@ -215,12 +215,39 @@ function baseInicial() {
   notion.pagina("c3", "Archivada", { archived: true, bloques: [parrafo(TEXTO_LARGO)] });
 }
 
-function nuevaBase(): T {
-  return convexTest(schema, modules);
+/** La cuenta que conectó Notion en la prueba en curso. Cada persona conecta
+ *  su propio Notion y sincroniza a su propio corpus (ver `propietario` en
+ *  schema.ts), así que la sincronización siempre es de alguien: `nuevaBase`
+ *  crea la cuenta y su fila de conexión, y lo deja aquí. */
+let DUENO: Id<"users">;
+
+async function nuevaBase(): Promise<T> {
+  const t = convexTest(schema, modules);
+  DUENO = await t.run(async (ctx) => {
+    const userId = await ctx.db.insert("users", {
+      email: "duena@airobotix.net",
+      rol: "lector",
+      bloqueado: false,
+      creadoEn: 1,
+      ultimoAccesoEn: 1,
+    });
+    await ctx.db.insert("notionConexion", {
+      accessToken: TOKEN,
+      botId: "bot",
+      workspaceId: "ws",
+      workspaceName: "Espacio de prueba",
+      conectadoPor: userId,
+      conectadoEn: 1,
+      databaseId: DB,
+      databaseTitulo: "Protocolos",
+    });
+    return userId;
+  });
+  return t;
 }
 
 async function sincronizar(t: T, forzar = true) {
-  return await t.action(internal.notion.sync.sincronizar, { forzar });
+  return await t.action(internal.notion.sync.sincronizar, { propietario: DUENO, forzar });
 }
 
 /** El resultado de una corrida que llegó a abrirse (con cifras), o falla. */
@@ -263,9 +290,16 @@ async function insertarChunks(t: T, doc: Doc<"documents">, n: number) {
         page: 1,
         chunkType: "text",
         documentRef: doc._id,
+        propietario: doc.propietario,
       });
     }
   });
+}
+
+/** La dueña de la conexión, con su identidad, para llamar a las funciones
+ *  públicas como ella. */
+function comoDuena(t: T) {
+  return t.withIdentity({ subject: DUENO });
 }
 
 async function alta(t: T, email: string, rol: "admin" | "lector") {
@@ -290,8 +324,8 @@ beforeEach(() => {
   notion = new NotionFalso();
   configurarPausa(0);
   vi.stubGlobal("fetch", notion.fetch);
-  vi.stubEnv("NOTION_TOKEN", TOKEN);
-  vi.stubEnv("NOTION_DATABASE_ID", DB);
+  // Ni NOTION_TOKEN ni NOTION_DATABASE_ID: las credenciales salen de la fila
+  // de conexión que crea `nuevaBase`.
   vi.stubEnv("NOTION_SYNC_MINUTES", "60");
   vi.stubEnv("NOTION_DELETE_ARCHIVED", "true");
   vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -310,7 +344,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 describe("primera sincronización", () => {
   test("registra el texto largo y el PDF de A, nada de B (corta) ni de C (archivada)", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     const r = await sincronizar(t);
     expect(r).toMatchObject({ estado: "ok", paginas: 2, nuevos: 2, actualizados: 0, borrados: 0, errores: [] });
@@ -342,15 +376,8 @@ describe("primera sincronización", () => {
     expect(corrida).toMatchObject({ estado: "ok", paginas: 2, nuevos: 2, terminadoEn: expect.any(Number) });
   });
 
-  test("NOTION_DATABASE_ID puede ser la URL completa de la base", async () => {
-    const t = nuevaBase();
-    baseInicial();
-    vi.stubEnv("NOTION_DATABASE_ID", `https://app.notion.com/p/equipo/${DB}?v=deadbeefdeadbeefdeadbeefdeadbeef`);
-    expect(await sincronizar(t)).toMatchObject({ estado: "ok", paginas: 2 });
-  });
-
   test("pagina la base siguiendo next_cursor", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     notion.tamanoPagina = 1;
     const r = await sincronizar(t);
@@ -361,7 +388,7 @@ describe("primera sincronización", () => {
 
 describe("segunda sincronización", () => {
   test("sin cambios no lee bloques ni toca documentos", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     const antes = await documentos(t);
@@ -374,7 +401,7 @@ describe("segunda sincronización", () => {
   });
 
   test("con lastEdited nuevo y texto cambiado reutiliza la MISMA fila del .md", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     const [pdfAntes, mdAntes] = await documentos(t);
@@ -400,13 +427,16 @@ describe("segunda sincronización", () => {
     expect((await paginas(t)).find((x) => x.pageId === "a1")!.lastEdited).toBe("2026-09-02T10:00:00.000Z");
   });
 
-  test("si un admin borra a mano un documento de Notion, se vuelve a traer aunque la página no cambie", async () => {
-    const t = nuevaBase();
+  test("si su dueña borra a mano un documento de Notion, se vuelve a traer aunque la página no cambie", async () => {
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
-    const admin = await alta(t, "admin@airobotix.net", "admin");
     const [pdf, md] = await documentos(t);
-    await admin.mutation(api.documentos.borrar, { documentId: pdf._id });
+    // Lo borra ELLA: un administrador no puede tocar el corpus de otra
+    // persona, y de hecho recibiría `no_encontrado`.
+    const admin = await alta(t, "admin@airobotix.net", "admin");
+    expect(await codigoDe(admin.mutation(api.documentos.borrar, { documentId: pdf._id }))).toBe("no_encontrado");
+    await comoDuena(t).mutation(api.documentos.borrar, { documentId: pdf._id });
     expect(await documentos(t)).toHaveLength(1);
 
     const r = await sincronizar(t);
@@ -419,7 +449,7 @@ describe("segunda sincronización", () => {
   });
 
   test("lastEdited nuevo pero mismo texto: no se reingiere", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     const [, mdAntes] = await documentos(t);
@@ -433,7 +463,7 @@ describe("segunda sincronización", () => {
   });
 
   test("un texto que baja del mínimo retira el .md; un adjunto quitado retira su documento", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     const p = notion.paginas.get("a1")!;
@@ -452,7 +482,7 @@ describe("segunda sincronización", () => {
 
 describe("adjuntos", () => {
   test("dedupe por sha256: el mismo PDF en otra página no se registra dos veces ni se reclama", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     notion.pagina("d4", "Duplicada", { adjuntos: [{ name: "copia.pdf", url: "https://s3.notion.example/copia.pdf?s=1" }] });
     notion.fichero("https://s3.notion.example/copia.pdf?s=1", PDF_A);
@@ -464,11 +494,12 @@ describe("adjuntos", () => {
   });
 
   test("mismo nombre con contenido distinto: el segundo lleva el slug de su página", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     // Una subida manual ocupa "otra.pdf" con otro contenido.
     await t.run((ctx) =>
       ctx.db.insert("documents", {
+        propietario: DUENO,
         fileName: "otra.pdf",
         sha256: "f".repeat(64),
         pages: 1,
@@ -491,7 +522,7 @@ describe("adjuntos", () => {
   });
 
   test("una URL firmada caducada se refresca releyendo la página", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     notion.caducadas.add(URL_PDF_A);
     const r = await sincronizar(t);
@@ -500,7 +531,7 @@ describe("adjuntos", () => {
   });
 
   test("extensiones no soportadas se ignoran sin error", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     notion.pagina("f6", "Con imagen", { adjuntos: [{ name: "foto.png", url: "https://s3.notion.example/foto.png" }] });
     notion.fichero("https://s3.notion.example/foto.png", new Uint8Array([1, 2, 3]));
@@ -513,7 +544,7 @@ describe("adjuntos", () => {
 
 describe("páginas que desaparecen", () => {
   test("archivar A borra sus documentos con sus fragmentos, su fichero y su fila", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     const [pdf, md] = await documentos(t);
@@ -530,7 +561,7 @@ describe("páginas que desaparecen", () => {
   });
 
   test("marcar Estado = Excluir equivale a sacarla de la base", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     notion.paginas.get("a1")!.pagina.properties.Estado = { type: "select", select: { name: "Excluir" } };
@@ -540,7 +571,7 @@ describe("páginas que desaparecen", () => {
   });
 
   test("un documento que un admin reclamó como subida manual NO se borra al archivar la página", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     const [pdf] = await documentos(t);
@@ -555,7 +586,7 @@ describe("páginas que desaparecen", () => {
   });
 
   test("con NOTION_DELETE_ARCHIVED=false se conservan los documentos y la fila queda marcada", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
     vi.stubEnv("NOTION_DELETE_ARCHIVED", "false");
@@ -570,7 +601,7 @@ describe("páginas que desaparecen", () => {
 
 describe("errores", () => {
   test("un fallo en una página no para las demás y queda anotado", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     notion.pagina("g7", "Rota", { bloques: [parrafo(TEXTO_LARGO)] });
     notion.bloquesRotos.add("g7");
@@ -594,9 +625,12 @@ describe("errores", () => {
   });
 
   test("un token rechazado cierra la corrida como error con el motivo", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
-    vi.stubEnv("NOTION_TOKEN", "secret_mala");
+    await t.run(async (ctx) => {
+      const c = (await ctx.db.query("notionConexion").first())!;
+      await ctx.db.patch(c._id, { accessToken: "secret_mala" });
+    });
     const r = conCifras(await sincronizar(t));
     expect(r.estado).toBe("error");
     expect(r.errores[0]).toMatch(/401/);
@@ -606,20 +640,59 @@ describe("errores", () => {
 });
 
 describe("autoexclusión", () => {
-  test("sin token o sin base: apagada, sin corrida registrada", async () => {
-    const t = nuevaBase();
+  test("sin conexión o sin base elegida: apagada, sin corrida registrada", async () => {
+    const t = await nuevaBase();
     baseInicial();
-    vi.stubEnv("NOTION_TOKEN", "");
+    // Conectada pero sin base: no hay nada que traer.
+    await t.run(async (ctx) => {
+      const c = (await ctx.db.query("notionConexion").first())!;
+      await ctx.db.patch(c._id, { databaseId: undefined });
+    });
     expect(await sincronizar(t)).toEqual({ estado: "apagado" });
-    vi.stubEnv("NOTION_TOKEN", TOKEN);
-    vi.stubEnv("NOTION_DATABASE_ID", "");
+    // Y sin conexión ninguna: tampoco. Ya no hay respaldo por variables de
+    // entorno, porque un token del despliegue no tendría dueño.
+    await t.run(async (ctx) => {
+      for (const c of await ctx.db.query("notionConexion").collect()) await ctx.db.delete(c._id);
+    });
     expect(await sincronizar(t, true)).toEqual({ estado: "apagado" });
     expect(await corridas(t)).toEqual([]);
     expect(notion.llamadas).toEqual([]);
   });
 
+  test("la sincronización de una persona no ve ni toca el Notion de otra", async () => {
+    const t = await nuevaBase();
+    baseInicial();
+    await sincronizar(t);
+    expect(await documentos(t)).toHaveLength(2);
+
+    // Otra cuenta, con su propia conexión al MISMO espacio de Notion y la
+    // misma base: sus documentos son suyos, no reutiliza los de la primera.
+    const otra = await t.run(async (ctx) => {
+      const userId = await ctx.db.insert("users", {
+        email: "otra@airobotix.net", rol: "lector", bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1,
+      });
+      await ctx.db.insert("notionConexion", {
+        accessToken: TOKEN, botId: "bot2", workspaceId: "ws", workspaceName: "Otro",
+        conectadoPor: userId, conectadoEn: 1, databaseId: DB, databaseTitulo: "Protocolos",
+      });
+      return userId;
+    });
+    const r = await t.action(internal.notion.sync.sincronizar, { propietario: otra, forzar: true });
+    // Dos documentos NUEVOS para ella: el dedupe por sha256 es por corpus.
+    expect(r).toMatchObject({ estado: "ok", paginas: 2, nuevos: 2, borrados: 0 });
+    const todos = await documentos(t);
+    expect(todos).toHaveLength(4);
+    expect(todos.filter((d) => d.propietario === DUENO)).toHaveLength(2);
+    expect(todos.filter((d) => d.propietario === otra)).toHaveLength(2);
+    // Y cada una tiene sus propias filas de página y de corrida.
+    const filas = await paginas(t);
+    expect(filas.filter((p) => p.propietario === DUENO)).toHaveLength(2);
+    expect(filas.filter((p) => p.propietario === otra)).toHaveLength(2);
+    expect((await corridas(t)).map((c) => c.propietario).sort()).toEqual([DUENO, otra].sort());
+  });
+
   test("NOTION_SYNC_MINUTES=0 apaga la periódica pero no la manual", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     vi.stubEnv("NOTION_SYNC_MINUTES", "0");
     expect(await sincronizar(t, false)).toEqual({ estado: "apagado" });
@@ -628,7 +701,7 @@ describe("autoexclusión", () => {
   });
 
   test("la periódica se salta si la última corrida es reciente; la forzada no", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     expect(await sincronizar(t, false)).toMatchObject({ estado: "ok" });
     expect(await sincronizar(t, false)).toEqual({ estado: "reciente" });
@@ -637,10 +710,11 @@ describe("autoexclusión", () => {
   });
 
   test("una corrida running reciente bloquea; una muerta se cierra y se sigue", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     baseInicial();
     const viva = await t.run((ctx) =>
       ctx.db.insert("notionSincronizaciones", {
+        propietario: DUENO,
         empezadoEn: Date.now(), paginas: 0, nuevos: 0, actualizados: 0, borrados: 0, errores: [], estado: "running",
       }),
     );
@@ -653,39 +727,50 @@ describe("autoexclusión", () => {
   });
 });
 
-describe("admin", () => {
-  test("sincronizarAhora rechaza a un lector con solo_admin y agenda para un admin", async () => {
-    const t = nuevaBase();
-    const lector = await alta(t, "lector@airobotix.net", "lector");
+describe("el panel de cada persona", () => {
+  test("sincronizarAhora es de cualquier cuenta CONECTADA, no de los administradores", async () => {
+    const t = await nuevaBase();
+    // Un administrador sin conexión propia no puede sincronizar nada: no
+    // tiene Notion conectado, y el de otra persona no es suyo.
     const admin = await alta(t, "admin@airobotix.net", "admin");
-    expect(await codigoDe(lector.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("solo_admin");
-    expect(await codigoDe(lector.query(api.notion.admin.estado, {}))).toBe("solo_admin");
-    expect(await admin.mutation(api.notion.admin.sincronizarAhora, {})).toEqual({ ok: true });
+    expect(await codigoDe(admin.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
+    // La dueña, que es una lectora, sí.
+    expect(await comoDuena(t).mutation(api.notion.admin.sincronizarAhora, {})).toEqual({ ok: true });
   });
 
-  test("sincronizarAhora avisa si Notion no está configurado o si ya hay una en curso", async () => {
-    const t = nuevaBase();
-    const admin = await alta(t, "admin@airobotix.net", "admin");
-    vi.stubEnv("NOTION_TOKEN", "");
-    expect(await codigoDe(admin.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
-    vi.stubEnv("NOTION_TOKEN", TOKEN);
+  test("una corrida en curso de OTRA persona no bloquea la propia", async () => {
+    const t = await nuevaBase();
+    const otra = await t.run(async (ctx) =>
+      ctx.db.insert("users", {
+        email: "otra@airobotix.net", rol: "lector", bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1,
+      }),
+    );
     await t.run((ctx) =>
       ctx.db.insert("notionSincronizaciones", {
+        propietario: otra,
         empezadoEn: Date.now(), paginas: 0, nuevos: 0, actualizados: 0, borrados: 0, errores: [], estado: "running",
       }),
     );
-    expect(await codigoDe(admin.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("conflicto");
+    expect(await comoDuena(t).mutation(api.notion.admin.sincronizarAhora, {})).toEqual({ ok: true });
+
+    // La suya sí la bloquea.
+    await t.run((ctx) =>
+      ctx.db.insert("notionSincronizaciones", {
+        propietario: DUENO,
+        empezadoEn: Date.now(), paginas: 0, nuevos: 0, actualizados: 0, borrados: 0, errores: [], estado: "running",
+      }),
+    );
+    expect(await codigoDe(comoDuena(t).mutation(api.notion.admin.sincronizarAhora, {}))).toBe("conflicto");
   });
 
-  test("estado no revela el token y resume corridas y recuentos", async () => {
-    const t = nuevaBase();
+  test("estado no revela el token y solo resume LO SUYO", async () => {
+    const t = await nuevaBase();
     baseInicial();
     await sincronizar(t);
-    const admin = await alta(t, "admin@airobotix.net", "admin");
-    const e = await admin.query(api.notion.admin.estado, {});
+    const e = await comoDuena(t).query(api.notion.admin.estado, {});
     expect(e).toMatchObject({
-      porEntorno: true,
-      base: { id: DB, elegidaEnApp: false },
+      base: { id: DB, elegidaEnApp: true, titulo: "Protocolos" },
+      conexion: { workspaceName: "Espacio de prueba" },
       periodicaMinutos: 60,
       paginas: 2,
       paginasConError: 0,
@@ -695,15 +780,45 @@ describe("admin", () => {
     expect(e.ultimas).toHaveLength(1);
     expect(e.ultimas[0]).toMatchObject({ estado: "ok", paginas: 2, nuevos: 2 });
     expect(JSON.stringify(e)).not.toContain(TOKEN);
+
+    // Un administrador sin conexión ve su propio estado vacío, no el de ella.
+    const admin = await alta(t, "admin@airobotix.net", "admin");
+    const suyo = await admin.query(api.notion.admin.estado, {});
+    expect(suyo).toMatchObject({ conexion: null, base: null, paginas: 0, documentos: 0, ultimas: [] });
+  });
+
+  test("el cron reparte UNA sincronización por cuenta conectada", async () => {
+    const t = await nuevaBase();
+    // Otra con conexión y base, y una tercera conectada pero sin base: esa no
+    // se agenda, porque no hay nada que traer.
+    await t.run(async (ctx) => {
+      const conBase = await ctx.db.insert("users", {
+        email: "otra@airobotix.net", rol: "lector", bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1,
+      });
+      await ctx.db.insert("notionConexion", {
+        accessToken: TOKEN, botId: "b2", workspaceId: "w2", workspaceName: "Otro",
+        conectadoPor: conBase, conectadoEn: 1, databaseId: DB,
+      });
+      const sinBase = await ctx.db.insert("users", {
+        email: "sinbase@airobotix.net", rol: "lector", bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1,
+      });
+      await ctx.db.insert("notionConexion", {
+        accessToken: TOKEN, botId: "b3", workspaceId: "w3", workspaceName: "Tercero",
+        conectadoPor: sinBase, conectadoEn: 1,
+      });
+    });
+
+    expect(await t.mutation(internal.crons.repartirSincronizaciones, {})).toEqual({ agendadas: 2 });
   });
 });
 
 describe("registrarDesdeOrigen", () => {
   test("no reutiliza la fila de otra página con el mismo nombre: conflicto", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     const storageId = await t.run((ctx) => ctx.storage.store(new Blob([PDF_B as BlobPart])));
     await t.run((ctx) =>
       ctx.db.insert("documents", {
+        propietario: DUENO,
         fileName: "x.pdf", sha256: "a".repeat(64), pages: 1, chunks: 1, status: "ready",
         ingestadoEn: Date.now(), origen: "notion", notionPageId: "otra",
       }),
@@ -712,6 +827,7 @@ describe("registrarDesdeOrigen", () => {
     expect(
       await codigoDe(
         t.mutation(internal.documentos.registrarDesdeOrigen, {
+          propietario: DUENO,
           storageId, fileName: "x.pdf", sha256: sha, origen: "notion", notionPageId: "esta",
         }),
       ),
@@ -720,6 +836,7 @@ describe("registrarDesdeOrigen", () => {
     expect(
       await codigoDe(
         t.mutation(internal.documentos.registrarDesdeOrigen, {
+          propietario: DUENO,
           storageId, fileName: "x.exe", sha256: sha, origen: "notion",
         }),
       ),
@@ -727,10 +844,11 @@ describe("registrarDesdeOrigen", () => {
   });
 
   test("tampoco reutiliza la fila FAILED de otra página: seguiría en la lista de esa página", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     const storageId = await t.run((ctx) => ctx.storage.store(new Blob([PDF_B as BlobPart])));
     const ajena = await t.run((ctx) =>
       ctx.db.insert("documents", {
+        propietario: DUENO,
         fileName: "x.pdf", sha256: "a".repeat(64), pages: 0, chunks: 0, status: "failed",
         ingestadoEn: Date.now(), origen: "notion", notionPageId: "otra",
       }),
@@ -738,6 +856,7 @@ describe("registrarDesdeOrigen", () => {
     expect(
       await codigoDe(
         t.mutation(internal.documentos.registrarDesdeOrigen, {
+          propietario: DUENO,
           storageId, fileName: "x.pdf", sha256: await sha256Hex(PDF_B), origen: "notion", notionPageId: "esta",
         }),
       ),
@@ -746,15 +865,17 @@ describe("registrarDesdeOrigen", () => {
   });
 
   test("sí reutiliza una subida manual fallida, como hace registrar", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     const storageId = await t.run((ctx) => ctx.storage.store(new Blob([PDF_B as BlobPart])));
     const fallida = await t.run((ctx) =>
       ctx.db.insert("documents", {
+        propietario: DUENO,
         fileName: "x.pdf", sha256: "a".repeat(64), pages: 0, chunks: 0, status: "failed",
         ingestadoEn: Date.now(), origen: "subida",
       }),
     );
     const id = await t.mutation(internal.documentos.registrarDesdeOrigen, {
+      propietario: DUENO,
       storageId, fileName: "x.pdf", sha256: await sha256Hex(PDF_B), origen: "notion", notionPageId: "esta",
     });
     expect(id).toBe(fallida);
@@ -763,15 +884,17 @@ describe("registrarDesdeOrigen", () => {
   });
 
   test("la misma página reutiliza su propia fila aunque esté lista: es la versión nueva del fichero", async () => {
-    const t = nuevaBase();
+    const t = await nuevaBase();
     const storageId = await t.run((ctx) => ctx.storage.store(new Blob([PDF_B as BlobPart])));
     const propia = await t.run((ctx) =>
       ctx.db.insert("documents", {
+        propietario: DUENO,
         fileName: "x.pdf", sha256: "a".repeat(64), pages: 3, chunks: 9, status: "ready",
         ingestadoEn: Date.now(), origen: "notion", notionPageId: "esta",
       }),
     );
     const id = await t.mutation(internal.documentos.registrarDesdeOrigen, {
+      propietario: DUENO,
       storageId, fileName: "x.pdf", sha256: await sha256Hex(PDF_B), origen: "notion", notionPageId: "esta",
     });
     expect(id).toBe(propia);

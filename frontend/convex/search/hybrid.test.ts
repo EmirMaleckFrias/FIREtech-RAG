@@ -12,6 +12,7 @@
 import { convexTest } from "convex-test";
 import { getFunctionName } from "convex/server";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import type { Fragmento } from "../lib/citas";
@@ -22,9 +23,11 @@ import {
   buscarHibrido,
   buscarHibridoVarias,
   describirFiltros,
+  filtroVectorial,
   filtrosActivos,
   fusionarRrf,
   hayFiltros,
+  SIN_FILTROS,
 } from "./hybrid";
 
 const DIMS = 3072;
@@ -59,15 +62,33 @@ interface Semilla {
   language?: string;
 }
 
-/** Dos documentos y los fragmentos pedidos, en el orden dado. */
-async function sembrar(t: ReturnType<typeof convexTest>, semillas: Semilla[]) {
+/** La cuenta dueña del corpus sembrado. Cada persona tiene el suyo (ver
+ *  `propietario` en schema.ts) y la búsqueda exige saber de quién se busca,
+ *  así que `sembrar` la crea y la deja aquí para los casos. */
+let DUENO: Id<"users">;
+
+/** Crea una cuenta con ese correo. Para los casos que necesitan DOS corpus. */
+async function cuenta(t: ReturnType<typeof convexTest>, email: string): Promise<Id<"users">> {
+  return await t.run(async (ctx) =>
+    ctx.db.insert("users", { email, rol: "lector", bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1 }),
+  );
+}
+
+/** Un documento con los fragmentos dados, en el corpus de `propietario`. */
+async function sembrarPara(
+  t: ReturnType<typeof convexTest>,
+  propietario: Id<"users">,
+  semillas: Semilla[],
+  fileName = "a.pdf",
+) {
   return t.run(async (ctx) => {
     const doc = await ctx.db.insert("documents", {
-      fileName: "a.pdf",
+      fileName,
       sha256: "1",
       pages: 9,
       chunks: semillas.length,
       status: "ready",
+      propietario,
       ingestadoEn: 1,
       documentType: "pdf",
       language: "es",
@@ -78,18 +99,26 @@ async function sembrar(t: ReturnType<typeof convexTest>, semillas: Semilla[]) {
         await ctx.db.insert("chunks", {
           text: s.texto,
           embedding: vector({ [s.pico]: 1 }),
-          sourceFile: s.sourceFile ?? "a.pdf",
+          sourceFile: s.sourceFile ?? fileName,
           page: s.page ?? i + 1,
           chunkType: "text",
           documentId: s.documentId ?? "doc-1",
           documentType: s.documentType ?? "pdf",
           language: s.language ?? "es",
           documentRef: doc,
+          propietario,
         }),
       );
     }
     return ids;
   });
+}
+
+/** Como `sembrarPara` pero creando la cuenta dueña y dejándola en `DUENO`.
+ *  Es lo que usan los casos que solo necesitan un corpus. */
+async function sembrar(t: ReturnType<typeof convexTest>, semillas: Semilla[]) {
+  DUENO = await cuenta(t, "duena@airobotix.net");
+  return await sembrarPara(t, DUENO, semillas);
 }
 
 /** Un `ActionCtx` cuyo `runQuery` falla solo para la query dada: así se
@@ -125,7 +154,7 @@ describe("buscarHibrido", () => {
     const embed = embedFalso(() => CONSULTA_ZORRO);
     const tel = new Telemetria();
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "zorro", {}, 10, tel));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", {}, 10, tel));
 
     // Denso: B, A, C. Léxico: solo A. RRF: A = 1/62 + 1/61 > B = 1/61 > C.
     expect(r.recuperacion).toBe("hibrida");
@@ -145,7 +174,7 @@ describe("buscarHibrido", () => {
     await sembrar(t, TRES);
     embedFalso(() => CONSULTA_ZORRO);
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "zorro", {}, 10));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", {}, 10));
 
     expect(r.fragmentos).toHaveLength(3);
     expect(sinEmbedding(r.fragmentos)).toBe(true);
@@ -176,7 +205,7 @@ describe("buscarHibrido", () => {
           return (ctx.runQuery as (r: unknown, a: unknown) => Promise<unknown>)(ref, args);
         }) as ActionCtx["runQuery"],
       };
-      return buscarHibrido(espia, "¿qué es lo que hay de esto?", {}, 10);
+      return buscarHibrido(espia, DUENO, "¿qué es lo que hay de esto?", {}, 10);
     });
 
     expect(r.recuperacion).toBe("densa");
@@ -192,7 +221,7 @@ describe("buscarHibrido", () => {
     const tel = new Telemetria();
 
     const r = await t.action((ctx) =>
-      buscarHibrido(conQueryRota(ctx, "search/hybrid:lexica"), "zorro", {}, 10, tel),
+      buscarHibrido(conQueryRota(ctx, "search/hybrid:lexica"), DUENO, "zorro", {}, 10, tel),
     );
 
     expect(r.recuperacion).toBe("densa");
@@ -206,7 +235,7 @@ describe("buscarHibrido", () => {
     vi.spyOn(gateway, "embed").mockRejectedValue(new Error("gateway 503"));
     const tel = new Telemetria();
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "zorro", {}, 10, tel));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", {}, 10, tel));
 
     expect(r.recuperacion).toBe("lexica");
     expect(r.fragmentos.map((f) => f._id)).toEqual([a]);
@@ -228,7 +257,7 @@ describe("buscarHibrido", () => {
           throw new Error("índice vectorial caído");
         }) as ActionCtx["vectorSearch"],
       };
-      return buscarHibrido(roto, "zorro", {}, 10);
+      return buscarHibrido(roto, DUENO, "zorro", {}, 10);
     });
 
     expect(r.recuperacion).toBe("lexica");
@@ -242,7 +271,7 @@ describe("buscarHibrido", () => {
     const tel = new Telemetria();
 
     const r = await t.action((ctx) =>
-      buscarHibrido(conQueryRota(ctx, "search/hybrid:lexica"), "zorro", {}, 10, tel),
+      buscarHibrido(conQueryRota(ctx, "search/hybrid:lexica"), DUENO, "zorro", {}, 10, tel),
     );
 
     expect(r).toEqual({ fragmentos: [], recuperacion: "error" });
@@ -255,7 +284,7 @@ describe("buscarHibrido", () => {
     embedFalso(() => CONSULTA_ZORRO);
 
     const r = await t.action((ctx) =>
-      buscarHibrido(conQueryRota(ctx, "search/hybrid:cargar"), "zorro", {}, 10),
+      buscarHibrido(conQueryRota(ctx, "search/hybrid:cargar"), DUENO, "zorro", {}, 10),
     );
 
     expect(r).toEqual({ fragmentos: [], recuperacion: "error" });
@@ -266,7 +295,7 @@ describe("buscarHibrido", () => {
     await sembrar(t, TRES);
     const embed = embedFalso(() => CONSULTA_ZORRO);
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "   ", {}, 10));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "   ", {}, 10));
 
     expect(r).toEqual({ fragmentos: [], recuperacion: "error" });
     expect(embed).not.toHaveBeenCalled();
@@ -277,7 +306,7 @@ describe("buscarHibrido", () => {
     const [a, b] = await sembrar(t, TRES);
     embedFalso(() => CONSULTA_ZORRO);
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "zorro", {}, 2));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", {}, 2));
 
     expect(r.fragmentos.map((f) => f._id)).toEqual([a, b]);
   });
@@ -294,7 +323,7 @@ describe("filtros", () => {
     // El vector prefiere claramente el fragmento del documento dos.
     embedFalso(() => vector({ 2: 5, 1: 2, 0: 1 }));
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "zorro", { documentId: "doc-1" }, 10));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", { documentId: "doc-1" }, 10));
 
     expect(r.recuperacion).toBe("hibrida");
     // A está en los dos lados (denso 2º, léxico 1º) y gana a B (denso 1º).
@@ -314,7 +343,7 @@ describe("filtros", () => {
     embedFalso(() => vector({ 1: 3, 2: 2, 0: 1 }));
 
     const r = await t.action((ctx) =>
-      buscarHibrido(ctx, "zorro", { documentType: "pdf", language: "es" }, 10),
+      buscarHibrido(ctx, DUENO, "zorro", { documentType: "pdf", language: "es" }, 10),
     );
 
     expect(r.recuperacion).toBe("hibrida");
@@ -330,7 +359,7 @@ describe("filtros", () => {
     ]);
     embedFalso(() => vector({ 0: 3, 1: 2, 2: 1 }));
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "zorro", { documentType: "docx" }, 10));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", { documentType: "docx" }, 10));
 
     expect(r.fragmentos.map((f) => f._id)).toEqual([docx]);
   });
@@ -340,7 +369,7 @@ describe("filtros", () => {
     await sembrar(t, TRES);
     embedFalso(() => CONSULTA_ZORRO);
 
-    const r = await t.action((ctx) => buscarHibrido(ctx, "zorro", { language: "fr" }, 10));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", { language: "fr" }, 10));
 
     // Es el llamador quien decide repetir sin filtros y avisar al modelo.
     expect(r).toEqual({ fragmentos: [], recuperacion: "hibrida" });
@@ -415,8 +444,8 @@ describe("determinismo", () => {
     ]);
     embedFalso(() => vector({ 1: 2, 0: 1 }));
 
-    const primera = await t.action((ctx) => buscarHibrido(ctx, "zorro", {}, 10));
-    const segunda = await t.action((ctx) => buscarHibrido(ctx, "zorro", {}, 10));
+    const primera = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", {}, 10));
+    const segunda = await t.action((ctx) => buscarHibrido(ctx, DUENO, "zorro", {}, 10));
 
     expect(primera.fragmentos.map((f) => f._id)).toEqual([p, q]);
     expect(segunda.fragmentos.map((f) => f._id)).toEqual([p, q]);
@@ -440,6 +469,7 @@ describe("robustez", () => {
         page: 1,
         chunkType: "text",
         documentRef: doc._id,
+        propietario: doc.propietario,
       });
       await ctx.db.delete(id);
       return id;
@@ -454,7 +484,7 @@ describe("robustez", () => {
           return [{ _id: borrado, _score: 0.99 }, ...reales];
         }) as ActionCtx["vectorSearch"],
       };
-      return buscarHibrido(conFantasma, "zorro", {}, 10);
+      return buscarHibrido(conFantasma, DUENO, "zorro", {}, 10);
     });
 
     // El fantasma iba 1º en el denso; sin compactar, B puntuaría como 2º
@@ -489,7 +519,7 @@ describe("robustez", () => {
         }) as ActionCtx["runQuery"],
       };
       // Solo palabras vacías: lado denso puro, para que el orden sea el del vector.
-      return buscarHibrido(espia, "¿qué es lo que hay de esto?", {}, n);
+      return buscarHibrido(espia, DUENO, "¿qué es lo que hay de esto?", {}, n);
     });
 
     expect(r.recuperacion).toBe("densa");
@@ -511,7 +541,7 @@ describe("buscarHibridoVarias", () => {
     const tel = new Telemetria();
 
     const rs = await t.action((ctx) =>
-      buscarHibridoVarias(ctx, ["zorro", "zorro", "castor"], {}, 10, tel),
+      buscarHibridoVarias(ctx, DUENO, ["zorro", "zorro", "castor"], {}, 10, tel),
     );
 
     expect(embed).toHaveBeenCalledTimes(1);
@@ -534,7 +564,7 @@ describe("buscarHibridoVarias", () => {
     ]);
     vi.spyOn(gateway, "embed").mockRejectedValue(new Error("sin saldo"));
 
-    const rs = await t.action((ctx) => buscarHibridoVarias(ctx, ["zorro", "", "castor"], {}, 10));
+    const rs = await t.action((ctx) => buscarHibridoVarias(ctx, DUENO, ["zorro", "", "castor"], {}, 10));
 
     expect(rs.map((r) => r.recuperacion)).toEqual(["lexica", "error", "lexica"]);
     expect(rs[0].fragmentos.map((f) => f._id)).toEqual([a]);
@@ -545,7 +575,121 @@ describe("buscarHibridoVarias", () => {
   test("sin consultas no hay llamadas", async () => {
     const t = convexTest(schema);
     const embed = embedFalso(() => CONSULTA_ZORRO);
-    expect(await t.action((ctx) => buscarHibridoVarias(ctx, [], {}, 10))).toEqual([]);
+    expect(await t.action((ctx) => buscarHibridoVarias(ctx, DUENO, [], {}, 10))).toEqual([]);
     expect(embed).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Aislamiento entre corpus
+// ---------------------------------------------------------------------------
+//
+// Cada persona tiene sus propios documentos y una búsqueda solo puede ver los
+// de quien pregunta. Estas pruebas no confirman que funcione: van a por las
+// formas concretas de saltárselo (los tres sitios donde se aplica el
+// propietario, más el reintento sin filtros, que es el que históricamente
+// relajaba las condiciones).
+describe("una búsqueda no puede ver el corpus de otra persona", () => {
+  const MISMO = [{ texto: "amiloide en plasma zorro", pico: 0 }];
+
+  test("el mismo texto en dos corpus: cada una ve solo el suyo", async () => {
+    const t = convexTest(schema);
+    const ana = await cuenta(t, "ana@airobotix.net");
+    const bea = await cuenta(t, "bea@airobotix.net");
+    const [deAna] = await sembrarPara(t, ana, MISMO, "de-ana.pdf");
+    const [deBea] = await sembrarPara(t, bea, MISMO, "de-bea.pdf");
+    embedFalso(() => vector({ 0: 1 }));
+
+    const rAna = await t.action((ctx) => buscarHibrido(ctx, ana, "zorro", {}, 10));
+    const rBea = await t.action((ctx) => buscarHibrido(ctx, bea, "zorro", {}, 10));
+    expect(rAna.fragmentos.map((f) => f._id)).toEqual([deAna]);
+    expect(rBea.fragmentos.map((f) => f._id)).toEqual([deBea]);
+    // Y el fichero ajeno no aparece ni por su nombre.
+    expect(rAna.fragmentos.map((f) => f.sourceFile)).toEqual(["de-ana.pdf"]);
+  });
+
+  test("una cuenta sin corpus no hereda el de nadie, aunque la búsqueda funcione", async () => {
+    const t = convexTest(schema);
+    const ana = await cuenta(t, "ana@airobotix.net");
+    const nueva = await cuenta(t, "nueva@airobotix.net");
+    await sembrarPara(t, ana, TRES);
+    embedFalso(() => CONSULTA_ZORRO);
+
+    const r = await t.action((ctx) => buscarHibrido(ctx, nueva, "zorro", {}, 10));
+    expect(r.fragmentos).toEqual([]);
+    // Vacío por aislamiento, NO por fallo: los dos lados respondieron.
+    expect(r.recuperacion).toBe("hibrida");
+  });
+
+  test("el reintento SIN FILTROS sigue sin cruzar corpus", async () => {
+    const t = convexTest(schema);
+    const ana = await cuenta(t, "ana@airobotix.net");
+    const bea = await cuenta(t, "bea@airobotix.net");
+    await sembrarPara(t, bea, MISMO, "de-bea.pdf");
+    embedFalso(() => vector({ 0: 1 }));
+
+    // Con un filtro que no casa: cero, como es debido.
+    const conFiltro = await t.action((ctx) =>
+      buscarHibrido(ctx, ana, "zorro", { language: "fr" }, 10),
+    );
+    expect(conFiltro.fragmentos).toEqual([]);
+    // Y sin filtros —el camino que el agente usa cuando no encuentra nada—
+    // tampoco: el propietario no es un filtro, es un argumento aparte.
+    const sinFiltro = await t.action((ctx) => buscarHibrido(ctx, ana, "zorro", SIN_FILTROS, 10));
+    expect(sinFiltro.fragmentos).toEqual([]);
+  });
+
+  test("pedir por id fragmentos ajenos no los devuelve: `cargar` es el cuello", async () => {
+    const t = convexTest(schema);
+    const ana = await cuenta(t, "ana@airobotix.net");
+    const bea = await cuenta(t, "bea@airobotix.net");
+    const ajenos = await sembrarPara(t, bea, TRES);
+    const propios = await sembrarPara(t, ana, MISMO, "de-ana.pdf");
+
+    // Es la llamada que haría un camino nuevo mal escrito: ids que salieron
+    // de otro sitio, cargados con la identidad de Ana.
+    const cargado = await t.query(internal.search.hybrid.cargar, {
+      propietario: ana,
+      ids: [...ajenos, ...propios],
+      filtros: {},
+    });
+    expect(cargado.map((f) => f._id)).toEqual(propios);
+  });
+
+  test("el lado léxico filtra por propietario en el propio índice", async () => {
+    const t = convexTest(schema);
+    const ana = await cuenta(t, "ana@airobotix.net");
+    const bea = await cuenta(t, "bea@airobotix.net");
+    await sembrarPara(t, bea, MISMO, "de-bea.pdf");
+    const [deAna] = await sembrarPara(t, ana, MISMO, "de-ana.pdf");
+
+    const ids = await t.query(internal.search.hybrid.lexica, {
+      propietario: ana,
+      terminos: "zorro",
+      n: 50,
+      filtros: {},
+    });
+    expect(ids).toEqual([deAna]);
+  });
+
+  test("un documentId ajeno no abre la puerta, aunque sea el filtro de la vectorial", async () => {
+    const t = convexTest(schema);
+    const ana = await cuenta(t, "ana@airobotix.net");
+    const bea = await cuenta(t, "bea@airobotix.net");
+    // Bea etiqueta sus fragmentos con un documentId que Ana conoce y usa
+    // como filtro: con `documentId` presente, ese es el filtro que va al
+    // índice vectorial en vez del propietario. El aislamiento tiene que
+    // aguantarlo igual, porque lo sostiene `cargar`.
+    await sembrarPara(t, bea, [{ texto: "amiloide en plasma zorro", pico: 0, documentId: "compartido" }], "de-bea.pdf");
+    embedFalso(() => vector({ 0: 1 }));
+
+    const r = await t.action((ctx) =>
+      buscarHibrido(ctx, ana, "zorro", { documentId: "compartido" }, 10),
+    );
+    expect(r.fragmentos).toEqual([]);
+    expect(filtroVectorial(ana, { documentId: "compartido" })).toEqual({
+      campo: "documentId",
+      valor: "compartido",
+    });
   });
 });

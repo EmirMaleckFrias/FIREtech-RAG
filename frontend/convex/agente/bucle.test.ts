@@ -400,7 +400,7 @@ beforeEach(() => {
   planificar = espiarPlanificar().mockResolvedValue({ items: [], preguntaEn: "" });
 
   porPunto = {};
-  ejecutarPlan = espiarPlan().mockImplementation(async (_ctx, plan) => evidenciaDe(plan));
+  ejecutarPlan = espiarPlan().mockImplementation(async (_ctx, _propietario, plan) => evidenciaDe(plan));
   busqueda = espiarBusqueda().mockRejectedValue(new Error("búsqueda extra no programada"));
 
   revisar = espiarRevisar().mockImplementation(async (_pregunta, borrador) => aprobar(borrador));
@@ -637,7 +637,7 @@ describe("camino documental, modo normal", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    ejecutarPlan.mockImplementation(async (_ctx, plan) => {
+    ejecutarPlan.mockImplementation(async (_ctx, _propietario, plan) => {
       await t.run(async (ctx) => ctx.db.delete(ids.messageId));
       return evidenciaDe(plan);
     });
@@ -731,7 +731,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1", { page: 9 })], {}, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1", { page: 9 })], {}, e));
     modelo.guiones = [
       rondaHerramientas([llamadaBuscar("call_a", { semantico: "p-tau217 specificity", punto: "" })]),
       rondaHerramientas([llamadaBuscar("call_a2", { semantico: "P-TAU217 SPECIFICITY", punto: "e0", limit: 3 })]),
@@ -754,7 +754,7 @@ describe("búsquedas extra", () => {
     const en = "What is the AUC of p-tau217 for detecting Alzheimer?";
     planificar.mockResolvedValue({ items: [], preguntaEn: en });
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("c1")], {}, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("c1")], {}, e));
     modelo.guiones = [rondaHerramientas([llamadaBuscar("call_en", { semantico: en, punto: "e0" })]), rondaTexto(RESPUESTA)];
 
     await correrEn(t, ids, { modo: "extendido" });
@@ -770,7 +770,7 @@ describe("búsquedas extra", () => {
       preguntaEn: "",
     });
     porPunto = { e0: { fragmentos: [frag("c1")] }, e1: { fragmentos: [], documentosRevisados: ["a.pdf"] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) =>
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) =>
       resultadoExtra(punto, consulta, [frag(`x_${consulta.split(" ").pop()}`, { page: 11 })], {}, e),
     );
     modelo.guiones = [
@@ -789,10 +789,10 @@ describe("búsquedas extra", () => {
     expect(m.content).toBe(RESPUESTA);
     expect(stream).toHaveBeenCalledTimes(3);
     expect(busqueda).toHaveBeenCalledTimes(2);
-    expect(busqueda.mock.calls.map((c) => c[1])).toEqual(["p-tau217 sensitivity plasma", "p-tau217 sensitivity CSF"]);
+    expect(busqueda.mock.calls.map((c) => c[2])).toEqual(["p-tau217 sensitivity plasma", "p-tau217 sensitivity CSF"]);
     // La búsqueda extra hereda el evidence_needed del punto que rellena.
-    expect(busqueda.mock.calls[0][2]).toBe("sensibilidad");
-    expect(busqueda.mock.calls[0][3]).toBe("e1");
+    expect(busqueda.mock.calls[0][3]).toBe("sensibilidad");
+    expect(busqueda.mock.calls[0][4]).toBe("e1");
     expect(modelo.llamadas[0].tool_choice).toBe("auto");
     expect(modelo.llamadas[1].tool_choice).toBe("auto");
     const tercera = modelo.llamadas[2];
@@ -816,7 +816,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [frag(`x_${consulta}`)], {}, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag(`x_${consulta}`)], {}, e));
     const a1 = JSON.stringify({ semantico: "segunda" });
     const a0 = JSON.stringify({ semantico: "primera" });
     modelo.guiones = [
@@ -832,7 +832,7 @@ describe("búsquedas extra", () => {
 
     const m = await correrEn(t, ids, { modo: "extendido" });
 
-    expect(busqueda.mock.calls.map((c) => c[1])).toEqual(["primera", "segunda"]);
+    expect(busqueda.mock.calls.map((c) => c[2])).toEqual(["primera", "segunda"]);
     const asistente = mensajesDe(modelo.llamadas[1]).find((x) => x.role === "assistant" && Array.isArray(x.tool_calls) && x.tool_calls.length === 2);
     expect(asistente?.tool_calls).toEqual([
       { id: "call_0", type: "function", function: { name: NOMBRE_BUSCAR, arguments: a0 } },
@@ -845,7 +845,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [frag(`x_${consulta}`)], {}, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag(`x_${consulta}`)], {}, e));
     modelo.guiones = [
       rondaHerramientas([llamadaBuscar("call_0", { semantico: "primera" }), llamadaBuscar("call_1", { semantico: "segunda" })]),
       rondaTexto(RESPUESTA),
@@ -860,7 +860,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1")], {}, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1")], {}, e));
     revisar.mockImplementation(async (_p, borrador) => (borrador.trim() ? aprobar(borrador) : abstenerse("borrador_vacio")));
     modelo.porDefecto = () => rondaHerramientas([llamadaBuscar(`call_${modelo.llamadas.length}`, { semantico: `consulta ${modelo.llamadas.length}` })]);
 
@@ -881,13 +881,13 @@ describe("búsquedas extra", () => {
     // ronda ya iría forzada: es lo que distingue los dos comportamientos.
     vi.stubEnv("AGENT_MAX_HOPS_SIN_AVANCE", "1");
     await t.run(async (ctx) => {
-      const base = { sha256: "x", pages: 1, ingestadoEn: 1, documentType: "pdf" };
+      const base = { sha256: "x", pages: 1, ingestadoEn: 1, documentType: "pdf", propietario: ids.userId };
       await ctx.db.insert("documents", { ...base, fileName: "estudio.pdf", chunks: 6, status: "ready", language: "es" });
       await ctx.db.insert("documents", { ...base, fileName: "folleto.pdf", chunks: 2, status: "ready" });
       await ctx.db.insert("documents", { ...base, fileName: "roto.docx", chunks: 5, status: "failed", error: "no se pudo parsear" });
     });
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1", { sourceFile: "estudio.pdf" })], {}, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1", { sourceFile: "estudio.pdf" })], {}, e));
     modelo.guiones = [
       rondaHerramientas([{ id: "call_inv", name: NOMBRE_INVENTARIO, arguments: "{}" }]),
       rondaHerramientas([llamadaBuscar("call_b", { semantico: "AUC p-tau217 cohort" })]),
@@ -946,7 +946,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto, _modo, filtros) =>
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto, _modo, filtros) =>
       Object.keys(filtros).length
         ? resultadoExtra(punto, consulta, [], { documentosRevisados: [], nCandidatos: 0 }, e)
         : resultadoExtra(punto, consulta, [frag("x1", { page: 7 })], {}, e),
@@ -960,8 +960,8 @@ describe("búsquedas extra", () => {
 
     expect(busqueda).toHaveBeenCalledTimes(2);
     // Los filtros viajan con las claves de FiltrosBusqueda.
-    expect(busqueda.mock.calls[0][5]).toEqual({ language: "es", documentType: "pdf" });
-    expect(busqueda.mock.calls[1][5]).toEqual({});
+    expect(busqueda.mock.calls[0][6]).toEqual({ language: "es", documentType: "pdf" });
+    expect(busqueda.mock.calls[1][6]).toEqual({});
     const texto = herramientaDe(modelo.llamadas[1], "call_f");
     expect(texto.startsWith("AVISO: con los filtros que pusiste (")).toBe(true);
     expect(texto).toContain('language="es"');
@@ -977,12 +977,12 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1")], {}, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("x1")], {}, e));
     modelo.guiones = [rondaHerramientas([llamadaBuscar("call_b", { semantico: "p-tau217 AUC", project_id: "  " })]), rondaTexto(RESPUESTA)];
 
     const m = await correrEn(t, ids);
 
-    expect(busqueda.mock.calls[0][5]).toEqual({});
+    expect(busqueda.mock.calls[0][6]).toEqual({});
     expect(hopsDe(m)[1].query).toBe("p-tau217 AUC");
   });
 
@@ -990,7 +990,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) =>
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) =>
       resultadoExtra(punto, consulta, [], { documentosRevisados: ["a.pdf", "b.pdf"], nCandidatos: 4 }, e),
     );
     modelo.guiones = [rondaHerramientas([llamadaBuscar("call_v", { semantico: "algo que no está", language: "en" })]), rondaTexto(RESPUESTA)];
@@ -1027,7 +1027,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => resultadoExtra(punto, consulta, [], { recuperacion: "error", documentosRevisados: [] }, e));
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [], { recuperacion: "error", documentosRevisados: [] }, e));
     modelo.guiones = [rondaHerramientas([llamadaBuscar("call_r", { semantico: "specificity" })]), rondaTexto(RESPUESTA)];
 
     const m = await correrEn(t, ids);
@@ -1042,7 +1042,7 @@ describe("búsquedas extra", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")], grados: { c1: "directa" } } };
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) =>
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) =>
       resultadoExtra(punto, consulta, [frag("x1")], { grados: { x1: "parcial" } }, e),
     );
     modelo.guiones = [rondaHerramientas([llamadaBuscar("call_g", { semantico: "specificity p-tau217" })]), rondaTexto(RESPUESTA)];
@@ -1316,7 +1316,7 @@ describe("reloj", () => {
     expect(m.content).toBe(RESPUESTA);
     expect(metricasDe(m).counters.forced_final).toBe(1);
     // La evidencia recibe como mucho lo que queda, y la revisión nunca un negativo.
-    expect(ejecutarPlan.mock.calls[0][5]).toBeLessThanOrEqual(1000);
+    expect(ejecutarPlan.mock.calls[0][6]).toBeLessThanOrEqual(1000);
     const tiempo = revisar.mock.calls[0][6] as number;
     expect(tiempo).toBeGreaterThanOrEqual(0);
     expect(tiempo).toBeLessThanOrEqual(1);
@@ -1329,7 +1329,7 @@ describe("reloj", () => {
     const ahoraReal = Date.now.bind(Date);
     let desfase = 0;
     vi.spyOn(Date, "now").mockImplementation(() => ahoraReal() + desfase);
-    ejecutarPlan.mockImplementation(async (_ctx, plan) => {
+    ejecutarPlan.mockImplementation(async (_ctx, _propietario, plan) => {
       desfase += 600_000; // 600 s: más que los 540 del presupuesto total
       return evidenciaDe(plan);
     });
@@ -1350,7 +1350,7 @@ describe("reloj", () => {
     const ahoraReal = Date.now.bind(Date);
     let desfase = 0;
     vi.spyOn(Date, "now").mockImplementation(() => ahoraReal() + desfase);
-    busqueda.mockImplementation(async (_ctx, consulta, e, punto) => {
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => {
       desfase += EXTENDIDO.presupuestoS * 1000 + 1000;
       return resultadoExtra(punto, consulta, [frag("x1")], {}, e);
     });

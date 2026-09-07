@@ -49,15 +49,26 @@ function csvGrande(n: number): Uint8Array {
   return new TextEncoder().encode(filas.join("\n"));
 }
 
+/** Un documento en el corpus de una cuenta recién creada. El propietario lo
+ *  copian los fragmentos al insertarse (ingesta/escritura.ts), así que la
+ *  ingesta no lo recibe por argumento: sale del documento. */
 async function documentoConFichero(t: T, fileName: string, contenido: Uint8Array): Promise<Id<"documents">> {
   return t.run(async (ctx) => {
     const storageId = await ctx.storage.store(new Blob([contenido]));
+    const propietario = await ctx.db.insert("users", {
+      email: `duena-${fileName}@airobotix.net`,
+      rol: "lector",
+      bloqueado: false,
+      creadoEn: 1,
+      ultimoAccesoEn: 1,
+    });
     return ctx.db.insert("documents", {
       fileName,
       sha256: "pendiente",
       pages: 0,
       chunks: 0,
       status: "processing",
+      propietario,
       ingestadoEn: Date.now(),
       storageId,
     });
@@ -71,8 +82,9 @@ async function chunksDe(t: T, documentId: Id<"documents">) {
 }
 
 async function chunkAjeno(t: T, documentId: Id<"documents">, version: string, text: string) {
-  return t.run((ctx) =>
-    ctx.db.insert("chunks", {
+  return t.run(async (ctx) => {
+    const doc = (await ctx.db.get(documentId))!;
+    return ctx.db.insert("chunks", {
       text,
       embedding: vectorFalso(0),
       sourceFile: "datos.csv",
@@ -81,8 +93,9 @@ async function chunkAjeno(t: T, documentId: Id<"documents">, version: string, te
       documentRef: documentId,
       documentId: String(documentId),
       documentVersion: version,
-    }),
-  );
+      propietario: doc.propietario,
+    });
+  });
 }
 
 /** Cuenta paginando: bajo los límites reales un `collect` de 1500 fragmentos
@@ -193,12 +206,14 @@ describe("ingestar", () => {
     const documentId = await documentoConFichero(t, "datos.csv", bytes);
     const embedding = Array.from({ length: 3072 }, (_, i) => i / 3072);
     const viejos = 200;
+    const propietario = await t.run(async (ctx) => (await ctx.db.get(documentId))!.propietario);
     for (let desde = 0; desde < viejos; desde += 100) {
       await t.run(async (ctx) => {
         for (let i = desde; i < desde + 100; i++) {
           await ctx.db.insert("chunks", {
             text: `viejo ${i}`, embedding, sourceFile: "datos.csv", page: i, chunkType: "table",
             documentRef: documentId, documentId: String(documentId), documentVersion: "version-vieja",
+            propietario,
           });
         }
       });

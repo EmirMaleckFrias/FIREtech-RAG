@@ -325,8 +325,6 @@ export interface EstadoNotion {
     titulo: string | null;
     elegidaEnApp: boolean;
   } | null;
-  /** Sin conexión en la app, pero configurado por el equipo técnico. */
-  porEntorno: boolean;
   periodicaMinutos: number;
   borrarArchivados: boolean;
   paginas: number;

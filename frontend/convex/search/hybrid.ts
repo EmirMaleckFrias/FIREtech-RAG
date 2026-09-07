@@ -40,6 +40,22 @@
 // 2 sep 2026 un filtro `language: es` sobre puntos con `language` vacío dio
 // cero y el agente concluyó que el documento no existía). Para eso se exportan
 // `filtrosActivos`, `hayFiltros` y `describirFiltros`.
+//
+// - **El propietario NO es un filtro: es un parámetro aparte y obligatorio.**
+//   Cada persona tiene su propio corpus (ver `propietario` en schema.ts), y
+//   esa separación no puede vivir en el mismo saco que `language` o
+//   `documentType` justamente por la regla de arriba: el llamador repite la
+//   búsqueda "sin filtros" cuando no encuentra nada, y si el propietario
+//   fuera un filtro, ese reintento buscaría en el corpus de todo el mundo. Al
+//   ser un argumento propio, quitar los filtros no lo puede quitar.
+//
+//   Se aplica en TRES sitios a la vez, y no por redundancia sino porque cada
+//   uno hace algo distinto: en el índice léxico como un `.eq` más (allí sí hay
+//   AND, así que es exacto y gratis); en el índice vectorial como el filtro
+//   elegido cuando no hay uno más selectivo; y de forma INCONDICIONAL al
+//   cargar las filas (`cargar`), que es el único sitio por el que pasa todo lo
+//   que acaba en la respuesta. Si un día se añade otro camino que devuelva
+//   fragmentos sin pasar por `cargar`, la frontera hay que rehacerla ahí.
 import { v } from "convex/values";
 import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -117,17 +133,6 @@ export function describirFiltros(filtros: FiltrosBusqueda | null | undefined): s
     .join(", ");
 }
 
-/** El único filtro que puede ir a la búsqueda vectorial. */
-function filtroMasSelectivo(
-  activos: Partial<Record<CampoFiltro, string>>,
-): { campo: CampoFiltro; valor: string } | null {
-  for (const campo of ORDEN_SELECTIVIDAD) {
-    const valor = activos[campo];
-    if (valor !== undefined) return { campo, valor };
-  }
-  return null;
-}
-
 function pasaFiltros(
   doc: Doc<"chunks">,
   activos: Partial<Record<CampoFiltro, string>>,
@@ -183,7 +188,12 @@ const filtrosValidator = v.object({
  *  Aquí sí se aplican TODOS los filtros, encadenando `.eq`. Devuelve solo
  *  ids: la fila completa se carga después junto con las del lado denso. */
 export const lexica = internalQuery({
-  args: { terminos: v.string(), n: v.number(), filtros: filtrosValidator },
+  args: {
+    propietario: v.id("users"),
+    terminos: v.string(),
+    n: v.number(),
+    filtros: filtrosValidator,
+  },
   handler: async (ctx, args): Promise<Id<"chunks">[]> => {
     const activos = filtrosActivos(args.filtros);
     const n = Math.max(1, Math.min(MAX_LEXICO, Math.floor(args.n)));
@@ -192,7 +202,8 @@ export const lexica = internalQuery({
       .withSearchIndex("porTexto", (q) =>
         (Object.entries(activos) as Array<[CampoFiltro, string]>).reduce(
           (expr, [campo, valor]) => expr.eq(campo, valor),
-          q.search("text", args.terminos),
+          // El propietario primero y siempre: aquí el índice sí encadena AND.
+          q.search("text", args.terminos).eq("propietario", args.propietario),
         ),
       )
       .take(n);
@@ -207,13 +218,22 @@ export const lexica = internalQuery({
  *  no sabe hacer. Un id que ya no existe (el documento se reindexó entre la
  *  búsqueda y la carga) simplemente se omite. */
 export const cargar = internalQuery({
-  args: { ids: v.array(v.id("chunks")), filtros: filtrosValidator },
+  args: {
+    propietario: v.id("users"),
+    ids: v.array(v.id("chunks")),
+    filtros: filtrosValidator,
+  },
   handler: async (ctx, args): Promise<Fragmento[]> => {
     const activos = filtrosActivos(args.filtros);
     const filas = await Promise.all(args.ids.map((id) => ctx.db.get(id)));
     const out: Fragmento[] = [];
     for (const fila of filas) {
-      if (fila === null || !pasaFiltros(fila, activos)) continue;
+      if (fila === null) continue;
+      // La comprobación del propietario va ANTES y es incondicional: este es
+      // el cuello por el que pasa todo lo que llega al agente, y por tanto el
+      // sitio donde el aislamiento entre corpus se sostiene de verdad.
+      if (fila.propietario !== args.propietario) continue;
+      if (!pasaFiltros(fila, activos)) continue;
       out.push(aFragmento(fila));
     }
     return out;
@@ -280,19 +300,38 @@ async function intentar<T>(
   }
 }
 
+/** El ÚNICO filtro que puede llevar la búsqueda vectorial, ya resuelto.
+ *
+ *  La vectorial no sabe hacer AND, así que hay que elegir uno. Se elige
+ *  `documentId` cuando la consulta va contra un documento concreto, porque
+ *  acota a una sola obra y filtrar por el propietario ahí dejaría que los 256
+ *  candidatos del tope se los comieran los otros documentos de la misma
+ *  persona, hundiendo la recuperación de la pregunta que sí importa. En
+ *  cualquier otro caso el elegido es el propietario, que es lo más selectivo
+ *  que queda (una fracción de la tabla) y además la frontera que interesa.
+ *
+ *  Sea cual sea, el aislamiento no depende de esta elección: lo garantiza
+ *  `cargar`, que descarta sin condiciones lo que no sea del propietario. */
+export function filtroVectorial(
+  propietario: Id<"users">,
+  activos: Partial<Record<CampoFiltro, string>>,
+): { campo: CampoFiltro | "propietario"; valor: string } {
+  const documentId = activos.documentId;
+  if (documentId !== undefined) return { campo: "documentId", valor: documentId };
+  return { campo: "propietario", valor: propietario };
+}
+
 async function ladoDenso(
   ctx: ActionCtx,
   vector: number[],
-  selectivo: { campo: CampoFiltro; valor: string } | null,
+  elegido: { campo: CampoFiltro | "propietario"; valor: string },
   limite: number,
 ): Promise<Id<"chunks">[]> {
-  const resultados = selectivo
-    ? await ctx.vectorSearch("chunks", "porEmbedding", {
-        vector,
-        limit: limite,
-        filter: (q) => q.eq(selectivo.campo, selectivo.valor),
-      })
-    : await ctx.vectorSearch("chunks", "porEmbedding", { vector, limit: limite });
+  const resultados = await ctx.vectorSearch("chunks", "porEmbedding", {
+    vector,
+    limit: limite,
+    filter: (q) => q.eq(elegido.campo, elegido.valor),
+  });
   return resultados.map((r) => r._id);
 }
 
@@ -311,6 +350,7 @@ async function ladoDenso(
  *    el llamador lo tiene que poder distinguir. */
 export async function buscarHibridoVarias(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   consultas: string[],
   filtros: FiltrosBusqueda,
   topK: number,
@@ -319,9 +359,15 @@ export async function buscarHibridoVarias(
   if (!consultas.length) return [];
   const k = Math.max(1, Math.floor(topK) || 1);
   const activos = filtrosActivos(filtros);
-  const selectivo = filtroMasSelectivo(activos);
-  // Filtros que la vectorial no puede aplicar y se aplican al cargar.
-  const hayResiduales = Object.keys(activos).length > (selectivo ? 1 : 0);
+  const elegido = filtroVectorial(propietario, activos);
+  // Filtros que la vectorial no puede aplicar y se aplican al cargar. Cuando
+  // el elegido es el propietario, TODOS los filtros son residuales (el
+  // propietario no está entre ellos), así que hay residuales en cuanto haya
+  // un filtro; cuando el elegido es `documentId`, ese ya está aplicado.
+  const hayResiduales =
+    elegido.campo === "propietario"
+      ? Object.keys(activos).length > 0
+      : Object.keys(activos).length > 1;
   // Como el `prefetch_limit = max(top_k * 2, 20)` de Qdrant por lado; el
   // denso pide el doble cuando hay filtros residuales, porque una parte de
   // lo que devuelva se va a descartar al cargar.
@@ -384,13 +430,14 @@ export async function buscarHibridoVarias(
       const vector = vectores?.get(texto);
       const [denso, lexico] = await Promise.all([
         vector
-          ? intentar("denso", () => ladoDenso(ctx, vector, selectivo, limiteDenso), tel)
+          ? intentar("denso", () => ladoDenso(ctx, vector, elegido, limiteDenso), tel)
           : Promise.resolve(null),
         terminos.length
           ? intentar(
               "lexico",
               () =>
                 ctx.runQuery(internal.search.hybrid.lexica, {
+                  propietario,
                   terminos: terminos.join(" "),
                   n: limiteLexico,
                   filtros: activos,
@@ -423,7 +470,9 @@ export async function buscarHibridoVarias(
       lotes.push(union.slice(i, i + LOTE_CARGA));
     }
     const cargados = await Promise.all(
-      lotes.map((ids) => ctx.runQuery(internal.search.hybrid.cargar, { ids, filtros: activos })),
+      lotes.map((ids) =>
+        ctx.runQuery(internal.search.hybrid.cargar, { propietario, ids, filtros: activos }),
+      ),
     );
     for (const lista of cargados) for (const f of lista) porId.set(f._id, f);
   } catch (exc) {
@@ -459,11 +508,12 @@ export async function buscarHibridoVarias(
  *  solo existe ahí). */
 export async function buscarHibrido(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   consulta: string,
   filtros: FiltrosBusqueda,
   topK: number,
   tel?: Telemetria,
 ): Promise<ResultadoBusqueda> {
-  const [resultado] = await buscarHibridoVarias(ctx, [consulta], filtros, topK, tel);
+  const [resultado] = await buscarHibridoVarias(ctx, propietario, [consulta], filtros, topK, tel);
   return resultado;
 }

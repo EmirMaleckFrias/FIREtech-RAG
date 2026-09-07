@@ -551,7 +551,7 @@ describe("elegirBase y desconectar", () => {
     await t.run((ctx) =>
       ctx.db.insert("documents", {
         fileName: "notion-x.md", sha256: "a".repeat(64), pages: 1, chunks: 1, status: "ready",
-        ingestadoEn: Date.now(), origen: "notion", notionPageId: "p1",
+        propietario: id, ingestadoEn: Date.now(), origen: "notion", notionPageId: "p1",
       }),
     );
     expect(await admin.mutation(api.notion.oauth.desconectar, {})).toEqual({ ok: true });
@@ -565,20 +565,37 @@ describe("elegirBase y desconectar", () => {
 // 4. Permisos
 // ---------------------------------------------------------------------------
 describe("permisos", () => {
-  test("un lector recibe solo_admin en todas las funciones de administración", async () => {
+  test("un lector conecta SU Notion: ya no hace falta ser administrador", async () => {
     const t = nuevaBase();
-    const { id } = await alta(t, "admin@airobotix.net", "admin");
-    await conectar(t, id, { databaseId: DB });
     const { como: lector } = await alta(t, "lector@airobotix.net", "lector");
-    expect(await codigoDe(lector.mutation(api.notion.oauth.iniciar, {}))).toBe("solo_admin");
-    expect(await codigoDe(lector.action(api.notion.oauth.listarBases, {}))).toBe("solo_admin");
-    expect(await codigoDe(lector.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "x" }))).toBe("solo_admin");
-    expect(await codigoDe(lector.mutation(api.notion.oauth.desconectar, {}))).toBe("solo_admin");
-    expect(await codigoDe(lector.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("solo_admin");
-    expect(await codigoDe(lector.query(api.notion.admin.estado, {}))).toBe("solo_admin");
-    // Nada cambió por intentarlo.
+    // Conectar el propio Notion es uso normal de cualquier cuenta.
+    expect(await lector.mutation(api.notion.oauth.iniciar, {})).toMatchObject({
+      url: expect.stringContaining("api.notion.com"),
+    });
+    expect(await lector.query(api.notion.admin.estado, {})).toMatchObject({ conexion: null });
+    // Y lo que exige tener conexión propia falla por eso, no por permisos.
+    expect(await codigoDe(lector.action(api.notion.oauth.listarBases, {}))).toBe("invalido");
+    expect(await codigoDe(lector.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "x" }))).toBe("invalido");
+    expect(await codigoDe(lector.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
+  });
+
+  test("nadie puede tocar la conexión de otra persona, ni un administrador", async () => {
+    const t = nuevaBase();
+    const { id: anaId } = await alta(t, "ana@airobotix.net", "lector");
+    await conectar(t, anaId, { databaseId: DB });
+    const { como: admin } = await alta(t, "admin@airobotix.net", "admin");
+
+    // El administrador no ve la conexión de Ana ni en su estado…
+    expect(await admin.query(api.notion.admin.estado, {})).toMatchObject({ conexion: null, base: null });
+    // …ni puede listar sus bases, ni elegirle una, ni sincronizarla.
+    expect(await codigoDe(admin.action(api.notion.oauth.listarBases, {}))).toBe("invalido");
+    expect(await codigoDe(admin.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "x" }))).toBe("invalido");
+    expect(await codigoDe(admin.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
+    // Y "desconectar" no lanza, pero tampoco borra la de Ana: solo la suya,
+    // que no existe. Es el caso que un `collect()` sin índice sí habría roto.
+    expect(await admin.mutation(api.notion.oauth.desconectar, {})).toEqual({ ok: true });
     expect(await conexiones(t)).toHaveLength(1);
-    expect(await estados(t)).toEqual([]);
+    expect((await conexiones(t))[0].conectadoPor).toBe(anaId);
     expect(notion.llamadas).toEqual([]);
   });
 
@@ -593,41 +610,52 @@ describe("permisos", () => {
 // 5. Sincronización: credenciales y progreso
 // ---------------------------------------------------------------------------
 describe("sincronizar con la conexión", () => {
-  test("lee el token de la conexión antes que el de las variables", async () => {
+  test("sincroniza con el token de SU conexión", async () => {
     const t = nuevaBase();
-    const { id } = await alta(t, "admin@airobotix.net", "admin");
-    // Las variables llevan un token que Notion NO acepta: si la corrida sale
-    // bien es porque usó el de la conexión.
-    vi.stubEnv("NOTION_TOKEN", TOKEN_ENTORNO);
-    vi.stubEnv("NOTION_DATABASE_ID", "ffffffffffffffffffffffffffffffff");
+    const { id } = await alta(t, "ana@airobotix.net", "lector");
     await conectar(t, id, { databaseId: DB });
     notion.pagina("p1", "Protocolo uno");
 
-    const r = await t.action(internal.notion.sync.sincronizar, { forzar: true });
+    const r = await t.action(internal.notion.sync.sincronizar, { propietario: id, forzar: true });
     expect(r).toMatchObject({ estado: "ok", paginas: 1, nuevos: 1 });
     const bearers = notion.llamadas.map((l) => l.cabeceras.get("Authorization"));
     expect(bearers.every((b) => b === `Bearer ${TOKEN_OAUTH}`)).toBe(true);
+    // Y el documento que trae es SUYO.
+    const docs = await t.run((ctx) => ctx.db.query("documents").collect());
+    expect(docs.every((d) => d.propietario === id)).toBe(true);
   });
 
-  test("con conexión pero sin base elegida usa la base de la variable; sin ninguna, apagada", async () => {
+  test("conectada pero sin base elegida: apagada, y ninguna variable la salva", async () => {
     const t = nuevaBase();
-    const { id } = await alta(t, "admin@airobotix.net", "admin");
+    const { id } = await alta(t, "ana@airobotix.net", "lector");
     await conectar(t, id);
     notion.pagina("p1", "Protocolo uno");
-    expect(await t.action(internal.notion.sync.sincronizar, { forzar: true })).toEqual({ estado: "apagado" });
+    expect(await t.action(internal.notion.sync.sincronizar, { propietario: id, forzar: true })).toEqual({
+      estado: "apagado",
+    });
     expect(await corridas(t)).toEqual([]);
 
+    // Antes NOTION_DATABASE_ID rellenaba el hueco. Ya no existe ese respaldo:
+    // un token o una base del despliegue no tendrían dueño, y sus documentos
+    // no serían de nadie.
     vi.stubEnv("NOTION_DATABASE_ID", DB);
-    expect(await t.action(internal.notion.sync.sincronizar, { forzar: true })).toMatchObject({ estado: "ok", paginas: 1 });
+    expect(await t.action(internal.notion.sync.sincronizar, { propietario: id, forzar: true })).toEqual({
+      estado: "apagado",
+    });
+    expect(notion.llamadas).toEqual([]);
   });
 
-  test("sin conexión sigue funcionando con las variables (compatibilidad)", async () => {
+  test("sin conexión no hay sincronización posible, aunque haya variables puestas", async () => {
     const t = nuevaBase();
+    const { id } = await alta(t, "ana@airobotix.net", "lector");
     vi.stubEnv("NOTION_TOKEN", TOKEN_ENTORNO);
     vi.stubEnv("NOTION_DATABASE_ID", DB);
     notion.tokens.add(TOKEN_ENTORNO);
     notion.pagina("p1", "Protocolo uno");
-    expect(await t.action(internal.notion.sync.sincronizar, { forzar: true })).toMatchObject({ estado: "ok", paginas: 1 });
+    expect(await t.action(internal.notion.sync.sincronizar, { propietario: id, forzar: true })).toEqual({
+      estado: "apagado",
+    });
+    expect(notion.llamadas).toEqual([]);
   });
 
   test("escribe el avance página a página en la fila running y lo limpia al cerrar", async () => {
@@ -650,7 +678,7 @@ describe("sincronizar con la conexión", () => {
       await puerta;
     };
 
-    const corriendo = t.action(internal.notion.sync.sincronizar, { forzar: true });
+    const corriendo = t.action(internal.notion.sync.sincronizar, { propietario: id, forzar: true });
     await llegada;
     const [enCurso] = await corridas(t);
     expect(enCurso).toMatchObject({
@@ -688,7 +716,7 @@ describe("estado", () => {
     const { como: admin } = await alta(t, "admin@airobotix.net", "admin");
     vi.stubEnv("NOTION_CLIENT_ID", "");
     const e = await admin.query(api.notion.admin.estado, {});
-    expect(e).toMatchObject({ habilitada: false, conexion: null, base: null, porEntorno: false, enCurso: null, documentos: 0 });
+    expect(e).toMatchObject({ habilitada: false, conexion: null, base: null, enCurso: null, documentos: 0 });
     expect(JSON.stringify(e)).not.toContain(CLIENT_SECRET);
   });
 
@@ -703,20 +731,21 @@ describe("estado", () => {
     expect(e.base).toBeNull();
     expect(await codigoDe(admin.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
 
-    vi.stubEnv("NOTION_DATABASE_ID", DB);
+    // La base solo aparece cuando ELLA la elige: ya no hay variable que la
+    // rellene por detrás.
+    await admin.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "Protocolos" });
     e = await admin.query(api.notion.admin.estado, {});
-    expect(e.base).toEqual({ id: DB, titulo: null, elegidaEnApp: false });
-    expect(e.porEntorno).toBe(false);
+    expect(e.base).toEqual({ id: DB, titulo: "Protocolos", elegidaEnApp: true });
     expect(await admin.mutation(api.notion.admin.sincronizarAhora, {})).toEqual({ ok: true });
   });
 
-  test("solo variables (primera versión): porEntorno", async () => {
+  test("las variables del despliegue ya no configuran nada", async () => {
     const t = nuevaBase();
     const { como: admin } = await alta(t, "admin@airobotix.net", "admin");
     vi.stubEnv("NOTION_TOKEN", TOKEN_ENTORNO);
     vi.stubEnv("NOTION_DATABASE_ID", DB);
     const e = await admin.query(api.notion.admin.estado, {});
-    expect(e).toMatchObject({ conexion: null, porEntorno: true, base: { id: DB, elegidaEnApp: false } });
+    expect(e).toMatchObject({ conexion: null, base: null });
     expect(JSON.stringify(e)).not.toContain(TOKEN_ENTORNO);
   });
 });

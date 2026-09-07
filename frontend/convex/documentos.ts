@@ -2,8 +2,18 @@
 // `backend/app/api/documents.py` (la parte de rutas; la ingesta en sí es
 // `convex/ingesta/pipeline.ts`).
 //
-// Los documentos son compartidos: cualquier usuario autenticado los ve y los
-// consulta. Subirlos, reindexarlos y borrarlos es exclusivo del administrador.
+// **Cada persona tiene su propio corpus.** Un documento pertenece a quien lo
+// subió (o a quien conectó el Notion del que salió), y solo esa persona lo ve,
+// lo consulta, lo reindexa y lo borra: ni siquiera un administrador ve los
+// documentos de otra cuenta. Antes eran compartidos y solo un administrador
+// podía subir; el cambio es deliberado, para que dos usuarias no puedan
+// mezclarse el corpus (ver `propietario` en schema.ts).
+//
+// Cómo se sostiene ese aislamiento aquí: TODA lectura de `documents` va por un
+// índice que empieza por `propietario`, y las funciones que reciben un
+// `documentId` del cliente comprueban el dueño antes de tocarlo, respondiendo
+// `no_encontrado` (no `solo_admin`) si es de otra persona: un documento ajeno
+// tiene que ser indistinguible de uno que no existe.
 //
 // Qué cambia respecto al backend anterior:
 //
@@ -26,7 +36,7 @@ import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { ajustes } from "./lib/config";
-import { administrador, errorDatos, usuario } from "./usuarios";
+import { errorDatos, usuario } from "./usuarios";
 
 export const EXTENSIONES_PERMITIDAS = ["pdf", "docx", "xlsx", "csv", "txt", "md"] as const;
 
@@ -86,13 +96,17 @@ export function processingRancio(
 // ---------------------------------------------------------------------------
 // Consultas y mutaciones
 // ---------------------------------------------------------------------------
-/** El registro entero, del más antiguo al más nuevo. Cualquier usuario
- *  autenticado: los documentos son compartidos. */
+/** El corpus de quien pregunta, del más antiguo al más nuevo. Nunca el de
+ *  otra persona: se lee por el índice `porPropietario`, así que no hay ni la
+ *  posibilidad de filtrar mal y devolver de más. */
 export const listar = query({
   args: {},
   handler: async (ctx) => {
-    await usuario(ctx);
-    const docs = await ctx.db.query("documents").collect();
+    const u = await usuario(ctx);
+    const docs = await ctx.db
+      .query("documents")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .collect();
     docs.sort((a, b) => a.ingestadoEn - b.ingestadoEn);
     return docs.map((d) => ({
       _id: d._id,
@@ -112,11 +126,24 @@ export const listar = query({
   },
 });
 
+/** El límite de subida del despliegue, en MB. Lo necesita quien sube, o sea
+ *  cualquier cuenta, así que va aquí y no en `estadisticas.sistema`, que es
+ *  solo para administradores: antes el panel de documentos pedía el agregado
+ *  entero de administración para leer un número, y con el corpus por persona
+ *  eso habría dejado a los lectores sin poder anunciar el límite. */
+export const limite = query({
+  args: {},
+  handler: async (ctx) => {
+    await usuario(ctx);
+    return { mb: ajustes().limiteSubidaMb };
+  },
+});
+
 /** URL firmada para subir un fichero directamente al almacenamiento. */
 export const urlDeSubida = mutation({
   args: {},
   handler: async (ctx) => {
-    await administrador(ctx, "subir documentos");
+    await usuario(ctx);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -143,12 +170,16 @@ export const registrar = mutation({
     sha256: v.string(),
   },
   handler: async (ctx, args) => {
-    const admin = await administrador(ctx, "subir documentos");
+    const u = await usuario(ctx);
     const { nombre, sha256 } = await validarRegistro(ctx, args);
 
+    // Los duplicados se buscan SOLO en el corpus de quien sube: que otra
+    // persona tenga un "guia.pdf" no puede impedirle subir el suyo.
     const existentes = await ctx.db
       .query("documents")
-      .withIndex("porNombre", (q) => q.eq("fileName", nombre))
+      .withIndex("porPropietarioYNombre", (q) =>
+        q.eq("propietario", u._id).eq("fileName", nombre),
+      )
       .collect();
     const vivo = existentes.find((d) => d.status !== "failed");
     if (vivo) {
@@ -168,7 +199,6 @@ export const registrar = mutation({
         chunks: 0,
         status: "processing",
         error: undefined,
-        subidoPor: admin._id,
         ingestadoEn: ahora,
         storageId: args.storageId,
         origen: "subida",
@@ -182,7 +212,7 @@ export const registrar = mutation({
         pages: 0,
         chunks: 0,
         status: "processing",
-        subidoPor: admin._id,
+        propietario: u._id,
         ingestadoEn: ahora,
         storageId: args.storageId,
         origen: "subida",
@@ -209,6 +239,9 @@ export const registrar = mutation({
  *  la sincronización elige otro nombre. */
 export const registrarDesdeOrigen = internalMutation({
   args: {
+    // De quién es el corpus al que entra. Lo pone la sincronización a partir
+    // de quién conectó ese Notion, no hay identidad en el cron.
+    propietario: v.id("users"),
     storageId: v.id("_storage"),
     fileName: v.string(),
     sha256: v.string(),
@@ -220,7 +253,9 @@ export const registrarDesdeOrigen = internalMutation({
 
     const existentes = await ctx.db
       .query("documents")
-      .withIndex("porNombre", (q) => q.eq("fileName", nombre))
+      .withIndex("porPropietarioYNombre", (q) =>
+        q.eq("propietario", args.propietario).eq("fileName", nombre),
+      )
       .collect();
     const mismaPagina = (d: Doc<"documents">) =>
       d.origen === args.origen &&
@@ -251,7 +286,6 @@ export const registrarDesdeOrigen = internalMutation({
         chunks: 0,
         status: "processing",
         error: undefined,
-        subidoPor: undefined,
         ingestadoEn: ahora,
         storageId: args.storageId,
         origen: args.origen,
@@ -268,6 +302,7 @@ export const registrarDesdeOrigen = internalMutation({
       pages: 0,
       chunks: 0,
       status: "processing",
+      propietario: args.propietario,
       ingestadoEn: ahora,
       storageId: args.storageId,
       origen: args.origen,
@@ -291,9 +326,8 @@ export const registrarDesdeOrigen = internalMutation({
 export const reindexar = mutation({
   args: { documentId: v.id("documents") },
   handler: async (ctx, { documentId }) => {
-    await administrador(ctx, "reindexar documentos");
-    const d = await ctx.db.get(documentId);
-    if (!d) throw errorDatos("no_encontrado", "El documento no está registrado.");
+    const u = await usuario(ctx);
+    const d = await propio(ctx, documentId, u._id);
     if (d.status === "processing" && !processingRancio(d)) {
       throw errorDatos("conflicto", `'${d.fileName}' ya se está procesando.`);
     }
@@ -333,9 +367,8 @@ export const reindexar = mutation({
 export const borrar = mutation({
   args: { documentId: v.id("documents") },
   handler: async (ctx, { documentId }): Promise<{ ok: true }> => {
-    await administrador(ctx, "borrar documentos");
-    const d = await ctx.db.get(documentId);
-    if (!d) throw errorDatos("no_encontrado", "El documento no está registrado.");
+    const u = await usuario(ctx);
+    const d = await propio(ctx, documentId, u._id);
 
     const quedan = await borrarLoteDeChunks(ctx, documentId);
     if (quedan) {
@@ -361,9 +394,54 @@ export const borrarChunksRestantes = internalMutation({
   },
 });
 
+/** Borra TODO el corpus de una cuenta: documentos, fragmentos y ficheros. La
+ *  llama `usuarios.borrar` al eliminar una cuenta, porque con un corpus por
+ *  persona los documentos ya no se pueden "quedar sin dueño" como antes hacía
+ *  `subidoPor: undefined`.
+ *
+ *  Va documento a documento y se reagenda: un solo documento puede tener
+ *  miles de fragmentos de 25 KB y no cabe en una transacción (ver
+ *  `LOTE_CHUNKS`). Cada vuelta vacía como mucho un lote de un documento, así
+ *  que el peor caso son muchas vueltas cortas en vez de una que falla. */
+export const borrarCorpusDeUsuario = internalMutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }): Promise<void> => {
+    const doc = await ctx.db
+      .query("documents")
+      .withIndex("porPropietario", (q) => q.eq("propietario", userId))
+      .first();
+    if (!doc) return;
+
+    const quedan = await borrarLoteDeChunks(ctx, doc._id);
+    if (!quedan) {
+      // Ya no le quedan fragmentos: se retira el fichero y la fila, y la
+      // siguiente vuelta cogerá el documento siguiente.
+      if (doc.storageId) await borrarFichero(ctx, doc.storageId);
+      await ctx.db.delete(doc._id);
+    }
+    await ctx.scheduler.runAfter(0, internal.documentos.borrarCorpusDeUsuario, { userId });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Ayudantes con base
 // ---------------------------------------------------------------------------
+/** El documento, si es de quien pregunta. Ajeno o inexistente: `no_encontrado`
+ *  en los dos casos, igual que `sesionPropia` con las conversaciones. Decir
+ *  "no es tuyo" confirmaría que existe y de qué se llama el corpus de otra
+ *  persona. */
+async function propio(
+  ctx: MutationCtx,
+  documentId: Id<"documents">,
+  userId: Id<"users">,
+): Promise<Doc<"documents">> {
+  const d = await ctx.db.get(documentId);
+  if (!d || d.propietario !== userId) {
+    throw errorDatos("no_encontrado", "El documento no está registrado.");
+  }
+  return d;
+}
+
 /** Validación común de un registro: nombre saneado con extensión permitida,
  *  sha256 hexadecimal y fichero presente, no vacío y bajo el límite. Es la
  *  misma para la subida manual y para la sincronización, para que un fichero

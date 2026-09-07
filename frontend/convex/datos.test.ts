@@ -110,7 +110,10 @@ async function turnosCompletos(t: Base, sessionId: Id<"sessions">, userId: Id<"u
 
 async function nuevoDocumento(
   t: Base,
-  datos: Partial<Omit<Doc<"documents">, "_id" | "_creationTime">> & { fileName: string },
+  datos: Partial<Omit<Doc<"documents">, "_id" | "_creationTime">> & {
+    fileName: string;
+    propietario: Id<"users">;
+  },
 ) {
   return await t.run(async (ctx) =>
     ctx.db.insert("documents", {
@@ -516,11 +519,16 @@ describe("documentos: ayudantes puros", () => {
 });
 
 describe("documentos", () => {
-  test("listar lo ve cualquier autenticado con la forma del contrato", async () => {
+  test("listar devuelve SOLO el corpus propio, con la forma del contrato", async () => {
     const t = nuevaBase();
     const lector = await alta(t, "lector@airobotix.net");
-    const id = await nuevoDocumento(t, { fileName: "paper.pdf", pages: 12, chunks: 40, titulo: "Un paper" });
-    const [fila] = await lector.como.query(api.documentos.listar, {});
+    const otra = await alta(t, "otra@airobotix.net");
+    const id = await nuevoDocumento(t, { fileName: "paper.pdf", propietario: lector.id, pages: 12, chunks: 40, titulo: "Un paper" });
+    // El de otra persona no aparece, ni siquiera su nombre.
+    await nuevoDocumento(t, { fileName: "confidencial-de-otra.pdf", propietario: otra.id, chunks: 5 });
+    const filas = await lector.como.query(api.documentos.listar, {});
+    expect(filas).toHaveLength(1);
+    const [fila] = filas;
     expect(fila).toEqual({
       _id: id,
       fileName: "paper.pdf",
@@ -538,21 +546,65 @@ describe("documentos", () => {
     });
   });
 
-  test("subir, reindexar y borrar son solo para administradores", async () => {
+  test("cualquier cuenta gestiona SU corpus: subir, reindexar y borrar", async () => {
     const t = nuevaBase();
     const lector = await alta(t, "lector@airobotix.net");
     const storageId = await guardarFichero(t);
-    const doc = await nuevoDocumento(t, { fileName: "paper.pdf", status: "failed", storageId });
-    expect(await codigoDe(lector.como.mutation(api.documentos.urlDeSubida, {}))).toBe("solo_admin");
-    expect(
-      await codigoDe(lector.como.mutation(api.documentos.registrar, { storageId, fileName: "otro.pdf", sha256: "b".repeat(64) })),
-    ).toBe("solo_admin");
-    expect(await codigoDe(lector.como.mutation(api.documentos.reindexar, { documentId: doc }))).toBe("solo_admin");
-    expect(await codigoDe(lector.como.mutation(api.documentos.borrar, { documentId: doc }))).toBe("solo_admin");
-    expect(await contar(t, "documents")).toBe(1);
+    const suyo = await nuevoDocumento(t, { fileName: "paper.pdf", propietario: lector.id, status: "failed", storageId });
+    // Ya no hace falta ser administrador para nada de esto: cada persona
+    // tiene su propio corpus.
+    expect(typeof (await lector.como.mutation(api.documentos.urlDeSubida, {}))).toBe("string");
+    expect(await codigoDe(lector.como.mutation(api.documentos.reindexar, { documentId: suyo }))).toBe("ok");
+    expect(await codigoDe(lector.como.mutation(api.documentos.borrar, { documentId: suyo }))).toBe("ok");
   });
 
-  test("urlDeSubida devuelve una URL para un administrador", async () => {
+  test("el documento de otra persona es indistinguible de uno que no existe", async () => {
+    const t = nuevaBase();
+    const ana = await alta(t, "ana@airobotix.net");
+    // Adversarial y a propósito con un ADMINISTRADOR: el aislamiento no tiene
+    // puerta de servicio. Un administrador gestiona cuentas, no corpus ajenos.
+    const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
+    const storageId = await guardarFichero(t);
+    const deAna = await nuevoDocumento(t, { fileName: "de-ana.pdf", propietario: ana.id, status: "failed", storageId, chunks: 3 });
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 3; i++) {
+        await ctx.db.insert("chunks", {
+          text: `de ana ${i}`, embedding: Array.from({ length: 3072 }, () => 0),
+          sourceFile: "de-ana.pdf", page: i, chunkType: "text", documentRef: deAna, propietario: ana.id,
+        });
+      }
+    });
+
+    // Ni verlo, ni reindexarlo, ni borrarlo. Y el código es `no_encontrado`,
+    // no `solo_admin`: decir "no es tuyo" confirmaría que existe.
+    expect(await admin.como.query(api.documentos.listar, {})).toEqual([]);
+    expect(await codigoDe(admin.como.mutation(api.documentos.reindexar, { documentId: deAna }))).toBe("no_encontrado");
+    expect(await codigoDe(admin.como.mutation(api.documentos.borrar, { documentId: deAna }))).toBe("no_encontrado");
+    // Y sigue entero, con sus fragmentos.
+    expect(await contar(t, "documents")).toBe(1);
+    expect(await contar(t, "chunks")).toBe(3);
+  });
+
+  test("dos personas pueden tener un fichero con el MISMO nombre sin chocar", async () => {
+    const t = nuevaBase();
+    const ana = await alta(t, "ana@airobotix.net");
+    const beto = await alta(t, "beto@airobotix.net");
+    await nuevoDocumento(t, { fileName: "guia.pdf", propietario: ana.id });
+    const storageId = await guardarFichero(t);
+    // A Beto no le puede bloquear la subida el "guia.pdf" de Ana.
+    const id = await beto.como.mutation(api.documentos.registrar, {
+      storageId, fileName: "guia.pdf", sha256: "c".repeat(64),
+    });
+    expect(id).toBeTruthy();
+    expect(await contar(t, "documents")).toBe(2);
+    // Pero el suyo propio sí sigue chocando.
+    const otro = await guardarFichero(t);
+    expect(
+      await codigoDe(beto.como.mutation(api.documentos.registrar, { storageId: otro, fileName: "guia.pdf", sha256: "d".repeat(64) })),
+    ).toBe("conflicto");
+  });
+
+  test("urlDeSubida devuelve una URL", async () => {
     const t = nuevaBase();
     const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
     const url = await admin.como.mutation(api.documentos.urlDeSubida, {});
@@ -576,7 +628,7 @@ describe("documentos", () => {
 
     const id = await admin.como.mutation(api.documentos.registrar, { storageId, fileName: "carpeta/sub/informe.pdf", sha256 });
     const doc = await t.run(async (ctx) => ctx.db.get(id));
-    expect(doc).toMatchObject({ fileName: "informe.pdf", status: "processing", storageId, sha256, subidoPor: admin.id, pages: 0, chunks: 0 });
+    expect(doc).toMatchObject({ fileName: "informe.pdf", status: "processing", storageId, sha256, propietario: admin.id, pages: 0, chunks: 0 });
     expect((await agendadas(t)).some((j) => j.name.includes("ingestar"))).toBe(true);
 
     // Mismo nombre otra vez: conflicto, aunque sea con otro fichero.
@@ -592,7 +644,7 @@ describe("documentos", () => {
     const t = nuevaBase();
     const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
     const viejo = await guardarFichero(t, "primer intento");
-    const fallido = await nuevoDocumento(t, { fileName: "paper.pdf", status: "failed", error: "timeout", storageId: viejo, chunks: 7 });
+    const fallido = await nuevoDocumento(t, { fileName: "paper.pdf", propietario: admin.id, status: "failed", error: "timeout", storageId: viejo, chunks: 7 });
     const nuevo = await guardarFichero(t, "segundo intento");
 
     const id = await admin.como.mutation(api.documentos.registrar, { storageId: nuevo, fileName: "paper.pdf", sha256: "e".repeat(64) });
@@ -631,11 +683,13 @@ describe("documentos", () => {
     const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
     const min = 60_000;
     const storageId = await guardarFichero(t);
-    const vivo = await nuevoDocumento(t, { fileName: "vivo.pdf", status: "processing", storageId, ingestadoEn: Date.now() - 1 * min });
+    const vivo = await nuevoDocumento(t, { fileName: "vivo.pdf", propietario: admin.id, status: "processing", storageId, ingestadoEn: Date.now() - 1 * min });
     const abandonado = await nuevoDocumento(t, {
+      propietario: admin.id,
       fileName: "abandonado.pdf", status: "processing", storageId, ingestadoEn: Date.now() - (MINUTOS_PROCESSING_RANCIO + 1) * min,
     });
     const fallidoViejo = await nuevoDocumento(t, {
+      propietario: admin.id,
       fileName: "fallido.pdf", status: "failed", error: "x", storageId, ingestadoEn: Date.now() - 3 * 60 * min,
     });
 
@@ -663,7 +717,7 @@ describe("documentos", () => {
   test("reindexar sin fichero guardado o sin registro no puede", async () => {
     const t = nuevaBase();
     const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
-    const sinFichero = await nuevoDocumento(t, { fileName: "legado.pdf", status: "failed" });
+    const sinFichero = await nuevoDocumento(t, { fileName: "legado.pdf", propietario: admin.id, status: "failed" });
     expect(await codigoDe(admin.como.mutation(api.documentos.reindexar, { documentId: sinFichero }))).toBe("conflicto");
     await t.run(async (ctx) => ctx.db.delete(sinFichero));
     expect(await codigoDe(admin.como.mutation(api.documentos.reindexar, { documentId: sinFichero }))).toBe("no_encontrado");
@@ -677,22 +731,22 @@ describe("documentos", () => {
     const t = nuevaBase({ limites: true });
     const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
     const storageId = await guardarFichero(t);
-    const doc = await nuevoDocumento(t, { fileName: "gordo.pdf", chunks: 1200, storageId });
-    const otroDoc = await nuevoDocumento(t, { fileName: "otro.pdf", chunks: 3 });
+    const doc = await nuevoDocumento(t, { fileName: "gordo.pdf", propietario: admin.id, chunks: 1200, storageId });
+    const otroDoc = await nuevoDocumento(t, { fileName: "otro.pdf", propietario: admin.id, chunks: 3 });
     const embedding = Array.from({ length: 3072 }, (_, i) => i / 3072);
     const total = 1200;
     for (let desde = 0; desde < total; desde += 100) {
       await t.run(async (ctx) => {
         for (let i = desde; i < desde + 100; i++) {
           await ctx.db.insert("chunks", {
-            text: `fragmento ${i}`, embedding, sourceFile: "gordo.pdf", page: i, chunkType: "text", documentRef: doc,
+            text: `fragmento ${i}`, embedding, sourceFile: "gordo.pdf", page: i, chunkType: "text", documentRef: doc, propietario: admin.id,
           });
         }
       });
     }
     await t.run(async (ctx) => {
       for (let i = 0; i < 3; i++) {
-        await ctx.db.insert("chunks", { text: `ajeno ${i}`, embedding, sourceFile: "otro.pdf", page: i, chunkType: "text", documentRef: otroDoc });
+        await ctx.db.insert("chunks", { text: `ajeno ${i}`, embedding, sourceFile: "otro.pdf", page: i, chunkType: "text", documentRef: otroDoc, propietario: admin.id });
       }
     });
     expect(await contarChunksDe(t, doc)).toBe(total);
@@ -787,7 +841,7 @@ describe("usuarios", () => {
     await turnosCompletos(t, s2, ana.id, 1);
     const [unMensaje] = await t.run(async (ctx) => ctx.db.query("messages").collect());
     await t.run(async (ctx) => ctx.db.insert("feedback", { messageId: unMensaje._id, userId: ana.id, rating: 1, creadoEn: Date.now() }));
-    const documento = await nuevoDocumento(t, { fileName: "de-ana.pdf", subidoPor: ana.id });
+    const documento = await nuevoDocumento(t, { fileName: "de-ana.pdf", propietario: ana.id, chunks: 2 });
     await t.run(async (ctx) => {
       const cuenta = await ctx.db.insert("authAccounts", { userId: ana.id, provider: "password", providerAccountId: "ana@airobotix.net" });
       await ctx.db.insert("authVerificationCodes", { accountId: cuenta, provider: "password", code: "123", expirationTime: Date.now() + 1e6 });
@@ -817,16 +871,60 @@ describe("usuarios", () => {
       tokens: (await ctx.db.query("authRefreshTokens").collect()).length,
     }));
     expect(deAna).toEqual({ sesiones: 0, mensajes: 0, feedback: 0, cuentasAuth: 0, sesionesAuth: 0, codigos: 0, tokens: 0 });
-    // El documento se conserva, sin dueño.
-    const doc = await t.run(async (ctx) => ctx.db.get(documento));
-    expect(doc?.fileName).toBe("de-ana.pdf");
-    expect(doc?.subidoPor).toBeUndefined();
+    // Su corpus se va con ella: antes el documento se quedaba sin dueño, y
+    // con un corpus por persona eso sería un documento que nadie puede ver,
+    // consultar ni borrar, ocupando almacenamiento para siempre.
+    expect(await t.run(async (ctx) => ctx.db.get(documento))).toBeNull();
+    expect(await contar(t, "documents")).toBe(0);
     // Beto sigue entero.
     expect(await contar(t, "users")).toBe(2);
     expect(await contar(t, "sessions")).toBe(1);
     expect(await contar(t, "messages")).toBe(2);
     expect(await contar(t, "authSessions")).toBe(1);
     expect(await codigoDe(admin.como.mutation(api.usuarios.borrar, { userId: ana.id }))).toBe("no_encontrado");
+  });
+
+  test("borrar una cuenta arrastra SU corpus entero, por lotes, y no toca el de nadie", async () => {
+    // Con los límites reales activados: un documento de 600 fragmentos de
+    // 25 KB no cabe en una transacción, así que la cascada tiene que ir por
+    // lotes y reagendarse. Y tiene que TERMINAR: si el reagendado no
+    // progresara, `ejecutarAgendadas` no acabaría nunca.
+    const t = nuevaBase({ limites: true });
+    const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
+    const ana = await alta(t, "ana@airobotix.net");
+    const beto = await alta(t, "beto@airobotix.net");
+    const fichero = await guardarFichero(t);
+    const gordo = await nuevoDocumento(t, { fileName: "gordo.pdf", propietario: ana.id, chunks: 600, storageId: fichero });
+    const pequeno = await nuevoDocumento(t, { fileName: "pequeno.pdf", propietario: ana.id, chunks: 2 });
+    const deBeto = await nuevoDocumento(t, { fileName: "de-beto.pdf", propietario: beto.id, chunks: 3 });
+    const embedding = Array.from({ length: 3072 }, (_, i) => i / 3072);
+    const sembrar = async (doc: Id<"documents">, dueno: Id<"users">, n: number, desdeCero = 0) => {
+      for (let desde = desdeCero; desde < n; desde += 100) {
+        await t.run(async (ctx) => {
+          for (let i = desde; i < Math.min(desde + 100, n); i++) {
+            await ctx.db.insert("chunks", {
+              text: `f ${i}`, embedding, sourceFile: "x.pdf", page: i, chunkType: "text",
+              documentRef: doc, propietario: dueno,
+            });
+          }
+        });
+      }
+    };
+    await sembrar(gordo, ana.id, 600);
+    await sembrar(pequeno, ana.id, 2);
+    await sembrar(deBeto, beto.id, 3);
+
+    await admin.como.mutation(api.usuarios.borrar, { userId: ana.id });
+    await ejecutarAgendadas(t);
+
+    // De Ana no queda ni un documento, ni un fragmento, ni el fichero.
+    expect(await t.run(async (ctx) => ctx.db.get(gordo))).toBeNull();
+    expect(await t.run(async (ctx) => ctx.db.get(pequeno))).toBeNull();
+    expect(await t.run(async (ctx) => ctx.db.system.get(fichero))).toBeNull();
+    // Y lo de Beto, intacto: mismo número de fragmentos y su documento.
+    expect(await t.run(async (ctx) => ctx.db.get(deBeto))).not.toBeNull();
+    expect(await contarChunksDe(t, deBeto)).toBe(3);
+    expect(await contarChunksDe(t, gordo)).toBe(0);
   });
 
   test("borrar una cuenta con más de un lote de mensajes acaba con cero", async () => {
@@ -856,12 +954,12 @@ describe("estadisticas.sistema", () => {
     const ana = await alta(t, "ana@airobotix.net");
     const beto = await alta(t, "beto@airobotix.net");
 
-    await nuevoDocumento(t, { fileName: "a.pdf", chunks: 10, documentType: "pdf", language: "es" });
-    await nuevoDocumento(t, { fileName: "b.docx", chunks: 5, documentType: "docx", language: "en" });
-    await nuevoDocumento(t, { fileName: "c.pdf", chunks: 7, documentType: "pdf", language: "en" });
+    await nuevoDocumento(t, { fileName: "a.pdf", propietario: admin.id, chunks: 10, documentType: "pdf", language: "es" });
+    await nuevoDocumento(t, { fileName: "b.docx", propietario: ana.id, chunks: 5, documentType: "docx", language: "en" });
+    await nuevoDocumento(t, { fileName: "c.pdf", propietario: beto.id, chunks: 7, documentType: "pdf", language: "en" });
     // Ni un `failed` ni un `processing` cuentan en el índice.
-    await nuevoDocumento(t, { fileName: "roto.pdf", chunks: 99, status: "failed", documentType: "xlsx", language: "fr" });
-    await nuevoDocumento(t, { fileName: "enmarcha.pdf", chunks: 0, status: "processing" });
+    await nuevoDocumento(t, { fileName: "roto.pdf", propietario: admin.id, chunks: 99, status: "failed", documentType: "xlsx", language: "fr" });
+    await nuevoDocumento(t, { fileName: "enmarcha.pdf", propietario: admin.id, chunks: 0, status: "processing" });
 
     const reciente = await nuevaSesion(t, ana.id, "hoy", ahora - 1 * dia);
     const antigua = await nuevaSesion(t, beto.id, "hace un mes", ahora - 30 * dia);

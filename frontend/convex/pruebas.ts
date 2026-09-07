@@ -125,16 +125,31 @@ export const urlDeSubidaDePrueba = internalMutation({
 });
 
 export const registrarDePrueba = internalMutation({
-  args: { storageId: v.id("_storage"), fileName: v.string(), sha256: v.string() },
+  args: {
+    // A qué corpus entra. Se da por correo y no por id para poder llamarlo
+    // desde la CLI sin mirar la tabla de cuentas antes.
+    correo: v.string(),
+    storageId: v.id("_storage"),
+    fileName: v.string(),
+    sha256: v.string(),
+  },
   handler: async (ctx, args) => {
+    const dueno = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", args.correo))
+      .first();
+    if (!dueno) throw new Error(`no existe la cuenta ${args.correo}`);
     const previo = await ctx.db
       .query("documents")
-      .withIndex("porNombre", (q) => q.eq("fileName", args.fileName))
+      .withIndex("porPropietarioYNombre", (q) =>
+        q.eq("propietario", dueno._id).eq("fileName", args.fileName),
+      )
       .unique();
     const ahora = Date.now();
     const campos = {
       fileName: args.fileName,
       sha256: args.sha256,
+      propietario: dueno._id,
       pages: 0,
       chunks: 0,
       status: "processing" as const,
@@ -239,12 +254,18 @@ export const reindexarTodo = internalMutation({
  *  documentos sintéticos con cifras inventadas antes de que el índice lo use
  *  una médica. */
 export const borrarDocumentoDePrueba = internalMutation({
-  args: { fileName: v.string() },
+  args: { fileName: v.string(), correo: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    const doc = await ctx.db
-      .query("documents")
-      .withIndex("porNombre", (q) => q.eq("fileName", args.fileName))
-      .first();
+    // Sin correo: el primero con ese nombre, de quien sea. Se usa para
+    // limpiar restos desde la CLI, donde no hay identidad.
+    const todos = await ctx.db.query("documents").collect();
+    const dueno = args.correo
+      ? await ctx.db.query("users").withIndex("email", (q) => q.eq("email", args.correo!)).first()
+      : null;
+    const doc =
+      todos.find(
+        (d) => d.fileName === args.fileName && (dueno === null || d.propietario === dueno._id),
+      ) ?? null;
     if (!doc) return { estado: "no_existe" };
     const lote = await ctx.db
       .query("chunks")
@@ -362,8 +383,6 @@ export const diagnosticoNotion = internalQuery({
     return {
       clientId: a.notionClientId ? `presente (${a.notionClientId.length} car.)` : "FALTA",
       clientSecret: a.notionClientSecret ? `presente (${a.notionClientSecret.length} car.)` : "FALTA",
-      tokenInterno: a.notionToken ? "presente" : "ausente",
-      databaseId: a.notionDatabaseId || "ausente",
       convexSiteUrl: a.convexSiteUrl || "FALTA",
       siteUrl: a.siteUrl || "FALTA",
       redirectUriARegistrar: a.convexSiteUrl ? `${a.convexSiteUrl}/notion/callback` : "no se puede calcular",

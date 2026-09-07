@@ -3,9 +3,12 @@
 // sobrevive a cerrar el panel.
 //
 // Decisiones:
-// - Roles: todos ven la lista completa, pero subir, reindexar y borrar es
-//   exclusivo de admin. Con canManage en false no se monta ni la dropzone ni
-//   los botones: la UI no ofrece nada que el servidor vaya a rechazar.
+// - **Cada persona ve y gestiona SU corpus**, y solo el suyo: la lista, la
+//   subida, el reindexado, el borrado y Notion son de quien tiene la sesión
+//   abierta (ver `propietario` en convex/schema.ts). Ya no hay un rol que
+//   mire y otro que gestione, así que desapareció el `canManage` que apagaba
+//   la dropzone y los botones; ser administrador sirve para gestionar cuentas
+//   y ver estadísticas, no para tocar los documentos de nadie.
 // - La lista es una suscripción (documentos.listar): el paso de "procesando"
 //   a "listo" llega solo. Desaparece el sondeo cada 4 s y su tope de fallos,
 //   que existían porque el backend HTTP no podía avisar.
@@ -18,11 +21,12 @@
 // - Focus trap ligero: Tab cicla dentro del panel, Escape cierra (o cancela
 //   la confirmación de borrado si está abierta) y el foco vuelve al botón
 //   que abrió el panel.
-// - Notion (solo admin) es un bloque propio, `NotionBloque`: la administradora
-//   conecta su espacio con UN botón (OAuth), elige la base en un desplegable y
-//   ve la sincronización avanzar en vivo por la suscripción a
-//   `notion.admin.estado`. Quien lo usa es una médica: aquí no se habla de
-//   tokens, variables ni ids, y los textos viven en lib/notion.ts.
+// - Notion es un bloque propio, `NotionBloque`: cada usuaria conecta SU
+//   espacio con UN botón (OAuth, en una ventana emergente que no abandona la
+//   app), elige la base en un desplegable y ve la sincronización avanzar en
+//   vivo por la suscripción a `notion.admin.estado`. Quien lo usa es una
+//   médica: aquí no se habla de tokens, variables ni ids, y los textos viven
+//   en lib/notion.ts.
 
 import {
   Fragment,
@@ -84,12 +88,6 @@ const FOCUSABLE_SELECTOR =
 interface DocumentsPanelProps {
   open: boolean;
   onClose: () => void;
-  /**
-   * Solo el rol `admin` sube, reindexa y borra. Un lector ve la lista
-   * completa, sin dropzone ni botones. También es false mientras no se conoce
-   * el rol: se asume el menor permiso.
-   */
-  canManage: boolean;
   /** Con qué volvió la usuaria de la pantalla de Notion (`?notion=` en la
    *  URL, leído por App al montar). null si no viene de ahí. */
   notionAviso: AvisoNotion | null;
@@ -160,11 +158,6 @@ function ingestedTitle(ms: number): string | undefined {
   return `Indexado el ${d.toLocaleString('es')}`;
 }
 
-/** Estilo del contenedor del bloque: la caja de `.docs-readonly-note` (misma
- *  jerarquía visual que la nota de solo lectura) pero en columna, porque aquí
- *  hay varias filas. Inline y no en styles.css a propósito: son tres valores
- *  de disposición sobre una clase que ya existe. */
-const COLUMNA = { flexDirection: 'column', alignItems: 'stretch', gap: 8 } as const;
 const FILA = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } as const;
 const CRECE = { flex: 1, minWidth: 0 } as const;
 
@@ -517,26 +510,34 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
           </div>
         ))}
 
-      <div className="docs-readonly-note" style={COLUMNA} aria-live="polite">
+      <section className="notion-card" aria-label="Integración con Notion" aria-live="polite">
+        <div className="notion-card-header">
+          <div className="notion-brand-mark"><img src="/notion.svg" alt="" width={32} height={32} /></div>
+          <div className="notion-card-heading">
+            <span className="notion-eyebrow">FUENTES CONECTADAS</span>
+            <h3>Notion</h3>
+          </div>
+          <span className={`notion-connection-badge${conexion !== null ? ' is-connected' : ''}`}>
+            {estado === undefined ? <IconSpinner size={11} /> : conexion !== null ? <IconCheck size={11} /> : <IconLock size={11} />}
+            {estado === undefined ? 'Cargando' : conexion !== null ? 'Conectado' : 'Sin conectar'}
+          </span>
+        </div>
+        <div className="notion-card-body">
         {estado === undefined ? (
           <span className="shimmer-text">Comprobando la conexión con Notion…</span>
         ) : conexion === null ? (
           <>
             <div style={FILA}>
-              {!estado.habilitada && !estado.porEntorno && <IconLock size={13} />}
+              {!estado.habilitada && <IconLock size={13} />}
               <span style={CRECE}>
-                <strong>Notion</strong>
-                {' · '}
-                {estado.porEntorno
-                  ? 'Configurado por el equipo técnico.'
-                  : estado.habilitada
-                    ? 'Trae los protocolos y guías directamente desde Notion.'
-                    : 'La conexión con Notion aún no está habilitada por el equipo técnico.'}
+                {estado.habilitada
+                  ? 'Trae tus protocolos y guías directamente desde tu Notion.'
+                  : 'La conexión con Notion aún no está habilitada por el equipo técnico.'}
               </span>
               {estado.habilitada && !esperandoNotion && (
                 <button
                   type="button"
-                  className="user-act-btn user-act-promote"
+                  className="user-act-btn notion-connect-btn"
                   disabled={ocupado !== null}
                   onClick={() => void conectar()}
                 >
@@ -546,10 +547,15 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                       Abriendo Notion…
                     </>
                   ) : (
-                    'Conectar con Notion'
+                    <><img src="/notion.svg" alt="" width={15} height={15} />Conectar con Notion</>
                   )}
                 </button>
               )}
+            </div>
+            <div className="notion-steps" aria-label="Cómo conectar tus documentos">
+              <div><span>1</span><strong>Conecta</strong><small>Tu espacio de trabajo</small></div>
+              <div><span>2</span><strong>Elige</strong><small>La base que compartirás</small></div>
+              <div><span>3</span><strong>Consulta</strong><small>Sus documentos en el chat</small></div>
             </div>
             {/* La emergente está abierta: se dice dónde mirar y se ofrece
                 salir de la espera. La aplicación sigue aquí, entera. */}
@@ -569,11 +575,10 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                 </button>
               </div>
             )}
-            {estado.porEntorno && filaSincronizacion()}
           </>
         ) : (
           <>
-            <div style={FILA}>
+            <div className="notion-workspace" style={FILA}>
               {iconoEsImagen(conexion.workspaceIcon) ? (
                 <img
                   src={conexion.workspaceIcon ?? undefined}
@@ -712,7 +717,8 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
               </div>
             ) : (
               base !== null && (
-                <div style={FILA}>
+                <div className="notion-selected-base" style={FILA}>
+                  <IconDocument size={18} />
                   <span style={CRECE}>
                     Base de datos:{' '}
                     <strong>{base.titulo ?? 'la configurada por el equipo técnico'}</strong>
@@ -738,7 +744,9 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
             {error}
           </span>
         )}
-      </div>
+        </div>
+        <div className="notion-card-footer"><IconLock size={12} /><span>Solo se consultan las páginas que compartes con la aplicación.</span></div>
+      </section>
     </div>
   );
 }
@@ -746,7 +754,6 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
 export function DocumentsPanel({
   open,
   onClose,
-  canManage,
   notionAviso,
   onNotionAvisoVisto,
 }: DocumentsPanelProps) {
@@ -756,8 +763,11 @@ export function DocumentsPanel({
   // El límite de subida lo anuncia el despliegue. Solo lo necesita quien
   // sube, y solo con el panel abierto: es un agregado sobre varias tablas y
   // no merece una suscripción viva permanente.
-  const stats = useQuery(api.estadisticas.sistema, open && canManage ? {} : 'skip');
-  const limiteAnunciado: unknown = stats?.config?.upload_limit_mb;
+  // El límite de subida lo anuncia el despliegue por su propia query, que
+  // cualquier cuenta puede pedir: ahora sube todo el mundo, no solo un
+  // administrador.
+  const limiteQuery = useQuery(api.documentos.limite, open ? {} : 'skip');
+  const limiteAnunciado: unknown = limiteQuery?.mb;
   const limitMb =
     typeof limiteAnunciado === 'number' && limiteAnunciado > 0
       ? limiteAnunciado
@@ -768,10 +778,10 @@ export function DocumentsPanel({
   const reindexar = useMutation(api.documentos.reindexar);
   const borrar = useMutation(api.documentos.borrar);
 
-  // Notion: solo para admin y con el panel abierto, como las estadísticas.
-  // La suscripción hace que el avance de la sincronización (página a página)
-  // y el paso a la cifra final lleguen solos, sin sondeo.
-  const notion = useQuery(api.notion.admin.estado, open && canManage ? {} : 'skip') as
+  // Notion, con el panel abierto. La suscripción hace que el avance de la
+  // sincronización (página a página) y el paso a la cifra final lleguen
+  // solos, sin sondeo.
+  const notion = useQuery(api.notion.admin.estado, open ? {} : 'skip') as
     | EstadoNotion
     | undefined;
 
@@ -1075,27 +1085,17 @@ export function DocumentsPanel({
         </div>
 
         <div className="docs-body">
-          {/* rol lector: lista completa, gestión fuera (nota discreta) */}
-          {!canManage && (
-            <p className="docs-readonly-note">
-              <IconLock size={13} />
-              <span>Solo un administrador puede subir o borrar documentos.</span>
-            </p>
-          )}
+          {/* Notion: conectar, elegir la base, sincronizar y ver el avance en
+              vivo. Ver NotionBloque. */}
+          <NotionBloque
+            open={open}
+            estado={notion}
+            aviso={notionAviso}
+            onAvisoVisto={onNotionAvisoVisto}
+          />
 
-          {/* Notion (solo admin): conectar, elegir la base, sincronizar y ver
-              el avance en vivo. Ver NotionBloque. */}
-          {canManage && (
-            <NotionBloque
-              open={open}
-              estado={notion}
-              aviso={notionAviso}
-              onAvisoVisto={onNotionAvisoVisto}
-            />
-          )}
-
-          {/* zona de subida (solo admin) */}
-          {canManage && (
+          {/* zona de subida */}
+          {(
             <div className="docs-upload">
               {upload === null ? (
                 <button
@@ -1194,9 +1194,8 @@ export function DocumentsPanel({
                 <IconDocument size={20} />
               </span>
               <p>
-                {canManage
-                  ? 'No hay documentos indexados todavía. Sube el primero desde la zona de arriba.'
-                  : 'No hay documentos indexados todavía. Un administrador debe subir el primero.'}
+                Todavía no tienes ningún documento. Sube el primero desde la zona de arriba, o
+                conecta tu Notion para que lleguen solos.
               </p>
             </div>
           )}
@@ -1251,7 +1250,7 @@ export function DocumentsPanel({
                       </span>
 
                       <span className="doc-side">
-                        {isConfirm && canManage ? (
+                        {isConfirm ? (
                           <span className="doc-confirm">
                             <span>¿Borrar?</span>
                             <button
@@ -1302,7 +1301,7 @@ export function DocumentsPanel({
                                 admin. Va ANTES de la papelera a propósito:
                                 reintentar es la acción esperada ante un error,
                                 y borrar la de último recurso. */}
-                            {canManage && d.status === 'failed' && (
+                            {d.status === 'failed' && (
                               <button
                                 type="button"
                                 className="doc-action-btn"
@@ -1319,10 +1318,7 @@ export function DocumentsPanel({
                               </button>
                             )}
 
-                            {/* gestión solo para admin: el lector ve la
-                                ficha completa, sin acciones */}
-                            {canManage &&
-                              (isDeleting ? (
+                            {(isDeleting ? (
                                 <span
                                   className="doc-lock"
                                   role="status"

@@ -68,6 +68,10 @@ export const insertarChunks = internalMutation({
         ...chunk,
         sourceFile: doc.fileName,
         documentRef: documentId,
+        // Se COPIA del documento, no llega por argumento: así no hay forma de
+        // que un llamador escriba fragmentos en el corpus de otra persona, ni
+        // de que el fragmento y su documento discrepen de dueño.
+        propietario: doc.propietario,
         documentId: String(documentId),
         documentVersion: version,
       });

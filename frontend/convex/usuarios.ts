@@ -234,8 +234,14 @@ export const actualizar = mutation({
  *     cientos de conversaciones no cabría en una sola mutación y el
  *     administrador no podría borrarla nunca. Se agenda
  *     `mensajes.borrarRestantes`, que va por lotes y se reagenda hasta acabar.
- *  3. Documentos que subió: se conservan y `subidoPor` queda vacío, como el
- *     `uploaded_by` que pasaba a nulo en Postgres.
+ *  3. Su corpus: se BORRA, con sus fragmentos y sus ficheros. Antes los
+ *     documentos eran compartidos y se limitaban a quedarse sin `subidoPor`,
+ *     como el `uploaded_by` que pasaba a nulo en Postgres. Ahora cada persona
+ *     tiene el suyo (ver `propietario` en schema.ts), así que un documento sin
+ *     dueño no sería de nadie: no lo podría ver ni consultar ni borrar
+ *     ninguna cuenta, y seguiría ocupando almacenamiento para siempre. Va
+ *     agendado y por lotes, como los mensajes, porque un solo documento puede
+ *     tener miles de fragmentos de 25 KB.
  *  4. Las filas de Convex Auth (`authSessions` con sus `authRefreshTokens`,
  *     `authAccounts` con sus `authVerificationCodes`) y por último la cuenta.
  *     Sin esto quedarían cuentas de proveedor apuntando a un usuario que no
@@ -273,12 +279,35 @@ export const borrar = mutation({
       });
     }
 
-    // 3. Documentos que subió. Sin índice por `subidoPor`, pero la tabla es
-    //    pequeña (decenas de filas).
-    const documentos = await ctx.db.query("documents").collect();
-    for (const d of documentos) {
-      if (d.subidoPor === u._id) await ctx.db.patch(d._id, { subidoPor: undefined });
+    // 3. Su corpus entero, en segundo plano y por lotes.
+    const algunDocumento = await ctx.db
+      .query("documents")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .first();
+    if (algunDocumento) {
+      await ctx.scheduler.runAfter(0, internal.documentos.borrarCorpusDeUsuario, {
+        userId: u._id,
+      });
     }
+
+    // Y su conexión con Notion con lo que cuelga de ella: sin corpus no hay
+    // nada que sincronizar, y el token de otra persona no debe quedarse en la
+    // base después de borrar su cuenta.
+    const conexiones = await ctx.db
+      .query("notionConexion")
+      .withIndex("porUsuario", (q) => q.eq("conectadoPor", u._id))
+      .collect();
+    for (const c of conexiones) await ctx.db.delete(c._id);
+    const paginas = await ctx.db
+      .query("notionPaginas")
+      .withIndex("porPropietarioYPageId", (q) => q.eq("propietario", u._id))
+      .collect();
+    for (const pg of paginas) await ctx.db.delete(pg._id);
+    const corridas = await ctx.db
+      .query("notionSincronizaciones")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .collect();
+    for (const c of corridas) await ctx.db.delete(c._id);
 
     // 4. Convex Auth y la cuenta.
     const sesionesAuth = await ctx.db

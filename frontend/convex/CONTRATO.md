@@ -113,14 +113,17 @@ export type ModoRecuperacion = "hibrida" | "densa" | "lexica" | "error";
 /** Denso + léxico fusionados por rango recíproco. Reemplaza a
  *  `qdrant.hybrid_search`. Se llama desde una ACCIÓN (la búsqueda vectorial
  *  solo existe ahí). */
+// `propietario` va SEPARADO de `filtros` a propósito: el llamador repite la
+// búsqueda sin filtros cuando no encuentra nada, y si fuera un filtro ese
+// reintento buscaría en el corpus de todo el mundo.
 export async function buscarHibrido(
-  ctx: ActionCtx, consulta: string, filtros: FiltrosBusqueda,
+  ctx: ActionCtx, propietario: Id<"users">, consulta: string, filtros: FiltrosBusqueda,
   topK: number, tel?: Telemetria,
 ): Promise<{ fragmentos: Fragmento[]; recuperacion: ModoRecuperacion }>;
 
 /** Varias consultas a la vez, con UN solo lote de embeddings. */
 export async function buscarHibridoVarias(
-  ctx: ActionCtx, consultas: string[], filtros: FiltrosBusqueda,
+  ctx: ActionCtx, propietario: Id<"users">, consultas: string[], filtros: FiltrosBusqueda,
   topK: number, tel?: Telemetria,
 ): Promise<Array<{ fragmentos: Fragmento[]; recuperacion: ModoRecuperacion }>>;
 ```
@@ -129,7 +132,7 @@ export async function buscarHibridoVarias(
 ```ts
 /** Catálogo exacto del índice: reemplaza a los facets de Qdrant.
  *  Forma idéntica a la que consumía la herramienta del agente. */
-export const inventario = internalQuery({ /* args: {} */ });
+export const inventario = internalQuery({ /* args: { propietario: Id<"users"> } */ });
 // -> { archivos: {valor: string, chunks: number}[], total_chunks: number,
 //      tipos: {valor,chunks}[], idiomas: {valor,chunks}[] }
 ```
@@ -269,15 +272,18 @@ Nombres de las exportaciones que consume el frontend:
   inserta el mensaje del usuario y el del asistente en estado `pensando`,
   agenda la acción del agente y devuelve `{sessionId, messageId}`.
 - `mensajes.calificar` (mutation, `{messageId, rating, comentario?}`).
-- `documentos.listar` (query) → registro completo. `documentos.urlDeSubida` (mutation,
-  solo admin) → URL de subida. `documentos.registrar` (mutation, solo admin,
-  `{storageId, fileName, sha256}`). `documentos.reindexar` y `documentos.borrar`
-  (mutations, solo admin).
+- `documentos.listar` (query) → el corpus DE QUIEN PREGUNTA, nunca el de otra cuenta.
+  `documentos.limite` (query) → `{mb}`. `documentos.urlDeSubida` (mutation) → URL de
+  subida. `documentos.registrar` (mutation, `{storageId, fileName, sha256}`; el nombre
+  solo choca dentro del propio corpus). `documentos.reindexar` y `documentos.borrar`
+  (mutations): un documento de otra persona responde `no_encontrado`, igual que uno que no
+  existe. Ninguna de ellas exige administrador.
 - `usuarios.yo` (query) → `{_id, email, rol}`. `usuarios.listar` (query, solo admin) →
   con `sesiones` y `mensajes` contados y `ultimoAccesoEn`. `usuarios.actualizar`
   (mutation, solo admin, `{userId, rol?, bloqueado?}`; **403 si es uno mismo**).
   `usuarios.borrar` (mutation, solo admin; **403 si es uno mismo**; borra en
-  cascada a mano: sesiones, mensajes y feedback).
+  cascada a mano: sesiones, mensajes, feedback, SU CORPUS con sus fragmentos y ficheros,
+  y su conexión con Notion con sus páginas y corridas).
 - `estadisticas.sistema` (query, solo admin) → `{index: {chunks, files, types, languages},
   activity: {questions_total, questions_7d, active_users_7d, feedback_up, feedback_down},
   config: {model, embedding_model, prompt_version, upload_limit_mb}}`.

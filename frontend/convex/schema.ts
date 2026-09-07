@@ -158,7 +158,13 @@ export default defineSchema({
     chunks: v.number(),
     status: estadoDocumento,
     error: v.optional(v.string()),
-    subidoPor: v.optional(v.id("users")),
+    // De quién es este documento. Es una FRONTERA, no un dato informativo:
+    // cada persona tiene su propio corpus y una búsqueda solo puede ver los
+    // documentos de quien pregunta. Antes había un `subidoPor` opcional, que
+    // solo servía para saber quién lo había subido y que al borrar la cuenta
+    // se ponía a vacío; aquí el documento pertenece a alguien y si esa cuenta
+    // se borra, sus documentos se van con ella.
+    propietario: v.id("users"),
     ingestadoEn: v.number(),
     // El fichero ORIGINAL queda guardado. Es lo que arregla el reindexado: en
     // Vercel el disco era efímero, así que reindexar exigía volver a subir el
@@ -181,10 +187,13 @@ export default defineSchema({
     origen: v.optional(v.union(v.literal("subida"), v.literal("notion"))),
     notionPageId: v.optional(v.string()),
   })
-    // El nombre de archivo identifica el documento dentro del despliegue: es
-    // el que usaban las rutas de subida, reindexado y borrado.
-    .index("porNombre", ["fileName"])
-    .index("porEstado", ["status"]),
+    // El nombre de archivo identifica el documento DENTRO DEL CORPUS DE UNA
+    // PERSONA, no del despliegue: dos usuarias pueden tener cada una su
+    // "guia.pdf" sin chocar. Todos los índices empiezan por `propietario`
+    // porque no hay ni una lectura legítima que cruce corpus.
+    .index("porPropietarioYNombre", ["propietario", "fileName"])
+    .index("porPropietario", ["propietario"])
+    .index("porPropietarioYEstado", ["propietario", "status"]),
 
   // Una fila por página de la base de Notion que se ha sincronizado. Es la
   // memoria que permite saltar páginas sin cambios (`lastEdited` es el
@@ -192,6 +201,8 @@ export default defineSchema({
   // compara por igualdad, no por orden) y saber qué documentos borrar cuando
   // la página desaparece.
   notionPaginas: defineTable({
+    // De quién es esta sincronización: cada persona conecta su propio Notion.
+    propietario: v.id("users"),
     pageId: v.string(),
     titulo: v.string(),
     lastEdited: v.string(),
@@ -205,11 +216,12 @@ export default defineSchema({
     // está apagado y la página ya no está en la base. Una fila con error se
     // reintenta en la siguiente corrida aunque `lastEdited` no cambie.
     error: v.optional(v.string()),
-  }).index("porPageId", ["pageId"]),
+  }).index("porPropietarioYPageId", ["propietario", "pageId"]),
 
   // Corridas de la sincronización con Notion, para el bloque de estado que ve
   // el administrador. Se conservan solo las últimas 20 (ver notion/datos.ts).
   notionSincronizaciones: defineTable({
+    propietario: v.id("users"),
     empezadoEn: v.number(),
     terminadoEn: v.optional(v.number()),
     paginas: v.number(),
@@ -228,14 +240,17 @@ export default defineSchema({
     paginasTotal: v.optional(v.number()),
     paginasProcesadas: v.optional(v.number()),
     paginaActual: v.optional(v.string()),
-  }),
+  }).index("porPropietario", ["propietario"]),
 
-  // La conexión con Notion hecha desde la app (OAuth público). UNA fila como
-  // mucho: conectar de nuevo la reemplaza. El `accessToken` NUNCA sale al
-  // cliente: solo lo leen la acción de sincronización y la que lista las
-  // bases, a través de funciones internas. Los tokens de Notion no caducan,
-  // así que no hay refresco. Si no hay fila, la sincronización cae a
-  // NOTION_TOKEN / NOTION_DATABASE_ID por compatibilidad.
+  // La conexión con Notion hecha desde la app (OAuth público). UNA fila POR
+  // PERSONA: conectar de nuevo reemplaza la suya y no toca la de nadie más.
+  // El `accessToken` NUNCA sale al cliente: solo lo leen la acción de
+  // sincronización y la que lista las bases, a través de funciones internas.
+  // Los tokens de Notion no caducan, así que no hay refresco.
+  //
+  // Ya no hay respaldo por variables de entorno (NOTION_TOKEN /
+  // NOTION_DATABASE_ID): con un corpus por persona, un token del despliegue
+  // no tendría dueño y sus documentos no serían de nadie.
   notionConexion: defineTable({
     accessToken: v.string(),
     botId: v.string(),
@@ -248,7 +263,7 @@ export default defineSchema({
     // conexión existe pero no hay nada que sincronizar.
     databaseId: v.optional(v.string()),
     databaseTitulo: v.optional(v.string()),
-  }),
+  }).index("porUsuario", ["conectadoPor"]),
 
   // Estados pendientes del OAuth de Notion: uno por clic en "Conectar con
   // Notion". El callback lo busca, comprueba que no caducó y lo BORRA, así un
@@ -283,12 +298,21 @@ export default defineSchema({
     metadata: v.optional(v.any()),
     // Para borrar o reindexar un documento sin recorrer la tabla entera.
     documentRef: v.id("documents"),
+    // Copiado del documento al insertar (ver ingesta/escritura.ts). Está
+    // duplicado aquí a propósito: los dos índices de búsqueda filtran sobre
+    // campos de la propia fila, y resolver el propietario mirando el
+    // documento exigiría una lectura por candidato, justo lo que la búsqueda
+    // no puede permitirse. Es el campo que aísla los corpus.
+    propietario: v.id("users"),
   })
-    // Los siete campos que en Qdrant eran índices de payload.
+    // Los siete campos que en Qdrant eran índices de payload, más el
+    // propietario. El índice vectorial admite 16 campos de filtro y el de
+    // búsqueda otros 16, así que ocho van sobrados.
     .vectorIndex("porEmbedding", {
       vectorField: "embedding",
       dimensions: 3072,
       filterFields: [
+        "propietario",
         "projectId",
         "documentId",
         "documentVersion",
@@ -304,6 +328,7 @@ export default defineSchema({
     .searchIndex("porTexto", {
       searchField: "text",
       filterFields: [
+        "propietario",
         "projectId",
         "documentId",
         "documentVersion",
@@ -314,7 +339,7 @@ export default defineSchema({
       ],
     })
     .index("porDocumento", ["documentRef"])
-    .index("porArchivo", ["sourceFile"]),
+    .index("porPropietarioYArchivo", ["propietario", "sourceFile"]),
 
   // Caché del plan de evidencia por pregunta normalizada.
   //

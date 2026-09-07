@@ -9,7 +9,8 @@
 //    nada), si NOTION_SYNC_MINUTES es 0 y no la fuerza el administrador, o si
 //    la última corrida empezó hace menos de ese intervalo. Las credenciales
 //    salen PRIMERO de la conexión hecha en la app (`notionConexion`, OAuth) y,
-//    si no hay, de NOTION_TOKEN / NOTION_DATABASE_ID (ver notion/oauth.ts).
+//    de esa persona (ver notion/oauth.ts); nunca de una variable del
+//    despliegue, que no tendría dueño.
 // 2. Recorre la base entera y, por página, compara `last_edited_time` con lo
 //    guardado en `notionPaginas`: sin cambio, no hay ninguna petición más.
 // 3. Con cambio: renderiza la página a Markdown y la registra como un `.md`
@@ -108,14 +109,18 @@ interface ResultadoPagina {
 }
 
 export const sincronizar = internalAction({
-  // `forzar`: la pide el administrador; salta el intervalo y el apagado por
-  // NOTION_SYNC_MINUTES=0, pero no la falta de credenciales.
-  args: { forzar: v.optional(v.boolean()) },
-  handler: async (ctx, { forzar }) => {
+  // `propietario`: de quién es el Notion que se sincroniza y a qué corpus
+  // entran los documentos. Nunca sale de una identidad del cliente (el cron no
+  // tiene ninguna), sino de la fila de conexión de esa persona.
+  //
+  // `forzar`: la pide la propia usuaria desde el panel; salta el intervalo y
+  // el apagado por NOTION_SYNC_MINUTES=0, pero no la falta de credenciales.
+  args: { propietario: v.id("users"), forzar: v.optional(v.boolean()) },
+  handler: async (ctx, { propietario, forzar }) => {
     const a = ajustes();
-    const cred = await ctx.runQuery(internal.notion.oauth.credenciales, {});
+    const cred = await ctx.runQuery(internal.notion.oauth.credenciales, { propietario });
     if (!cred) {
-      console.log("notion: sin conexión ni NOTION_TOKEN/NOTION_DATABASE_ID, sincronización apagada");
+      console.log("notion: esta cuenta no tiene conexión con Notion, sincronización apagada");
       return { estado: "apagado" as const };
     }
     if (!forzar && a.notionSyncMinutes <= 0) {
@@ -123,7 +128,7 @@ export const sincronizar = internalAction({
       return { estado: "apagado" as const };
     }
 
-    const ultima = await ctx.runQuery(internal.notion.datos.ultimaCorrida, {});
+    const ultima = await ctx.runQuery(internal.notion.datos.ultimaCorrida, { propietario });
     const ahora = Date.now();
     if (ultima?.estado === "running") {
       if (ahora - ultima.empezadoEn < CORRIDA_MUERTA_MS) {
@@ -151,7 +156,7 @@ export const sincronizar = internalAction({
       }
     }
 
-    const runId = await ctx.runMutation(internal.notion.datos.abrirCorrida, {});
+    const runId = await ctx.runMutation(internal.notion.datos.abrirCorrida, { propietario });
     const cifras: Cifras = { paginas: 0, nuevos: 0, actualizados: 0, borrados: 0, errores: [] };
     let parcial = false;
     const t0 = Date.now();
@@ -159,12 +164,17 @@ export const sincronizar = internalAction({
     try {
       const cliente = new ClienteNotion(cred.token);
       const conocidas = new Map(
-        (await ctx.runQuery(internal.notion.datos.paginasConocidas, {})).map((p) => [p.pageId, p]),
+        (await ctx.runQuery(internal.notion.datos.paginasConocidas, { propietario })).map((p) => [
+          p.pageId,
+          p,
+        ]),
       );
       // Documentos de Notion que existen hoy: una página cuyo documento
       // borró un administrador se vuelve a traer aunque Notion no cambiara,
       // porque Notion manda sobre lo que hay en el índice.
-      const vivos = new Set<string>(await ctx.runQuery(internal.notion.datos.idsDocumentosNotion, {}));
+      const vivos = new Set<string>(
+        await ctx.runQuery(internal.notion.datos.idsDocumentosNotion, { propietario }),
+      );
       const paginas = await cliente.paginasDeBase(cred.databaseId);
       // Las archivadas y las excluidas no cuentan: se tratan abajo, con las
       // que ya no están. Filtrar antes permite anunciar el total real.
@@ -209,8 +219,9 @@ export const sincronizar = internalAction({
         if (intacta) continue;
 
         try {
-          const r = await procesarPagina(ctx, cliente, pagina, pageId, titulo, previa, cifras);
+          const r = await procesarPagina(ctx, propietario, cliente, pagina, pageId, titulo, previa, cifras);
           await ctx.runMutation(internal.notion.datos.guardarPagina, {
+            propietario,
             pageId,
             titulo,
             lastEdited: pagina.last_edited_time,
@@ -224,6 +235,7 @@ export const sincronizar = internalAction({
           // Se guarda con error y con los documentos que ya tenía, para no
           // perderles la pista; el error hace que se reintente la próxima vez.
           await ctx.runMutation(internal.notion.datos.guardarPagina, {
+            propietario,
             pageId,
             titulo,
             lastEdited: pagina.last_edited_time,
@@ -244,14 +256,19 @@ export const sincronizar = internalAction({
             if (a.notionBorrarArchivados) {
               for (const id of fila.documentIds) {
                 const borrado = await ctx.runMutation(internal.notion.datos.borrarDocumento, {
+                  propietario,
                   documentId: id,
                   pageId: fila.pageId,
                 });
                 if (borrado) cifras.borrados += 1;
               }
-              await ctx.runMutation(internal.notion.datos.borrarPagina, { pageId: fila.pageId });
+              await ctx.runMutation(internal.notion.datos.borrarPagina, {
+                propietario,
+                pageId: fila.pageId,
+              });
             } else if (fila.error !== "archivada") {
               await ctx.runMutation(internal.notion.datos.marcarPagina, {
+                propietario,
                 pageId: fila.pageId,
                 error: "archivada",
               });
@@ -296,6 +313,7 @@ export const sincronizar = internalAction({
 // ---------------------------------------------------------------------------
 async function procesarPagina(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   cliente: ClienteNotion,
   pagina: PaginaNotion,
   pageId: string,
@@ -309,7 +327,12 @@ async function procesarPagina(
   // manual (misma fila, otro origen) ya no es nuestro ni para reutilizar ni
   // para borrar.
   const previos = (
-    previa ? await ctx.runQuery(internal.notion.datos.documentosDe, { ids: previa.documentIds }) : []
+    previa
+      ? await ctx.runQuery(internal.notion.datos.documentosDe, {
+          propietario,
+          ids: previa.documentIds,
+        })
+      : []
   ).filter((d) => d.origen === "notion" && d.notionPageId === pageId);
   const previosPorId = new Map(previos.map((d) => [d._id, d]));
   const documentIds: Id<"documents">[] = [];
@@ -332,7 +355,7 @@ async function procesarPagina(
       const candidatos = textoPrevio
         ? [textoPrevio.fileName]
         : [`${PREFIJO_TEXTO}${slug}.md`, `${PREFIJO_TEXTO}${slug}-${pageId.slice(0, 8)}.md`];
-      documentoTextoId = await registrar(ctx, bytes, "text/markdown", sha, candidatos, pageId, nombresUsados);
+      documentoTextoId = await registrar(ctx, propietario, bytes, "text/markdown", sha, candidatos, pageId, nombresUsados);
       if (textoPrevio) cifras.actualizados += 1;
       else cifras.nuevos += 1;
     }
@@ -353,7 +376,10 @@ async function procesarPagina(
       continue;
     }
     const sha = await sha256Hex(bytes);
-    const existente = await ctx.runQuery(internal.notion.datos.documentoPorSha256, { sha256: sha });
+    const existente = await ctx.runQuery(internal.notion.datos.documentoPorSha256, {
+      propietario,
+      sha256: sha,
+    });
     if (existente && existente.status !== "failed") {
       // Dedupe global: el mismo fichero, venga de otra página o de una
       // subida manual, no se indexa dos veces. Solo se reclama como propio
@@ -368,7 +394,7 @@ async function procesarPagina(
     }
     const base = adj.nombre.slice(0, adj.nombre.length - ext.length - 1);
     const candidatos = [adj.nombre, `${base}-${slug}.${ext}`, `${base}-${slug}-${pageId.slice(0, 8)}.${ext}`];
-    const id = await registrar(ctx, bytes, "application/octet-stream", sha, candidatos, pageId, nombresUsados);
+    const id = await registrar(ctx, propietario, bytes, "application/octet-stream", sha, candidatos, pageId, nombresUsados);
     if (!documentIds.includes(id)) documentIds.push(id);
     if (previosPorId.has(id)) cifras.actualizados += 1;
     else cifras.nuevos += 1;
@@ -379,6 +405,7 @@ async function procesarPagina(
   for (const d of previos) {
     if (documentIds.includes(d._id)) continue;
     const borrado = await ctx.runMutation(internal.notion.datos.borrarDocumento, {
+      propietario,
       documentId: d._id,
       pageId,
     });
@@ -394,6 +421,7 @@ async function procesarPagina(
  *  borrar y fallar a la vez, así que la limpieza va aquí. */
 async function registrar(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   bytes: Uint8Array,
   tipo: string,
   sha256: string,
@@ -410,6 +438,7 @@ async function registrar(
     if (!nombre || nombresUsados.has(nombre)) continue;
     try {
       const id = await ctx.runMutation(internal.documentos.registrarDesdeOrigen, {
+        propietario,
         storageId,
         fileName: nombre,
         sha256,

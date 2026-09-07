@@ -71,12 +71,12 @@ export interface Ajustes {
   // Dominio de correo permitido para darse de alta.
   dominioPermitido: string;
   limiteSubidaMb: number;
-  // Sincronización con Notion (convex/notion/). Notion es la fuente de verdad
-  // del corpus: sin token o sin base de datos la función existe pero está
-  // apagada, y `notionSyncMinutes` en 0 apaga la periódica (la manual del
-  // administrador sigue funcionando).
-  notionToken: string;
-  notionDatabaseId: string;
+  // Sincronización con Notion (convex/notion/). Ya no hay token ni base de
+  // datos en el entorno: cada persona conecta su propio Notion desde la app y
+  // sincroniza a su propio corpus (ver `propietario` en schema.ts), así que un
+  // token del despliegue no tendría dueño y sus documentos no serían de nadie.
+  // Lo único que queda aquí es la cadencia: `notionSyncMinutes` en 0 apaga la
+  // periódica (la manual, que pulsa la usuaria, sigue funcionando).
   notionSyncMinutes: number;
   notionBorrarArchivados: boolean;
   // Integración PÚBLICA de Notion (OAuth), la que permite que una
@@ -160,10 +160,6 @@ export function ajustes(): Ajustes {
     // (Antes 18 MB por confundir la subida con el tope de 20 MB de una
     // petición HTTP de Convex, que no interviene en este camino.)
     limiteSubidaMb: numero("UPLOAD_LIMIT_MB", 100),
-    notionToken: texto("NOTION_TOKEN"),
-    // Se acepta el id con o sin guiones y también la URL de la base pegada
-    // tal cual: `notion/api.ts` lo normaliza. Aquí solo se lee.
-    notionDatabaseId: texto("NOTION_DATABASE_ID"),
     // 60 por defecto: el cron de convex/crons.ts corre cada hora y la acción
     // se autoexcluye si la última corrida terminó hace menos de esto. Un
     // valor negativo cuenta como 0 (apagado).

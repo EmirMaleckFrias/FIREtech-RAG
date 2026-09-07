@@ -4572,6 +4572,85 @@ button.doc-badge-failed:active {
 /* cerrar sesión ya no vive en el pie del sidebar: está en Ajustes > Mi
    cuenta (.settings-signout, §12c), en un solo sitio para todos los roles */
 
+/* Notion: tarjeta de integración, con marca y estados independientes del tema. */
+.notion-card {
+  margin: 4px 14px 14px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.notion-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  background: radial-gradient(ellipse at top right, var(--active), transparent 75%), var(--inset);
+  border-bottom: 1px solid var(--border);
+}
+.notion-brand-mark {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 52px;
+  height: 52px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, .12);
+  border-radius: 13px;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, .08);
+  transform: rotate(-4deg);
+}
+.notion-card-heading { flex: 1; min-width: 0; }
+.notion-eyebrow { font-size: 9px; font-weight: 650; letter-spacing: .1em; }
+.notion-card-heading h3 { margin: 2px 0 0; color: var(--text); font-size: 21px; letter-spacing: -.6px; line-height: 1.2; }
+.notion-connection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.notion-connection-badge.is-connected { color: var(--text); }
+.notion-connection-badge.is-connected svg { color: var(--green); }
+.notion-card-body { display: flex; flex-direction: column; gap: 14px; padding: 16px 18px; }
+.notion-card .notion-connect-btn {
+  justify-content: center;
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 12px;
+  font-weight: 600;
+}
+.notion-connect-btn img { background: #fff; border-radius: 3px; padding: 2px; box-sizing: content-box; }
+.notion-card .notion-connect-btn:hover:not(:disabled) { opacity: .85; background: var(--text); }
+.notion-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-top: 3px; }
+.notion-steps > div { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.notion-steps > div > span { display: grid; place-items: center; width: 23px; height: 23px; margin-bottom: 3px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--inset); font-size: 10px; color: var(--text); }
+.notion-steps strong { font-size: 12px; color: var(--text); font-weight: 600; }
+.notion-steps small { font-size: 10px; line-height: 1.5; }
+.notion-workspace strong, .notion-selected-base strong { color: var(--text); overflow-wrap: anywhere; }
+.notion-selected-base { padding: 11px; border: 1px solid var(--border); border-radius: 10px; background: var(--inset); }
+.notion-selected-base > svg { flex-shrink: 0; }
+.notion-card-footer { display: flex; align-items: flex-start; gap: 6px; padding: 10px 18px; border-top: 1px solid var(--border); background: var(--inset); font-size: 10px; }
+.notion-card-footer svg { flex-shrink: 0; margin-top: 2px; }
+@media (max-width: 380px) {
+  .notion-card-header { flex-wrap: wrap; padding: 14px; gap: 10px; }
+  .notion-card-body { padding: 14px; }
+  .notion-connection-badge { margin-left: auto; }
+}
+
 /* --- documentos en solo lectura (rol lector) --- */
 .docs-readonly-note {
   display: flex;

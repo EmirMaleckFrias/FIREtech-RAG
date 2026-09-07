@@ -1,6 +1,13 @@
 // Lecturas y escrituras que usa la acción `notion.sync.sincronizar`. Una
 // acción no toca la base directamente, así que todo lo que la sincronización
 // necesita leer o escribir pasa por aquí como función interna.
+//
+// **Todo lleva `propietario`.** Cada persona conecta su propio Notion y
+// sincroniza a su propio corpus (ver `propietario` en schema.ts), así que aquí
+// no hay ni una lectura ni una escritura que no esté acotada a una cuenta: dos
+// sincronizaciones simultáneas de dos personas no se ven entre ellas, y una
+// página con el mismo `pageId` en dos espacios de Notion son dos filas
+// distintas.
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "../_generated/server";
 import { internal } from "../_generated/api";
@@ -18,17 +25,25 @@ export const CORRIDAS_CONSERVADAS = 20;
  *  de Notion (cientos como mucho), así que se lee entera al empezar la corrida
  *  y se compara en memoria en vez de una consulta por página. */
 export const paginasConocidas = internalQuery({
-  args: {},
-  handler: async (ctx) => await ctx.db.query("notionPaginas").collect(),
+  args: { propietario: v.id("users") },
+  handler: async (ctx, { propietario }) =>
+    await ctx.db
+      .query("notionPaginas")
+      .withIndex("porPropietarioYPageId", (q) => q.eq("propietario", propietario))
+      .collect(),
 });
 
 export const documentosDe = internalQuery({
-  args: { ids: v.array(v.id("documents")) },
-  handler: async (ctx, { ids }) => {
+  args: { propietario: v.id("users"), ids: v.array(v.id("documents")) },
+  handler: async (ctx, { propietario, ids }) => {
     const salida = [];
     for (const id of ids) {
       const d = await ctx.db.get(id);
-      if (d) salida.push(d);
+      // Un id ajeno no debería llegar aquí (sale de la fila de la página, que
+      // ya es de esta cuenta), pero se comprueba igual: es una lectura por id
+      // y saltarse el dueño sería el único hueco por el que un documento de
+      // otra persona podría entrar en esta sincronización.
+      if (d && d.propietario === propietario) salida.push(d);
     }
     return salida;
   },
@@ -41,10 +56,13 @@ export const documentosDe = internalQuery({
  *  al terminar la ingesta, y la subida manual lo calcula en el navegador, así
  *  que el campo compara bien contra el hash de un adjunto recién bajado. */
 export const documentoPorSha256 = internalQuery({
-  args: { sha256: v.string() },
-  handler: async (ctx, { sha256 }) => {
-    const todos = await ctx.db.query("documents").collect();
-    return todos.find((d) => d.sha256 === sha256) ?? null;
+  args: { propietario: v.id("users"), sha256: v.string() },
+  handler: async (ctx, { propietario, sha256 }) => {
+    const suyos = await ctx.db
+      .query("documents")
+      .withIndex("porPropietario", (q) => q.eq("propietario", propietario))
+      .collect();
+    return suyos.find((d) => d.sha256 === sha256) ?? null;
   },
 });
 
@@ -52,25 +70,34 @@ export const documentoPorSha256 = internalQuery({
  *  lectura si a una página le falta alguno (un administrador lo borró a mano)
  *  y hay que volver a traerlo aunque Notion no haya cambiado. */
 export const idsDocumentosNotion = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const todos = await ctx.db.query("documents").collect();
-    return todos.filter((d) => d.origen === "notion").map((d) => d._id);
+  args: { propietario: v.id("users") },
+  handler: async (ctx, { propietario }) => {
+    const suyos = await ctx.db
+      .query("documents")
+      .withIndex("porPropietario", (q) => q.eq("propietario", propietario))
+      .collect();
+    return suyos.filter((d) => d.origen === "notion").map((d) => d._id);
   },
 });
 
 export const ultimaCorrida = internalQuery({
-  args: {},
-  handler: async (ctx) => await ctx.db.query("notionSincronizaciones").order("desc").first(),
+  args: { propietario: v.id("users") },
+  handler: async (ctx, { propietario }) =>
+    await ctx.db
+      .query("notionSincronizaciones")
+      .withIndex("porPropietario", (q) => q.eq("propietario", propietario))
+      .order("desc")
+      .first(),
 });
 
 // ---------------------------------------------------------------------------
 // Corridas
 // ---------------------------------------------------------------------------
 export const abrirCorrida = internalMutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { propietario: v.id("users") },
+  handler: async (ctx, { propietario }) => {
     const runId = await ctx.db.insert("notionSincronizaciones", {
+      propietario,
       empezadoEn: Date.now(),
       paginas: 0,
       nuevos: 0,
@@ -79,10 +106,16 @@ export const abrirCorrida = internalMutation({
       errores: [],
       estado: "running",
     });
-    // Poda al insertar: así la tabla nunca pasa de N+1 filas y no hace falta
-    // otro cron para limpiarla.
-    const todas = await ctx.db.query("notionSincronizaciones").order("desc").collect();
-    for (const vieja of todas.slice(CORRIDAS_CONSERVADAS)) await ctx.db.delete(vieja._id);
+    // Poda al insertar: así la tabla nunca pasa de N+1 filas POR PERSONA y no
+    // hace falta otro cron para limpiarla. La poda va por el índice del
+    // propietario: si fuera global, la persona que más sincroniza borraría el
+    // histórico de las demás.
+    const suyas = await ctx.db
+      .query("notionSincronizaciones")
+      .withIndex("porPropietario", (q) => q.eq("propietario", propietario))
+      .order("desc")
+      .collect();
+    for (const vieja of suyas.slice(CORRIDAS_CONSERVADAS)) await ctx.db.delete(vieja._id);
     return runId;
   },
 });
@@ -139,6 +172,7 @@ export const cerrarCorrida = internalMutation({
 /** Crea o actualiza la fila de una página. */
 export const guardarPagina = internalMutation({
   args: {
+    propietario: v.id("users"),
     pageId: v.string(),
     titulo: v.string(),
     lastEdited: v.string(),
@@ -149,7 +183,9 @@ export const guardarPagina = internalMutation({
   handler: async (ctx, args) => {
     const previa = await ctx.db
       .query("notionPaginas")
-      .withIndex("porPageId", (q) => q.eq("pageId", args.pageId))
+      .withIndex("porPropietarioYPageId", (q) =>
+        q.eq("propietario", args.propietario).eq("pageId", args.pageId),
+      )
       .unique();
     const campos = { ...args, sincronizadoEn: Date.now() };
     if (previa) {
@@ -164,22 +200,26 @@ export const guardarPagina = internalMutation({
 
 /** Solo el error de una página, sin tocar lo demás. */
 export const marcarPagina = internalMutation({
-  args: { pageId: v.string(), error: v.string() },
-  handler: async (ctx, { pageId, error }) => {
+  args: { propietario: v.id("users"), pageId: v.string(), error: v.string() },
+  handler: async (ctx, { propietario, pageId, error }) => {
     const fila = await ctx.db
       .query("notionPaginas")
-      .withIndex("porPageId", (q) => q.eq("pageId", pageId))
+      .withIndex("porPropietarioYPageId", (q) =>
+        q.eq("propietario", propietario).eq("pageId", pageId),
+      )
       .unique();
     if (fila) await ctx.db.patch(fila._id, { error });
   },
 });
 
 export const borrarPagina = internalMutation({
-  args: { pageId: v.string() },
-  handler: async (ctx, { pageId }) => {
+  args: { propietario: v.id("users"), pageId: v.string() },
+  handler: async (ctx, { propietario, pageId }) => {
     const fila = await ctx.db
       .query("notionPaginas")
-      .withIndex("porPageId", (q) => q.eq("pageId", pageId))
+      .withIndex("porPropietarioYPageId", (q) =>
+        q.eq("propietario", propietario).eq("pageId", pageId),
+      )
       .unique();
     if (fila) await ctx.db.delete(fila._id);
   },
@@ -200,10 +240,15 @@ export const borrarPagina = internalMutation({
  *  reutilizando la fila, o si `registrar` reutilizó una fila fallida, el id
  *  ya no es de Notion y borrarlo destruiría una subida manual. */
 export const borrarDocumento = internalMutation({
-  args: { documentId: v.id("documents"), pageId: v.string() },
-  handler: async (ctx, { documentId, pageId }): Promise<boolean> => {
+  args: {
+    propietario: v.id("users"),
+    documentId: v.id("documents"),
+    pageId: v.string(),
+  },
+  handler: async (ctx, { propietario, documentId, pageId }): Promise<boolean> => {
     const d = await ctx.db.get(documentId);
     if (!d) return false;
+    if (d.propietario !== propietario) return false;
     if (d.origen !== "notion" || d.notionPageId !== pageId) return false;
     const lote = await ctx.db
       .query("chunks")

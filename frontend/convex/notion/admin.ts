@@ -1,14 +1,19 @@
-// Lo que la administradora ve y puede hacer con Notion desde el panel de
+// Lo que cada usuaria ve y puede hacer con SU Notion desde el panel de
 // documentos: el estado completo en una sola forma (`estado`) y lanzar la
 // sincronización ya (`sincronizarAhora`). Conectar, elegir la base y
 // desconectar viven en notion/oauth.ts.
+//
+// Todo va contra la cuenta de quien llama, nunca contra otra: cada persona
+// tiene su propio corpus y su propia conexión (ver `propietario` en
+// schema.ts). No hace falta ser administrador; conectar su Notion es parte
+// del uso normal.
 //
 // El token nunca sale de aquí: `estado` dice a qué espacio se está conectado
 // y con qué base, no con qué credenciales.
 import { mutation, query } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { ajustes } from "../lib/config";
-import { administrador, errorDatos } from "../usuarios";
+import { errorDatos, usuario } from "../usuarios";
 import { conexionActual, credencialesDe, oauthHabilitado } from "./oauth";
 
 /** Una corrida `running` más joven que esto sigue viva (la acción dura como
@@ -20,19 +25,28 @@ const CORRIDA_VIVA_MS = 31 * 60_000;
 export const sincronizarAhora = mutation({
   args: {},
   handler: async (ctx) => {
-    await administrador(ctx, "sincronizar con Notion");
-    const cred = await credencialesDe(ctx);
+    const u = await usuario(ctx);
+    const cred = await credencialesDe(ctx, u._id);
     if (!cred) {
       throw errorDatos(
         "invalido",
         "Antes de sincronizar hay que conectar con Notion y elegir la base de datos.",
       );
     }
-    const ultima = await ctx.db.query("notionSincronizaciones").order("desc").first();
+    // La última corrida SUYA: que otra persona esté sincronizando no puede
+    // bloquearla.
+    const ultima = await ctx.db
+      .query("notionSincronizaciones")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .order("desc")
+      .first();
     if (ultima?.estado === "running" && Date.now() - ultima.empezadoEn < CORRIDA_VIVA_MS) {
       throw errorDatos("conflicto", "Ya hay una sincronización con Notion en curso.");
     }
-    await ctx.scheduler.runAfter(0, internal.notion.sync.sincronizar, { forzar: true });
+    await ctx.scheduler.runAfter(0, internal.notion.sync.sincronizar, {
+      propietario: u._id,
+      forzar: true,
+    });
     return { ok: true as const };
   },
 });
@@ -45,15 +59,26 @@ export const sincronizarAhora = mutation({
 export const estado = query({
   args: {},
   handler: async (ctx) => {
-    await administrador(ctx, "ver el estado de Notion");
+    const u = await usuario(ctx);
     const a = ajustes();
-    const conexion = await conexionActual(ctx);
-    const cred = await credencialesDe(ctx);
-    const corridas = await ctx.db.query("notionSincronizaciones").order("desc").take(5);
-    // Las dos tablas son pequeñas (una fila por página y por documento), así
-    // que contarlas recorriéndolas es lo mismo que hace `documentos.listar`.
-    const paginas = await ctx.db.query("notionPaginas").collect();
-    const documentos = await ctx.db.query("documents").collect();
+    const conexion = await conexionActual(ctx, u._id);
+    const cred = await credencialesDe(ctx, u._id);
+    const corridas = await ctx.db
+      .query("notionSincronizaciones")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .order("desc")
+      .take(5);
+    // Solo lo suyo, por índice. Las dos tablas son pequeñas (una fila por
+    // página y por documento), así que contarlas recorriéndolas es lo mismo
+    // que hace `documentos.listar`.
+    const paginas = await ctx.db
+      .query("notionPaginas")
+      .withIndex("porPropietarioYPageId", (q) => q.eq("propietario", u._id))
+      .collect();
+    const documentos = await ctx.db
+      .query("documents")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .collect();
 
     const primera = corridas[0];
     const enCurso =
@@ -80,18 +105,14 @@ export const estado = query({
             conectadoEn: conexion.conectadoEn,
           }
         : null,
-      // La base con la que se sincroniza: la elegida en la app o, si aún no
-      // se eligió ninguna, la que venía por variable (preseleccionada).
+      // La base con la que se sincroniza, si ya eligió una.
       base: cred
         ? {
             id: cred.databaseId,
-            titulo: conexion?.databaseId ? (conexion.databaseTitulo ?? null) : null,
-            elegidaEnApp: Boolean(conexion?.databaseId),
+            titulo: conexion?.databaseTitulo ?? null,
+            elegidaEnApp: true,
           }
         : null,
-      // Sin conexión en la app pero con las variables de la primera versión:
-      // funciona, y la UI lo cuenta como "configurado por el equipo técnico".
-      porEntorno: cred?.fuente === "entorno",
       periodicaMinutos: a.notionSyncMinutes,
       borrarArchivados: a.notionBorrarArchivados,
       paginas: paginas.length,

@@ -35,6 +35,7 @@
 // Todo con orden total y desempates explícitos, para que la misma entrada
 // produzca los mismos ids: `huellaDe` lo mide en telemetría.
 import type { ActionCtx } from "../_generated/server";
+import type { Id } from "../_generated/dataModel";
 import * as hybrid from "../search/hybrid";
 import type { FiltrosBusqueda, ModoRecuperacion } from "../search/hybrid";
 // El calificador se invoca a través de `calificarConCache` (cacheCalificaciones.ts),
@@ -288,6 +289,7 @@ function documentos(chunks: Fragmento[]): string[] {
  *  "híbrida" ocultaría que la mitad del punto no tuvo lado léxico. */
 async function recuperar(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   query: string,
   queryEn: string,
   filtros: FiltrosBusqueda,
@@ -296,7 +298,14 @@ async function recuperar(
 ): Promise<{ fusion: Fragmento[]; recuperacion: ModoRecuperacion }> {
   const consultas = [query];
   if (queryEn && normalizar(queryEn) !== normalizar(query)) consultas.push(queryEn);
-  const resultados = await hybrid.buscarHibridoVarias(ctx, consultas, filtros, topK, tel);
+  const resultados = await hybrid.buscarHibridoVarias(
+    ctx,
+    propietario,
+    consultas,
+    filtros,
+    topK,
+    tel,
+  );
   const utiles = (resultados ?? []).filter((r) => r && r.recuperacion !== "error");
   if (!utiles.length) {
     throw new Error(`las ${consultas.length} búsquedas del punto fallaron`);
@@ -330,6 +339,7 @@ function puntoVacio(item: PuntoPlan): PuntoEvidencia {
 
 async function ejecutarPunto(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   item: PuntoPlan,
   modo: Modo,
   filtros: FiltrosBusqueda,
@@ -344,7 +354,15 @@ async function ejecutarPunto(
 
   let fusion: Fragmento[];
   try {
-    const r = await recuperar(ctx, item.query, item.queryEn ?? "", filtros, ajustes().searchTopK, tel);
+    const r = await recuperar(
+      ctx,
+      propietario,
+      item.query,
+      item.queryEn ?? "",
+      filtros,
+      ajustes().searchTopK,
+      tel,
+    );
     fusion = r.fusion;
     punto.recuperacion = r.recuperacion;
   } catch (exc) {
@@ -445,6 +463,7 @@ const VENCIDO = Symbol("vencido");
  *  Nunca lanza. */
 export async function ejecutarPlan(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   plan: PuntoPlan[],
   modo: Modo,
   filtros: FiltrosBusqueda,
@@ -481,7 +500,7 @@ export async function ejecutarPlan(
       const resultados = await Promise.all(
         plan.map((it) =>
           Promise.race([
-            ejecutarPunto(ctx, it, modo, filtros, tel).then(
+            ejecutarPunto(ctx, propietario, it, modo, filtros, tel).then(
               (punto) => ({ punto }),
               (error: unknown) => ({ error }),
             ),
@@ -527,6 +546,7 @@ export async function ejecutarPlan(
  *  rellenar, o vacío = "extra"). */
 export async function buscarYCalificar(
   ctx: ActionCtx,
+  propietario: Id<"users">,
   consulta: string,
   evidenceNeeded: string,
   punto: string,
@@ -540,7 +560,7 @@ export async function buscarYCalificar(
     queryEn: "",
     evidenceNeeded: evidenceNeeded || consulta,
   };
-  return ejecutarPunto(ctx, item, modo, filtros, tel);
+  return ejecutarPunto(ctx, propietario, item, modo, filtros, tel);
 }
 
 // --- huella -----------------------------------------------------------------

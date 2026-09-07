@@ -27,8 +27,10 @@ indexados.
 6. **Ante la duda, el sistema no aprueba.** El veredicto por defecto de una afirmación es
    `sin_verificar`, nunca `sostenida`; una respuesta factual sin ninguna cita es el peor caso y
    se marca como tal.
-7. **Conversaciones privadas y documentos compartidos.** Ni un administrador ve conversaciones
-   ajenas. Los documentos los consultan todos y los gestiona solo un administrador.
+7. **Un corpus por persona, y conversaciones privadas.** Los documentos, los fragmentos
+   indexados y la conexión con Notion pertenecen a una cuenta, y una búsqueda solo puede ver
+   los de quien pregunta: es una frontera de seguridad, no un filtro de conveniencia. Ni un
+   administrador ve el corpus ni las conversaciones de otra persona.
 8. **Respuestas en español**, sin guion largo (U+2014): se separa con comas, puntos o dos
    puntos. La regla está en el prompt y también rige para el código y la documentación.
 

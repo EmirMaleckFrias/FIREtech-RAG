@@ -28,10 +28,18 @@ export const sistema = query({
     // documento listo ya sabe cuántos fragmentos tiene y de qué tipo e idioma
     // es. Solo cuentan los `ready`: un `processing` o un `failed` no aporta
     // nada al índice que se consulta.
-    const listos = await ctx.db
-      .query("documents")
-      .withIndex("porEstado", (q) => q.eq("status", "ready"))
-      .collect();
+    //
+    // Estas cifras son de TODO el despliegue, no del corpus de quien mira, y
+    // eso no contradice el aislamiento entre corpus: son agregados
+    // operativos (cuánto hay indexado, de qué formatos) para dimensionar el
+    // servicio, y no revelan ni un nombre de fichero ni una línea de texto de
+    // nadie. Ver los documentos de otra persona sigue siendo imposible, aquí
+    // y en cualquier otro sitio. Se recorre la tabla porque ya no hay un
+    // índice global por estado: todos empiezan por `propietario`, justamente
+    // para que no exista una lectura cómoda que cruce cuentas.
+    const listos = (await ctx.db.query("documents").collect()).filter(
+      (d) => d.status === "ready",
+    );
     const index = {
       chunks: listos.reduce((suma, d) => suma + d.chunks, 0),
       files: listos.length,

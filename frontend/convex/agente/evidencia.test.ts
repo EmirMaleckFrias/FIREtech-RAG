@@ -7,6 +7,7 @@
 // que no llega no tumba a los demás. Sin red: la búsqueda híbrida y el
 // calificador van parcheados sobre sus módulos.
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import * as hybrid from "../search/hybrid";
 import type { ModoRecuperacion } from "../search/hybrid";
@@ -55,6 +56,8 @@ let busqueda: {
   lanzar: Error | null;
   topK: number[];
   filtros: unknown[];
+  /** Los propietarios con los que se llamó, para afirmar que llega siempre. */
+  propietarios: unknown[];
 };
 /** Calificador determinista: el grado sale de `grados` por id (default
  *  "directa"). Registra qué candidatos vio. */
@@ -74,9 +77,14 @@ beforeEach(() => {
     lanzar: null,
     topK: [],
     filtros: [],
+    propietarios: [],
   };
   vi.spyOn(hybrid, "buscarHibridoVarias").mockImplementation(
-    async (_ctx, consultas, f, topK) => {
+    async (_ctx, propietario, consultas, f, topK) => {
+      // Se anota para poder afirmar que el propietario llega SIEMPRE: es la
+      // frontera entre corpus, y si el plan dejara de pasarlo la búsqueda
+      // real vería los documentos de todo el mundo (ver search/hybrid.ts).
+      busqueda.propietarios.push(propietario);
       busqueda.llamadas.push([...consultas]);
       busqueda.topK.push(topK);
       busqueda.filtros.push(f);
@@ -107,8 +115,12 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+/** La cuenta de quien pregunta. Su corpus es el único que la búsqueda puede
+ *  ver, así que atraviesa todo el pipeline de evidencia. */
+const DUENO = "usuario_de_prueba" as unknown as Id<"users">;
+
 async function punto(it: PuntoPlan, m: Modo, limiteMs = 5000): Promise<evidencia.PuntoEvidencia> {
-  const ev = await evidencia.ejecutarPlan(ctx, [it], m, filtros, new Telemetria(), limiteMs);
+  const ev = await evidencia.ejecutarPlan(ctx, DUENO, [it], m, filtros, new Telemetria(), limiteMs);
   return ev.puntos[0];
 }
 
@@ -133,8 +145,8 @@ describe("determinismo", () => {
       item("e1", "cohorte de validación", "la cohorte", "validation cohort"),
     ];
 
-    const a = await evidencia.ejecutarPlan(ctx, plan, modo(8), filtros, new Telemetria(), 5000);
-    const b = await evidencia.ejecutarPlan(ctx, plan, modo(8), filtros, new Telemetria(), 5000);
+    const a = await evidencia.ejecutarPlan(ctx, DUENO, plan, modo(8), filtros, new Telemetria(), 5000);
+    const b = await evidencia.ejecutarPlan(ctx, DUENO, plan, modo(8), filtros, new Telemetria(), 5000);
 
     expect(a.puntos.map((p) => ids(p.fragmentos))).toEqual(b.puntos.map((p) => ids(p.fragmentos)));
     expect(a.puntos.map((p) => ids(p.fragmentos))).toEqual([["c1", "c2", "c3"], ["c1", "c2", "c3"]]);
@@ -158,12 +170,12 @@ describe("determinismo", () => {
     expect([...a.acumulado.keys()]).toEqual(["c1", "c2", "c3"]);
     // Y la huella SÍ cambia cuando cambia la evidencia: no es una constante.
     busqueda.porDefecto = busqueda.porDefecto.slice(0, 1);
-    const c = await evidencia.ejecutarPlan(ctx, plan, modo(8), filtros, new Telemetria(), 5000);
+    const c = await evidencia.ejecutarPlan(ctx, DUENO, plan, modo(8), filtros, new Telemetria(), 5000);
     expect(c.huella).not.toBe(a.huella);
   });
 
   test("un plan vacío devuelve una evidencia vacía sin buscar", async () => {
-    const ev = await evidencia.ejecutarPlan(ctx, [], modo(4), filtros, new Telemetria(), 5000);
+    const ev = await evidencia.ejecutarPlan(ctx, DUENO, [], modo(4), filtros, new Telemetria(), 5000);
     expect(ev.puntos).toEqual([]);
     expect(ev.acumulado.size).toBe(0);
     expect(ev.huella).toBe(evidencia.huellaDe([]));
@@ -492,6 +504,7 @@ describe("degradaciones", () => {
     busqueda.porConsulta = { rota: new Error("índice caído"), sana: [frag("ok")] };
     const ev = await evidencia.ejecutarPlan(
       ctx,
+      DUENO,
       [item("e0", "rota", "d0"), item("e1", "sana", "d1")],
       modo(4),
       filtros,
@@ -517,6 +530,7 @@ describe("degradaciones", () => {
     busqueda.lanzar = new Error("embeddings caídos");
     const ev2 = await evidencia.ejecutarPlan(
       ctx,
+      DUENO,
       [item("e0", "a", "d0"), item("e1", "b", "d1")],
       modo(4),
       filtros,
@@ -540,6 +554,7 @@ describe("degradaciones", () => {
     const t0 = Date.now();
     const ev = await evidencia.ejecutarPlan(
       ctx,
+      DUENO,
       [item("e0", "lenta", "d0"), item("e1", "rapida", "d1")],
       modo(4),
       filtros,
@@ -579,7 +594,7 @@ describe("degradaciones", () => {
         lenta: () => (tardia = retrasada(300, [frag("t")])()),
       };
       const t0 = Date.now();
-      const ev = await evidencia.ejecutarPlan(ctx, [item("e0", "lenta", "d")], modo(4), filtros, new Telemetria(), 60_000);
+      const ev = await evidencia.ejecutarPlan(ctx, DUENO, [item("e0", "lenta", "d")], modo(4), filtros, new Telemetria(), 60_000);
       expect(Date.now() - t0).toBeLessThan(250);
       expect(ev.puntos[0].recuperacion).toBe("error");
       await tardia;
@@ -589,10 +604,10 @@ describe("degradaciones", () => {
       // búsqueda de 30 ms tiene que llegar: el reloj no puede ser de 1 ms.
       process.env.EVIDENCE_PREFETCH_TIMEOUT_S = "0";
       busqueda.porConsulta = { q: retrasada(30, [frag("x")]) };
-      const ev2 = await evidencia.ejecutarPlan(ctx, [item("e0", "q", "d")], modo(4), filtros, new Telemetria(), Infinity);
+      const ev2 = await evidencia.ejecutarPlan(ctx, DUENO, [item("e0", "q", "d")], modo(4), filtros, new Telemetria(), Infinity);
       expect(ev2.puntos[0].estado).toBe("cubierto");
       expect(ev2.puntos[0].recuperacion).toBe("hibrida");
-      const ev3 = await evidencia.ejecutarPlan(ctx, [item("e0", "q", "d")], modo(4), filtros, new Telemetria(), 2 ** 40);
+      const ev3 = await evidencia.ejecutarPlan(ctx, DUENO, [item("e0", "q", "d")], modo(4), filtros, new Telemetria(), 2 ** 40);
       expect(ev3.puntos[0].estado).toBe("cubierto");
     } finally {
       if (anterior === undefined) delete process.env.EVIDENCE_PREFETCH_TIMEOUT_S;
@@ -602,7 +617,7 @@ describe("degradaciones", () => {
 
   test("sin tiempo (limiteMs <= 0) no se lanza ninguna búsqueda y todo queda en error", async () => {
     busqueda.porDefecto = [frag("x")];
-    const ev = await evidencia.ejecutarPlan(ctx, [item("e0", "q", "d")], modo(4), filtros, new Telemetria(), 0);
+    const ev = await evidencia.ejecutarPlan(ctx, DUENO, [item("e0", "q", "d")], modo(4), filtros, new Telemetria(), 0);
     expect(ev.puntos[0].recuperacion).toBe("error");
     expect(ev.puntos[0].estado).toBe("sin_resultados");
     expect(busqueda.llamadas).toEqual([]);
@@ -620,7 +635,7 @@ describe("mensajes", () => {
       q1: [],
     };
     const plan = [item("e0", "q0", "respuesta directa"), item("e1", "q1", "la cohorte", "cohort")];
-    const ev = await evidencia.ejecutarPlan(ctx, plan, modo(4), filtros, new Telemetria(), 5000);
+    const ev = await evidencia.ejecutarPlan(ctx, DUENO, plan, modo(4), filtros, new Telemetria(), 5000);
     const mensajes = evidencia.mensajesSinteticos(ev, plan);
 
     expect(mensajes.map((m) => m.role)).toEqual(["assistant", "tool", "tool"]);
@@ -681,7 +696,7 @@ describe("mensajes", () => {
   test("buscarYCalificar es el mismo camino para una consulta", async () => {
     busqueda.porDefecto = [frag("x", { section: "References" }), frag("y")];
 
-    const extra = await evidencia.buscarYCalificar(ctx, "q", "", "", modo(4), filtros, new Telemetria());
+    const extra = await evidencia.buscarYCalificar(ctx, DUENO, "q", "", "", modo(4), filtros, new Telemetria());
     expect(extra.id).toBe("extra");
     expect(ids(extra.fragmentos)).toEqual(["y"]); // podado igual que el plan
     expect(extra.evidenceNeeded).toBe("q");
@@ -689,10 +704,10 @@ describe("mensajes", () => {
     expect(busqueda.llamadas).toEqual([["q"]]);
     expect(evidencia.textoDePunto(extra).startsWith("BÚSQUEDA EXTRA (q): cubierto")).toBe(true);
 
-    const conPunto = await evidencia.buscarYCalificar(ctx, "q", "el dato", "e2", modo(4), filtros, new Telemetria());
+    const conPunto = await evidencia.buscarYCalificar(ctx, DUENO, "q", "el dato", "e2", modo(4), filtros, new Telemetria());
     expect(conPunto.id).toBe("e2");
     expect(evidencia.textoDePunto(conPunto).startsWith("PUNTO e2 (el dato)")).toBe(true);
-    expect((await evidencia.buscarYCalificar(ctx, "q", "d", "   ", modo(4), filtros, new Telemetria())).id).toBe("extra");
+    expect((await evidencia.buscarYCalificar(ctx, DUENO, "q", "d", "   ", modo(4), filtros, new Telemetria())).id).toBe("extra");
   });
 
   test("acumulado conserva el orden del plan y los grados presentes ganan", async () => {
@@ -702,6 +717,7 @@ describe("mensajes", () => {
     busqueda.porConsulta = { q0: [comun, frag("solo0")], q1: [frag("solo1"), comun] };
     const ev = await evidencia.ejecutarPlan(
       ctx,
+      DUENO,
       [item("e0", "q0", "d0"), item("e1", "q1", "d1")],
       modo(4),
       filtros,
@@ -745,3 +761,32 @@ describe("huella", () => {
     expect(evidencia.huellaDe(["x", "y"])).toBe(await subtle("x\ny"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// aislamiento entre corpus
+// ---------------------------------------------------------------------------
+//
+// El pipeline de evidencia no busca "en el índice": busca en el corpus de
+// quien pregunta. Aquí se comprueba que ese dato llega a TODAS las búsquedas
+// que se lanzan, incluidas las de los saltos extra, porque un punto que se
+// quedara sin él caería en la búsqueda global.
+describe("el propietario llega a todas las búsquedas", () => {
+  test("un plan de varios puntos con versión en inglés: ninguna búsqueda sin dueño", async () => {
+    busqueda.porDefecto = [frag("a"), frag("b")];
+    const plan = [item("e0", "q0", "d0", "q0 en"), item("e1", "q1", "d1")];
+
+    await evidencia.ejecutarPlan(ctx, DUENO, plan, modo(4), filtros, new Telemetria(), 5000);
+
+    expect(busqueda.propietarios.length).toBeGreaterThan(0);
+    expect(busqueda.propietarios.every((p) => p === DUENO)).toBe(true);
+    // Una llamada por punto (las dos consultas de un punto van en la misma).
+    expect(busqueda.propietarios.length).toBe(plan.length);
+  });
+
+  test("la búsqueda extra también lo lleva", async () => {
+    busqueda.porDefecto = [frag("x")];
+    await evidencia.buscarYCalificar(ctx, DUENO, "q", "", "", modo(4), filtros, new Telemetria());
+    expect(busqueda.propietarios).toEqual([DUENO]);
+  });
+});
+

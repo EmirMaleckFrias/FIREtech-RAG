@@ -1,6 +1,6 @@
 // Conexión con Notion desde la app, por OAuth público. Existe porque la
 // usuaria final es una médica, no una programadora: la primera versión se
-// configuraba con NOTION_TOKEN y NOTION_DATABASE_ID en el despliegue y en la
+// configuraba con un token y un id de base de datos en el despliegue, y en la
 // pantalla ella veía "falta NOTION_TOKEN" y ningún botón. Aquí el flujo es un
 // botón, la pantalla de Notion donde elige qué compartir, y de vuelta un
 // desplegable con sus bases. Nunca ve un token, una variable ni un id.
@@ -8,7 +8,17 @@
 // Lo que fija el DESARROLLADOR una sola vez: una integración PÚBLICA en
 // Notion con redirect URI `${CONVEX_SITE_URL}/notion/callback`, y sus
 // NOTION_CLIENT_ID y NOTION_CLIENT_SECRET en el despliegue. Sin ellas la UI
-// dice que la conexión "aún no está habilitada por el equipo técnico".
+// dice que la conexión "aún no está habilitada por el equipo técnico". Esas
+// credenciales identifican a la APLICACIÓN, no a una cuenta ni a un espacio de
+// trabajo: cada persona que entra vincula su propio Notion con su propia
+// sesión de Notion, como en cualquier integración.
+//
+// **Una conexión POR PERSONA.** Cada usuaria tiene su propio corpus (ver
+// `propietario` en schema.ts), así que su conexión, sus páginas y sus corridas
+// de sincronización son suyas: conectar de nuevo reemplaza la suya y no toca
+// la de nadie más, y desconectar tampoco. Ya no hay respaldo por
+// NOTION_TOKEN/NOTION_DATABASE_ID, porque un token del despliegue no tendría
+// dueño y sus documentos no serían de nadie.
 //
 // Seguridad, en tres reglas:
 // - El `state` es aleatorio, vive 10 minutos, se busca por índice y se BORRA
@@ -16,12 +26,14 @@
 // - El `accessToken` solo lo leen funciones internas (la acción de
 //   sincronización y la que lista las bases). Ninguna query pública lo
 //   devuelve; `estado` dice a qué espacio se está conectado, no con qué.
-// - Todo lo que hace algo exige administrador (`administrador()`), y el
-//   callback, que llega sin sesión, se apoya en el state para saber quién
-//   inició la conexión.
+// - Todo lo que hace algo exige una sesión iniciada (`usuario()`) y actúa
+//   SOLO sobre la conexión de quien llama; ya no hace falta ser
+//   administrador, porque conectar su propio Notion es parte del uso normal
+//   de cualquier cuenta. El callback, que llega sin sesión, se apoya en el
+//   `state` para saber de quién es la conexión que se está creando.
 //
 // Los tokens de Notion no caducan, así que no hay refresco. Conectar de nuevo
-// reemplaza la fila única de `notionConexion`.
+// reemplaza la fila de esa persona en `notionConexion`.
 import { v } from "convex/values";
 import {
   action,
@@ -33,9 +45,9 @@ import {
   type QueryCtx,
 } from "../_generated/server";
 import { internal } from "../_generated/api";
-import type { Doc } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import { ajustes, type Ajustes } from "../lib/config";
-import { administrador, errorDatos } from "../usuarios";
+import { errorDatos, usuario } from "../usuarios";
 import { ClienteNotion, normalizarId, type BaseNotion } from "./api";
 
 /** Cuánto vale un `state` desde que se pulsa "Conectar" hasta que Notion
@@ -69,49 +81,56 @@ export function redirectUri(a: Ajustes): string {
 export interface Credenciales {
   token: string;
   databaseId: string;
-  /** De dónde salieron: la conexión hecha en la app, o las variables del
-   *  despliegue (compatibilidad con la primera versión). */
-  fuente: "conexion" | "entorno";
 }
 
-/** La única fila de `notionConexion`, si la hay. */
-export async function conexionActual(ctx: QueryCtx | MutationCtx): Promise<Doc<"notionConexion"> | null> {
-  return await ctx.db.query("notionConexion").first();
+/** La conexión de esa persona, si la hay. */
+export async function conexionActual(
+  ctx: QueryCtx | MutationCtx,
+  propietario: Id<"users">,
+): Promise<Doc<"notionConexion"> | null> {
+  return await ctx.db
+    .query("notionConexion")
+    .withIndex("porUsuario", (q) => q.eq("conectadoPor", propietario))
+    .first();
 }
 
-/** Con qué token y sobre qué base se sincroniza. La conexión de la app manda;
- *  la base puede venir de la variable si la administradora aún no eligió
- *  ninguna (así un despliegue que ya tenía NOTION_DATABASE_ID sigue
- *  funcionando nada más conectar). Sin conexión, las dos variables de la
- *  primera versión. `null` = no hay nada que sincronizar. */
-export async function credencialesDe(ctx: QueryCtx | MutationCtx): Promise<Credenciales | null> {
-  const a = ajustes();
-  const conexion = await conexionActual(ctx);
-  if (conexion) {
-    const databaseId = conexion.databaseId || a.notionDatabaseId;
-    if (!databaseId) return null;
-    return { token: conexion.accessToken, databaseId, fuente: "conexion" };
-  }
-  if (a.notionToken && a.notionDatabaseId) {
-    return { token: a.notionToken, databaseId: a.notionDatabaseId, fuente: "entorno" };
-  }
-  return null;
+/** Con qué token y sobre qué base sincroniza esa persona. `null` = no hay
+ *  nada que sincronizar: no ha conectado, o conectó y aún no eligió base. */
+export async function credencialesDe(
+  ctx: QueryCtx | MutationCtx,
+  propietario: Id<"users">,
+): Promise<Credenciales | null> {
+  const conexion = await conexionActual(ctx, propietario);
+  if (!conexion || !conexion.databaseId) return null;
+  return { token: conexion.accessToken, databaseId: conexion.databaseId };
 }
 
 /** Para la acción de sincronización. Interna: el token no sale al cliente. */
 export const credenciales = internalQuery({
-  args: {},
-  handler: async (ctx) => await credencialesDe(ctx),
+  args: { propietario: v.id("users") },
+  handler: async (ctx, { propietario }) => await credencialesDe(ctx, propietario),
 });
 
-/** El token de la conexión, para la acción que lista las bases. Interna y
- *  además exige administrador: la acción pública que la llama hereda la
- *  identidad de quien pulsa, y aquí es donde se comprueba. */
-export const tokenParaAdmin = internalQuery({
+/** Quiénes tienen hoy una conexión con base elegida, para que el cron lance
+ *  una sincronización por persona en vez de una sola global. Interna y sin
+ *  tokens: devuelve solo ids de cuenta. */
+export const propietariosConectados = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<Id<"users">[]> => {
+    const todas = await ctx.db.query("notionConexion").collect();
+    return todas.filter((c) => Boolean(c.databaseId)).map((c) => c.conectadoPor);
+  },
+});
+
+/** El token de la conexión de quien llama, para la acción que lista las
+ *  bases. Interna, y resuelve la identidad ella misma: la acción pública que
+ *  la llama hereda la sesión de quien pulsa, así que aquí se decide de quién
+ *  es el token que se va a usar. Nunca el de otra persona. */
+export const tokenPropio = internalQuery({
   args: {},
   handler: async (ctx): Promise<string> => {
-    await administrador(ctx, "ver las bases de datos de Notion");
-    const conexion = await conexionActual(ctx);
+    const u = await usuario(ctx);
+    const conexion = await conexionActual(ctx, u._id);
     if (!conexion) throw errorDatos("invalido", "Notion no está conectado todavía.");
     return conexion.accessToken;
   },
@@ -149,7 +168,7 @@ function origenValido(crudo: string | undefined): string | undefined {
 export const iniciar = mutation({
   args: { origen: v.optional(v.string()) },
   handler: async (ctx, { origen }) => {
-    const admin = await administrador(ctx, "conectar con Notion");
+    const u = await usuario(ctx);
     const a = ajustes();
     if (!oauthHabilitado(a)) throw errorDatos("invalido", MENSAJE_NO_HABILITADA);
     if (!a.convexSiteUrl) {
@@ -165,7 +184,7 @@ export const iniciar = mutation({
     const state = stateAleatorio();
     await ctx.db.insert("notionEstadosOauth", {
       state,
-      userId: admin._id,
+      userId: u._id,
       origen: origenValido(origen),
       creadoEn: ahora,
       expiraEn: ahora + STATE_VIDA_MS,
@@ -205,10 +224,11 @@ export const consumirState = internalMutation({
   },
 });
 
-/** Guarda la conexión, reemplazando la anterior si la había. La base elegida
- *  se conserva solo si es el MISMO espacio de trabajo: con otro espacio, la
- *  base anterior no existe o no es accesible, y dejarla preseleccionada
- *  haría fallar la primera sincronización con un motivo confuso. */
+/** Guarda la conexión DE ESA PERSONA, reemplazando la suya anterior si la
+ *  había y sin tocar las de las demás. La base elegida se conserva solo si es
+ *  el MISMO espacio de trabajo: con otro espacio, la base anterior no existe
+ *  o no es accesible, y dejarla preseleccionada haría fallar la primera
+ *  sincronización con un motivo confuso. */
 export const guardarConexion = internalMutation({
   args: {
     accessToken: v.string(),
@@ -219,7 +239,10 @@ export const guardarConexion = internalMutation({
     userId: v.id("users"),
   },
   handler: async (ctx, { userId, ...datos }) => {
-    const previas = await ctx.db.query("notionConexion").collect();
+    const previas = await ctx.db
+      .query("notionConexion")
+      .withIndex("porUsuario", (q) => q.eq("conectadoPor", userId))
+      .collect();
     const mismoEspacio = previas.find((p) => p.workspaceId === datos.workspaceId);
     for (const p of previas) await ctx.db.delete(p._id);
     return await ctx.db.insert("notionConexion", {
@@ -357,7 +380,7 @@ export const callback = httpAction(async (ctx, req) => {
 export const listarBases = action({
   args: {},
   handler: async (ctx): Promise<BaseNotion[]> => {
-    const token: string = await ctx.runQuery(internal.notion.oauth.tokenParaAdmin, {});
+    const token: string = await ctx.runQuery(internal.notion.oauth.tokenPropio, {});
     try {
       return await new ClienteNotion(token).buscarBases();
     } catch (exc) {
@@ -373,8 +396,8 @@ export const listarBases = action({
 export const elegirBase = mutation({
   args: { databaseId: v.string(), titulo: v.string() },
   handler: async (ctx, { databaseId, titulo }) => {
-    await administrador(ctx, "elegir la base de datos de Notion");
-    const conexion = await conexionActual(ctx);
+    const u = await usuario(ctx);
+    const conexion = await conexionActual(ctx, u._id);
     if (!conexion) throw errorDatos("invalido", "Primero conecta con Notion.");
     const id = normalizarId(databaseId);
     if (!/^[0-9a-f]{32}$/.test(id)) throw errorDatos("invalido", "Esa base de datos no se reconoce.");
@@ -383,14 +406,21 @@ export const elegirBase = mutation({
   },
 });
 
-/** Borra la conexión (y los states pendientes). El corpus ya sincronizado se
- *  conserva: desconectar es dejar de traer cambios, no vaciar el índice. */
+/** Borra la conexión de quien llama y sus states pendientes. Sus documentos
+ *  ya sincronizados se conservan: desconectar es dejar de traer cambios, no
+ *  vaciar el corpus. No toca nada de ninguna otra cuenta. */
 export const desconectar = mutation({
   args: {},
   handler: async (ctx) => {
-    await administrador(ctx, "desconectar Notion");
-    for (const c of await ctx.db.query("notionConexion").collect()) await ctx.db.delete(c._id);
-    for (const e of await ctx.db.query("notionEstadosOauth").collect()) await ctx.db.delete(e._id);
+    const u = await usuario(ctx);
+    const suyas = await ctx.db
+      .query("notionConexion")
+      .withIndex("porUsuario", (q) => q.eq("conectadoPor", u._id))
+      .collect();
+    for (const c of suyas) await ctx.db.delete(c._id);
+    for (const e of await ctx.db.query("notionEstadosOauth").collect()) {
+      if (e.userId === u._id) await ctx.db.delete(e._id);
+    }
     return { ok: true as const };
   },
 });
