@@ -2,13 +2,14 @@
 // extensión, sanea, detecta el idioma del documento entero y aplica los topes.
 import { MAX_CHUNKS } from "./chunking";
 import { parsearDocx } from "./docx";
+import { EXTENSIONES_IMAGEN, parsearImagen } from "./imagen";
 import { detectarIdioma } from "./idioma";
 import { parsearPdf } from "./pdf";
 import { parsearCsvDocumento, parsearXlsx } from "./tabular";
 import { parsearTexto } from "./texto";
-import type { Parseo } from "./tipos";
+import type { Ocr, Parseo } from "./tipos";
 
-export const EXTENSIONES_SOPORTADAS = new Set([".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"]);
+export const EXTENSIONES_SOPORTADAS = new Set([".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ...EXTENSIONES_IMAGEN]);
 
 /** ".pdf", en minúsculas, o "" si el nombre no tiene extensión. */
 export function extensionDe(nombre: string): string {
@@ -26,21 +27,32 @@ export function extensionDe(nombre: string): string {
  *  de nada y se pagan igual al embeberlos. Ponerlo en false solo tiene sentido
  *  si lo que se quiere consultar ES la bibliografía.
  *
+ *  `ocr`: la función que lee imágenes (ingesta/ocr.ts). Con ella, una imagen
+ *  suelta es un documento, un PDF escaneado se lee página a página y las
+ *  imágenes incrustadas en un Word se indexan. Sin ella (las pruebas, o
+ *  ENABLE_OCR=false) los parsers se comportan como antes.
+ *
  *  Lanza si la extensión no está soportada, si no se extrae texto alguno, o
  *  si se supera MAX_CHUNKS. */
 export async function parsearDocumento(
   nombre: string,
   bytes: Uint8Array,
-  opciones: { omitirReferencias?: boolean } = {},
+  opciones: { omitirReferencias?: boolean; ocr?: Ocr; minTextoPagina?: number } = {},
 ): Promise<Parseo> {
   const ext = extensionDe(nombre);
   let resultado: Parseo;
   if (ext === ".pdf") {
-    const { chunks, pages, descartados } = await parsearPdf(bytes, nombre, opciones);
+    const { chunks, pages, descartados, paginasOcr } = await parsearPdf(bytes, nombre, opciones);
     if (descartados) console.info(`${nombre}: ${descartados} líneas de bibliografía descartadas.`);
+    if (paginasOcr) console.info(`${nombre}: ${paginasOcr} páginas leídas por OCR.`);
     resultado = { chunks, pages };
   } else if (ext === ".docx") {
-    resultado = await parsearDocx(bytes, nombre);
+    resultado = await parsearDocx(bytes, nombre, { ocr: opciones.ocr });
+  } else if (EXTENSIONES_IMAGEN.has(ext)) {
+    if (!opciones.ocr) {
+      throw new Error(`'${nombre}' es una imagen y la lectura de imágenes (OCR) no está disponible.`);
+    }
+    resultado = await parsearImagen(bytes, nombre, ext, opciones.ocr);
   } else if (ext === ".doc") {
     throw new Error(
       "El formato .doc (Word 97-2003) no se puede leer. Abre el archivo en Word y " +
@@ -67,7 +79,9 @@ export async function parsearDocumento(
 
   if (!chunks.length) {
     throw new Error(
-      `'${nombre}' no contiene texto extraíble (¿PDF escaneado sin OCR o archivo vacío?)`,
+      opciones.ocr
+        ? `'${nombre}' no contiene texto legible: ni texto propio ni texto reconocible en sus imágenes.`
+        : `'${nombre}' no contiene texto extraíble (¿PDF escaneado sin OCR o archivo vacío?)`,
     );
   }
   if (chunks.length > MAX_CHUNKS) {

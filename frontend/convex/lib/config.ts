@@ -74,6 +74,15 @@ export interface Ajustes {
   // DOMINIOS_PERMITIDOS separados por comas.
   dominiosPermitidos: string[];
   limiteSubidaMb: number;
+  // OCR de imágenes y de PDF escaneados, con un modelo de visión por el
+  // gateway. `ocrMinTextoPagina`: una página de PDF con menos caracteres de
+  // texto propio que esto se considera escaneada y se le hace OCR; con más,
+  // no (un artículo con figuras no se manda entero al modelo por tener
+  // figuras: eso es lo que lo hace eficiente).
+  ocrHabilitado: boolean;
+  ocrModelo: string;
+  ocrMinTextoPagina: number;
+  ocrMaxImagenesPorDocumento: number;
   // Sincronización con Notion (convex/notion/). Ya no hay token ni base de
   // datos en el entorno: cada persona conecta su propio Notion desde la app y
   // sincroniza a su propio corpus (ver `propietario` en schema.ts), así que un
@@ -177,6 +186,16 @@ export function ajustes(): Ajustes {
     // (Antes 18 MB por confundir la subida con el tope de 20 MB de una
     // petición HTTP de Convex, que no interviene en este camino.)
     limiteSubidaMb: numero("UPLOAD_LIMIT_MB", 100),
+    ocrHabilitado: booleano("ENABLE_OCR", true),
+    // El pequeño y no el grande, y no es por coste: medido el 7 sep 2026 sobre
+    // una página escaneada de un artículo real, gpt-5.4-mini transcribió lo
+    // mismo (9 de 11 frases clave frente a 8 de 11) en 3,9 s frente a 9,8 s.
+    // Un escaneo de 60 páginas son 60 lecturas: la latencia sí importa.
+    ocrModelo: texto("OCR_MODEL", "openai/gpt-5.4-mini"),
+    ocrMinTextoPagina: numero("OCR_MIN_TEXTO_PAGINA", 40),
+    // Tope de imágenes por documento a las que se hace OCR: una acción de
+    // Node dura 10 minutos y cada lectura son unos 4 s, en paralelo de 8.
+    ocrMaxImagenesPorDocumento: numero("OCR_MAX_IMAGENES", 300),
     // 60 por defecto: el cron de convex/crons.ts corre cada hora y la acción
     // se autoexcluye si la última corrida terminó hace menos de esto. Un
     // valor negativo cuenta como 0 (apagado).

@@ -72,7 +72,11 @@ export interface DocumentoExistente {
   sha256: string | null;
 }
 
-export const EXTENSIONES_ADMITIDAS = ['pdf', 'docx', 'xlsx', 'csv', 'txt', 'md'] as const;
+export const EXTENSIONES_ADMITIDAS = [
+  'pdf', 'docx', 'xlsx', 'csv', 'txt', 'md',
+  // Imágenes: se leen por OCR en el servidor.
+  'jpg', 'jpeg', 'png', 'webp', 'gif',
+] as const;
 const EXT_RE = new RegExp(`\\.(${EXTENSIONES_ADMITIDAS.join('|')})$`, 'i');
 
 /** Tope de archivos por carpeta en una sola tanda. No es un límite del
@@ -206,7 +210,7 @@ export function textoDeMotivo(motivo: MotivoOmision, limiteMb: number): string {
     case 'ya_estaba':
       return 'ya estaba en tus documentos (mismo contenido)';
     case 'formato':
-      return 'formato no admitido (solo PDF, Word, Excel, CSV, TXT o MD)';
+      return 'formato no admitido (PDF, Word, Excel, CSV, TXT, MD o imágenes JPG, PNG, WEBP, GIF)';
     case 'demasiado_grande':
       return `pesa más de ${limiteMb} MB`;
     case 'oculto':

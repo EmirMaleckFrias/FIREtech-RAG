@@ -157,7 +157,7 @@ describe('planificar', () => {
     const archivos = await conHash(
       [
         { file: new File(['x'], '.DS_Store'), carpeta: 'D' },
-        { file: new File(['x'], 'foto.jpg'), carpeta: 'D' },
+        { file: new File(['x'], 'diapos.pptx'), carpeta: 'D' },
         { file: new File([], 'vacio.pdf'), carpeta: 'D' },
         { file: new File([new Uint8Array(2 * 1024 * 1024)], 'gordo.pdf'), carpeta: 'D' },
         { file: new File(['x'], 'bien.pdf'), carpeta: 'D' },
@@ -168,7 +168,7 @@ describe('planificar', () => {
     expect(plan.aSubir.map((a) => a.nombre)).toEqual(['bien.pdf']);
     expect(plan.omitidos.map((o) => `${o.nombre}:${o.motivo}`)).toEqual([
       '.DS_Store:oculto',
-      'foto.jpg:formato',
+      'diapos.pptx:formato',
       'vacio.pdf:vacio',
       'gordo.pdf:demasiado_grande',
     ]);

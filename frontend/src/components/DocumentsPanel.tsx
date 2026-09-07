@@ -1290,16 +1290,33 @@ export function DocumentsPanel({
                   >
                     <IconUpload size={20} />
                     <span className="dropzone-text">
-                      Arrastra archivos o una carpeta entera, o haz clic para elegirlos
+                      Arrastra aquí archivos o una carpeta entera
                     </span>
                     <span className="dropzone-hint">
-                      PDF, DOCX, XLSX, CSV, TXT o MD · máx. {limitMb} MB por archivo
+                      PDF, DOCX, XLSX, CSV, TXT, MD o imágenes (JPG, PNG) · máx. {limitMb} MB por archivo
                     </span>
                   </button>
-                  <div className="dropzone-alt">
-                    ¿Los tienes en una carpeta?{' '}
-                    <button type="button" onClick={() => folderInputRef.current?.click()}>
-                      Elegir una carpeta
+                  {/* Dos botones y no un enlace: el diálogo de archivos del
+                      sistema no deja "abrir" una carpeta, y quien intentaba
+                      subir una desde el botón grande se quedaba con "Abrir"
+                      apagado sin saber por qué. Aquí cada botón abre el
+                      diálogo que corresponde. */}
+                  <div className="dropzone-botones">
+                    <button
+                      type="button"
+                      className="doc-confirm-btn doc-confirm-no"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <IconDocument size={13} />
+                      Elegir archivos
+                    </button>
+                    <button
+                      type="button"
+                      className="user-act-btn user-act-promote"
+                      onClick={() => folderInputRef.current?.click()}
+                    >
+                      <IconUpload size={13} />
+                      Elegir una carpeta entera
                     </button>
                   </div>
                 </>
@@ -1408,7 +1425,7 @@ export function DocumentsPanel({
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept=".pdf,.docx,.xlsx,.csv,.txt,.md"
+                accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.jpg,.jpeg,.png,.webp,.gif"
                 style={{ display: 'none' }}
                 tabIndex={-1}
                 aria-hidden="true"

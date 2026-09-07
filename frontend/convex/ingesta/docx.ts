@@ -13,6 +13,7 @@
 // renderizar, así que el localizador de cita es la sección (el encabezado
 // vigente) y, a falta de encabezados, el número de fragmento.
 import JSZip from "jszip";
+import { chunksDeMarkdown, EXTENSIONES_IMAGEN, mimeDeImagen } from "./imagen";
 import { XMLParser } from "fast-xml-parser";
 import {
   TARGET_TOKENS,
@@ -24,7 +25,7 @@ import {
   partirParrafoLargo,
 } from "./chunking";
 import { ROTULO_TABLA } from "./lineas";
-import type { ChunkParseado, Parseo } from "./tipos";
+import type { ChunkParseado, Ocr, Parseo } from "./tipos";
 
 // `preserveOrder` conserva el orden de w:p y w:tbl dentro de w:body, que es lo
 // que importa aquí; el precio es una estructura más verbosa: cada nodo es
@@ -369,7 +370,28 @@ export function tablaEnBloques(filas: FilaTabla[]): string[] {
   return bloques;
 }
 
-export async function parsearDocx(bytes: Uint8Array, nombre: string): Promise<Parseo> {
+/** Las imágenes incrustadas (word/media/*) que se pueden leer: fotos y
+ *  capturas. Los formatos vectoriales de Office (emf, wmf, svg) no son
+ *  imágenes para el modelo y se dejan. */
+export async function imagenesDeDocx(zip: JSZip): Promise<Array<{ nombre: string; bytes: Uint8Array; ext: string }>> {
+  const salida: Array<{ nombre: string; bytes: Uint8Array; ext: string }> = [];
+  const nombres = Object.keys(zip.files)
+    .filter((n) => /^word\/media\//.test(n) && !zip.files[n].dir)
+    .sort();
+  for (const n of nombres) {
+    const ext = (/\.[^./]+$/.exec(n)?.[0] ?? "").toLowerCase();
+    if (!EXTENSIONES_IMAGEN.has(ext)) continue;
+    const bytes = await zip.file(n)?.async("uint8array");
+    if (bytes && bytes.length > 0) salida.push({ nombre: n.slice("word/media/".length), bytes, ext });
+  }
+  return salida;
+}
+
+export async function parsearDocx(
+  bytes: Uint8Array,
+  nombre: string,
+  opciones: { ocr?: Ocr } = {},
+): Promise<Parseo> {
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(bytes);
@@ -449,6 +471,26 @@ export async function parsearDocx(bytes: Uint8Array, nombre: string): Promise<Pa
       chunks.push(chunk);
     });
   });
+
+  // Las imágenes incrustadas, por OCR, al final y en su propia sección: una
+  // foto de una tabla o un diagrama con texto pegado en el Word es contenido
+  // que sin esto no existía para quien pregunta. Cada imagen se cita por su
+  // número ("imagen 2"), aparte de párrafos y tablas.
+  if (opciones.ocr) {
+    const ocr = opciones.ocr;
+    const medios = await imagenesDeDocx(zip);
+    const textos = await Promise.all(
+      medios.map((m, i) =>
+        ocr({ tipo: "bytes", bytes: m.bytes, mime: mimeDeImagen(m.ext) }, { nombre, indice: i + 1 }),
+      ),
+    );
+    textos.forEach((texto, i) => {
+      if (!texto.trim()) return;
+      const nuevos = chunksDeMarkdown(nombre, texto, i + 1, "Imágenes del documento", "docx");
+      for (const c of nuevos) c.metadata = { ...(c.metadata ?? {}), imagen: medios[i].nombre };
+      chunks.push(...nuevos);
+    });
+  }
 
   return { chunks, pages: chunks.length };
 }

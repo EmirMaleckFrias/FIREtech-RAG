@@ -416,6 +416,21 @@ export default defineSchema({
     creadoEn: v.number(),
   }).index("porClave", ["clave"]),
 
+  // Caché del OCR: texto reconocido por imagen, con la imagen identificada por
+  // el sha256 de los BYTES que se mandaron al modelo (la imagen ya reducida),
+  // más el modelo y la versión del prompt. Reindexar un PDF escaneado de 60
+  // páginas volvía a pedir 60 lecturas al modelo para obtener el mismo texto;
+  // con la caché, ninguna. Compartida entre cuentas a propósito: el texto de
+  // una imagen es función de la imagen, y dos personas con el mismo escaneo
+  // no revelan nada por compartir su transcripción, que solo se sirve a quien
+  // tiene los bytes exactos para calcular la clave.
+  ocrCache: defineTable({
+    clave: v.string(),
+    texto: v.string(),
+    modelo: v.string(),
+    creadoEn: v.number(),
+  }).index("porClave", ["clave"]),
+
   // Corridas de ingesta, como la tabla `ingestion_runs`.
   ingestionRuns: defineTable({
     empezadoEn: v.number(),

@@ -38,7 +38,12 @@ import { internal } from "./_generated/api";
 import { ajustes } from "./lib/config";
 import { errorDatos, usuario } from "./usuarios";
 
-export const EXTENSIONES_PERMITIDAS = ["pdf", "docx", "xlsx", "csv", "txt", "md"] as const;
+// Las imágenes entran por OCR (ingesta/ocr.ts): una foto de un protocolo o un
+// escaneo suelto es un documento como otro cualquiera para quien pregunta.
+export const EXTENSIONES_PERMITIDAS = [
+  "pdf", "docx", "xlsx", "csv", "txt", "md",
+  "jpg", "jpeg", "png", "webp", "gif",
+] as const;
 
 // Minutos tras los que un documento en `processing` se considera abandonado y
 // se puede reintentar. Existe porque había una forma de quedarse en

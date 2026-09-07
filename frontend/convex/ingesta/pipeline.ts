@@ -29,6 +29,7 @@ import * as gateway from "../lib/gateway";
 import { Telemetria } from "../lib/telemetry";
 import { sha256Hex } from "./hash";
 import { LOTE_BORRADO, LOTE_EMBEDDINGS, LOTE_ESCRITURA, MAX_ERROR_CHARS } from "./lotes";
+import { crearOcr } from "./ocr";
 import { parsearDocumento } from "./parsear";
 import type { ChunkParseado } from "./tipos";
 
@@ -105,9 +106,23 @@ export const ingestar = internalAction({
       const bytes = new Uint8Array(await blob.arrayBuffer());
       version = await sha256Hex(bytes);
 
-      const { chunks, pages } = await parsearDocumento(fileName, bytes);
+      // El OCR se inyecta a los parsers: ellos deciden qué imágenes leer (las
+      // páginas sin texto, las imágenes sueltas, los adjuntos de Word) y esto
+      // las lee, con caché y en paralelo. Ver ingesta/ocr.ts.
+      const { ocr, estadisticas: ocrStats } = crearOcr(ctx, a);
+      const { chunks, pages } = await parsearDocumento(fileName, bytes, {
+        ocr,
+        minTextoPagina: a.ocrMinTextoPagina,
+      });
       stats.pages = pages;
       stats.chunks = chunks.length;
+      if (ocrStats.imagenes > 0 || ocrStats.omitidasPorTope > 0) {
+        stats.ocr = ocrStats;
+        console.info(
+          `OCR de '${fileName}': ${ocrStats.imagenes} imágenes (${ocrStats.enCache} en caché, ` +
+            `${ocrStats.leidas} leídas, ${ocrStats.fallidas} fallidas) en ${ocrStats.ms} ms.`,
+        );
+      }
       console.info(`Ingesta de '${fileName}': ${chunks.length} chunks, ${pages} páginas/filas.`);
 
       // Embeber y escribir lote a lote: la memoria queda acotada a un lote

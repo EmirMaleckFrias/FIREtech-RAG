@@ -17,7 +17,7 @@
 // a 10) y la base elevada 4 pt; y el nombre real de la fuente ("Helvetica-Bold")
 // solo aparece en `page.commonObjs` DESPUÉS de `getOperatorList()`, no tras
 // `getTextContent()`, que no manda las fuentes al hilo principal.
-import { getDocumentProxy } from "unpdf";
+import { getDocumentProxy, getResolvedPDFJS } from "unpdf";
 import {
   agruparPorSeccion,
   chunkBase,
@@ -27,7 +27,7 @@ import {
 } from "./chunking";
 import { abreParrafo, esPalabraDeEnlace, unirLineas } from "./lineas";
 import * as paper from "./paper";
-import { META_VACIA, type ChunkParseado, type MetaObra } from "./tipos";
+import { META_VACIA, type ChunkParseado, type ImagenParaOcr, type MetaObra, type Ocr } from "./tipos";
 
 /** Una línea física con su formato y su geometría. */
 export interface LineaPdf extends paper.LineaFormato {
@@ -385,15 +385,60 @@ function bordesPorAltura(lineas: LineaPdf[], cuantas: number): Set<number> {
 }
 
 /** Líneas con formato de cada página del PDF, y el número de páginas. */
+/** Opciones de `extraerLineas`. `imagenesSi` decide, con las líneas de texto
+ *  ya extraídas de una página, si hay que sacar también sus imágenes (para
+ *  hacerles OCR). Sin ella no se toca ninguna imagen: extraerlas cuesta
+ *  decodificarlas, y un artículo con figuras no lo necesita. */
+export interface OpcionesExtraccion {
+  imagenesSi?: (lineas: LineaPdf[], numeroPagina: number) => boolean;
+}
+
+/** Las imágenes pintadas en una página, como píxeles ya decodificados por
+ *  pdf.js. Es el mismo recorrido que hace `extractImages` de unpdf, pero
+ *  conservando ancho, alto y canales, que sin ellos los píxeles no sirven.
+ *  Se incluyen las imágenes inline (`paintInlineImageXObject`), que en un
+ *  escaneo pequeño son a veces la única. Las diminutas (líneas, viñetas) se
+ *  descartan aquí para ni siquiera copiarlas. */
+async function imagenesDePagina(pagina: any, OPS: Record<string, number>): Promise<ImagenParaOcr[]> {
+  const lista = await pagina.getOperatorList();
+  const salida: ImagenParaOcr[] = [];
+  for (let i = 0; i < lista.fnArray.length; i++) {
+    const op = lista.fnArray[i];
+    let obj: any = null;
+    try {
+      if (op === OPS.paintImageXObject) {
+        const clave = lista.argsArray[i][0];
+        obj = pagina.objs.has(clave) ? pagina.objs.get(clave) : null;
+      } else if (op === OPS.paintInlineImageXObject) {
+        obj = lista.argsArray[i][0];
+      } else {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    if (!obj || !obj.data || !obj.width || !obj.height) continue;
+    if (obj.width < 48 || obj.height < 48) continue;
+    // `kind`: 1 = gris de 1 byte por píxel, 2 = RGB de 24 bits, 3 = RGBA.
+    const canales = obj.kind === 1 ? 1 : obj.kind === 2 ? 3 : 4;
+    if (obj.data.length < obj.width * obj.height * canales) continue;
+    salida.push({ tipo: "pixeles", ancho: obj.width, alto: obj.height, datos: obj.data, canales });
+  }
+  return salida;
+}
+
 export async function extraerLineas(
   bytes: Uint8Array,
-): Promise<{ paginas: LineaPdf[][]; numPaginas: number }> {
+  opciones: OpcionesExtraccion = {},
+): Promise<{ paginas: LineaPdf[][]; numPaginas: number; imagenes: Map<number, ImagenParaOcr[]> }> {
   // pdf.js TRANSFIERE el ArrayBuffer al (falso) worker y lo deja desconectado:
   // parsear dos veces los mismos bytes daba DataCloneError en la segunda. Se
   // le entrega una copia y el llamador conserva los suyos.
   const documento = await getDocumentProxy(new Uint8Array(bytes));
   try {
     const paginas: LineaPdf[][] = [];
+    const imagenes = new Map<number, ImagenParaOcr[]>();
+    let OPS: Record<string, number> | null = null;
     const limiteNegrita = Date.now() + PRESUPUESTO_NEGRITA_MS;
     // Las fuentes son del documento, no de la página: resuelta una vez, vale
     // para todas las páginas que la usen.
@@ -437,9 +482,21 @@ export async function extraerLineas(
           `${obj?.name ?? ""}${obj?.bold ? " bold" : ""}${obj?.black ? " black" : ""}`,
         );
       }
-      paginas.push(construirLineas(items, nombresFuente, anchoPagina));
+      const lineas = construirLineas(items, nombresFuente, anchoPagina);
+      paginas.push(lineas);
+      // Solo en las páginas que lo pidan (las que no tienen texto propio):
+      // aquí es donde un PDF escaneado deja de ser "sin texto extraíble".
+      if (opciones.imagenesSi?.(lineas, n)) {
+        try {
+          OPS = OPS ?? ((await getResolvedPDFJS()).OPS as unknown as Record<string, number>);
+          const encontradas = await imagenesDePagina(pagina, OPS);
+          if (encontradas.length) imagenes.set(n, encontradas);
+        } catch (exc) {
+          console.warn(`pág. ${n}: no se pudieron extraer las imágenes (${String(exc).slice(0, 120)}).`);
+        }
+      }
     }
-    return { paginas, numPaginas: documento.numPages };
+    return { paginas, numPaginas: documento.numPages, imagenes };
   } finally {
     await documento.destroy().catch(() => undefined);
   }
@@ -466,17 +523,32 @@ export async function extraerLineas(
  *  La bibliografía se descarta por defecto: son títulos de trabajos ajenos que
  *  casan con casi cualquier consulta sin ser evidencia de nada, y ocupan una
  *  parte nada despreciable de lo que se paga por embeber. */
+/** Caracteres de texto propio de una página. Con menos que el umbral, la
+ *  página cuenta como escaneada: un folio y una cabecera suman menos de 40;
+ *  un párrafo, cientos. */
+export function textoDePagina(lineas: LineaPdf[]): number {
+  return lineas.reduce((n, l) => n + l.texto.trim().length, 0);
+}
+
 export async function parsearPdf(
   bytes: Uint8Array,
   nombre: string,
-  opciones: { omitirReferencias?: boolean } = {},
-): Promise<{ chunks: ChunkParseado[]; pages: number; descartados: number }> {
+  opciones: { omitirReferencias?: boolean; ocr?: Ocr; minTextoPagina?: number } = {},
+): Promise<{ chunks: ChunkParseado[]; pages: number; descartados: number; paginasOcr: number }> {
   const omitirReferencias = opciones.omitirReferencias ?? true;
+  const minTexto = opciones.minTextoPagina ?? 40;
   // Primera pasada: texto y formato de cada página. Hace falta el documento
   // entero antes de empezar, por dos razones: las cabeceras y pies se
   // detectan por repetirse entre páginas, y el tamaño del texto corrido (con
   // el que se reconocen los encabezados) solo se sabe mirándolo todo.
-  const { paginas, numPaginas } = await extraerLineas(bytes);
+  //
+  // Con OCR disponible se piden además las imágenes de las páginas SIN texto
+  // propio (un escaneo): las páginas con texto no se tocan, que es lo que
+  // hace que un artículo con figuras no cueste 30 lecturas al modelo.
+  const { paginas, numPaginas, imagenes } = await extraerLineas(
+    bytes,
+    opciones.ocr ? { imagenesSi: (lineas) => textoDePagina(lineas) < minTexto } : {},
+  );
 
   const textoCabecera = paginas
     .slice(0, 2)
@@ -525,6 +597,7 @@ export async function parsearPdf(
     abiertoPaginas = [];
   };
 
+  const seccionAlFinalDe = new Map<number, string>();
   paginas.forEach((lineas, indice) => {
     const numeroPagina = indice + 1;
     const enBordeDeHoja = bordesPorAltura(lineas, paper.BORDE_PAGINA);
@@ -605,8 +678,39 @@ export async function parsearPdf(
       }
       if (!abiertoPaginas.includes(numeroPagina)) abiertoPaginas.push(numeroPagina);
     });
+    seccionAlFinalDe.set(numeroPagina, seccion);
   });
   cerrarParrafo();
+
+  // Páginas escaneadas: el texto sale del OCR de sus imágenes. Las lecturas
+  // van en paralelo (el gateway limita el vuelo) y cada página queda con su
+  // número, colgada de la sección vigente al llegar a ella. Si el documento
+  // no tenía título (un escaneo puro no tiene bloque de título que leer), se
+  // toma el primer encabezado que el OCR devuelva en la primera página leída.
+  let paginasOcr = 0;
+  if (opciones.ocr && imagenes.size > 0) {
+    const ocr = opciones.ocr;
+    const numeros = [...imagenes.keys()].sort((a, b) => a - b);
+    const textos = await Promise.all(
+      numeros.map(async (n) => {
+        const partes = await Promise.all(
+          (imagenes.get(n) ?? []).map((img, i) => ocr(img, { nombre, pagina: n, indice: i + 1 })),
+        );
+        return partes.filter((t) => t.trim()).join("\n\n");
+      }),
+    );
+    numeros.forEach((n, k) => {
+      const texto = textos[k];
+      if (!texto.trim()) return;
+      paginasOcr += 1;
+      if (!meta.titulo && n === numeros[0]) {
+        const m = /^#{1,3}\s+(.+?)\s*$/m.exec(texto);
+        if (m) meta.titulo = m[1].replace(/[#*_`]/g, "").trim();
+      }
+      const sec = seccionAlFinalDe.get(n) ?? "";
+      for (const pieza of partirParrafoLargo(texto)) paras.push([pieza, [n], sec]);
+    });
+  }
 
   // Se empaqueta por tramos de sección (ver agruparPorSeccion), con el solape
   // de empaquetar, y cada chunk lleva delante el título de la obra y su
@@ -627,5 +731,5 @@ export async function parsearPdf(
       );
     }
   }
-  return { chunks, pages: numPaginas, descartados };
+  return { chunks, pages: numPaginas, descartados, paginasOcr };
 }

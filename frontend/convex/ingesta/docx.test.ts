@@ -7,12 +7,13 @@
 // real de python-docx (fixtures/estudio.docx) cruza las suposiciones sobre el
 // XML que genera Word de verdad.
 import { readFileSync } from "node:fs";
+import JSZip from "jszip";
 import { describe, expect, test } from "vitest";
 import { OVERLAP_TOKENS, estTokens } from "./chunking";
 import { cabeceraDeTabla, parsearDocx, type FilaTabla } from "./docx";
 import { escribirDocx, type BloqueFalso, type FilaFalsa } from "./docxFalso.test-util";
 import { parsearDocumento } from "./parsear";
-import type { ChunkParseado } from "./tipos";
+import type { ChunkParseado, Ocr } from "./tipos";
 
 function fixture(nombre: string): Uint8Array {
   return new Uint8Array(readFileSync(new URL(`./fixtures/${nombre}`, import.meta.url)));
@@ -381,5 +382,55 @@ describe("tablas que no cambian los números de columna", () => {
     expect(t[1].text).toBe("Results\n\nVariable | Control | AD\nEdad | 72 | 74\n | 28 | 21");
     // vMerge: el rótulo de grupo se repite en la segunda fila.
     expect(t[2].text).toBe("Results\n\nGrupo | Medida\nControl | MMSE 28\nControl | CDR 0");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Imágenes incrustadas (word/media) por OCR
+// ---------------------------------------------------------------------------
+//
+// Un Word con una foto de una tabla pegada: sin OCR ese contenido no existía
+// para quien pregunta. El OCR es falso y se apunta lo que se le pide; lo que
+// se comprueba es que se leen las imágenes de `word/media`, con su MIME, que
+// los formatos vectoriales de Office se dejan, y que el texto entra en su
+// propia sección citada por número de imagen.
+describe("imágenes incrustadas", () => {
+  async function docxConMedios(medios: Record<string, Uint8Array>): Promise<Uint8Array> {
+    const base = await escribirDocx([{ tipo: "p", texto: "Párrafo normal del documento." }]);
+    const zip = await JSZip.loadAsync(base);
+    for (const [nombre, bytes] of Object.entries(medios)) zip.file(`word/media/${nombre}`, bytes);
+    return new Uint8Array(await zip.generateAsync({ type: "uint8array" }));
+  }
+
+  test("lee las imágenes de word/media con su MIME, salta emf/wmf/svg y cita cada una por su número", async () => {
+    const bytes = await docxConMedios({
+      "image1.png": new Uint8Array([1, 2, 3]),
+      "image2.emf": new Uint8Array([9, 9]),
+      "image3.jpeg": new Uint8Array([4, 5, 6]),
+    });
+    const pedidas: Array<{ mime: string; indice?: number }> = [];
+    const ocr: Ocr = async (img, ctx) => {
+      if (img.tipo === "bytes") pedidas.push({ mime: img.mime, indice: ctx.indice });
+      return ctx.indice === 1 ? "| Marcador | Valor |\n| --- | --- |\n| p-tau217 | 0,94 |" : "";
+    };
+    const r = await parsearDocx(bytes, "informe.docx", { ocr });
+
+    expect(pedidas).toEqual([
+      { mime: "image/png", indice: 1 },
+      { mime: "image/jpeg", indice: 2 },
+    ]);
+    const deImagen = r.chunks.filter((c) => c.section === "Imágenes del documento");
+    expect(deImagen).toHaveLength(1);
+    expect(deImagen[0].text).toContain("| p-tau217 | 0,94 |");
+    expect(deImagen[0].page).toBe(1);
+    expect(deImagen[0].metadata).toMatchObject({ imagen: "image1.png" });
+    // El párrafo normal sigue ahí, delante.
+    expect(r.chunks[0].text).toContain("Párrafo normal");
+  });
+
+  test("sin OCR, las imágenes no se tocan y el documento es el de siempre", async () => {
+    const bytes = await docxConMedios({ "image1.png": new Uint8Array([1]) });
+    const r = await parsearDocx(bytes, "informe.docx");
+    expect(r.chunks.some((c) => c.section === "Imágenes del documento")).toBe(false);
   });
 });

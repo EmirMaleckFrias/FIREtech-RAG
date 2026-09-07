@@ -529,15 +529,27 @@ describe("adjuntos", () => {
     expect(notion.llamadas.filter((l) => l === "GET /v1/pages/a1")).toHaveLength(1);
   });
 
-  test("extensiones no soportadas se ignoran sin error", async () => {
+  test("extensiones no soportadas se ignoran sin error, ni siquiera se descargan", async () => {
+    const t = await nuevaBase();
+    baseInicial();
+    notion.pagina("f6", "Con vídeo", { adjuntos: [{ name: "charla.mp4", url: "https://s3.notion.example/charla.mp4" }] });
+    notion.fichero("https://s3.notion.example/charla.mp4", new Uint8Array([1, 2, 3]));
+    const r = await sincronizar(t);
+    expect(r).toMatchObject({ estado: "ok", errores: [] });
+    expect((await documentos(t)).map((d) => d.fileName)).not.toContain("charla.mp4");
+    expect(notion.llamadas).not.toContain("GET /charla.mp4");
+  });
+
+  test("una imagen adjunta SÍ se trae: se indexa por OCR en la ingesta", async () => {
+    // Antes las imágenes se ignoraban como formato no soportado. Una foto de
+    // un protocolo pegada en Notion es corpus desde que hay OCR.
     const t = await nuevaBase();
     baseInicial();
     notion.pagina("f6", "Con imagen", { adjuntos: [{ name: "foto.png", url: "https://s3.notion.example/foto.png" }] });
     notion.fichero("https://s3.notion.example/foto.png", new Uint8Array([1, 2, 3]));
     const r = await sincronizar(t);
     expect(r).toMatchObject({ estado: "ok", errores: [] });
-    expect((await documentos(t)).map((d) => d.fileName)).not.toContain("foto.png");
-    expect(notion.llamadas).not.toContain("GET /foto.png");
+    expect((await documentos(t)).map((d) => d.fileName)).toContain("foto.png");
   });
 });
 

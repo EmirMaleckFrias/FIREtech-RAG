@@ -166,3 +166,44 @@ export const marcarFallido = internalMutation({
     await ctx.db.patch(documentId, { status: "failed", error, ingestadoEn: Date.now() });
   },
 });
+
+// ---------------------------------------------------------------------------
+// Caché del OCR
+// ---------------------------------------------------------------------------
+/** Los textos ya reconocidos para esas claves. Devuelve pares y no un objeto
+ *  con las claves como campos: una clave es un hash y Convex valida los
+ *  nombres de campo de lo que devuelve una función. */
+export const leerOcr = internalQuery({
+  args: { claves: v.array(v.string()) },
+  handler: async (ctx, { claves }) => {
+    const pares: Array<{ clave: string; texto: string }> = [];
+    for (const clave of claves) {
+      const fila = await ctx.db
+        .query("ocrCache")
+        .withIndex("porClave", (q) => q.eq("clave", clave))
+        .first();
+      if (fila) pares.push({ clave, texto: fila.texto });
+    }
+    return pares;
+  },
+});
+
+/** Guarda textos reconocidos. Idempotente: una clave que ya está no se
+ *  duplica (dos ingestas del mismo escaneo pueden correr a la vez). */
+export const guardarOcr = internalMutation({
+  args: {
+    entradas: v.array(v.object({ clave: v.string(), texto: v.string(), modelo: v.string() })),
+  },
+  handler: async (ctx, { entradas }) => {
+    const ahora = Date.now();
+    for (const e of entradas) {
+      const previa = await ctx.db
+        .query("ocrCache")
+        .withIndex("porClave", (q) => q.eq("clave", e.clave))
+        .first();
+      if (previa) continue;
+      await ctx.db.insert("ocrCache", { ...e, creadoEn: ahora });
+    }
+  },
+});
+
