@@ -287,6 +287,9 @@ export interface DocumentInfo {
   /** De dónde salió: subida manual o sincronización con Notion. null en los
    *  registros anteriores a que existiera el campo. */
   origen: 'subida' | 'notion' | null;
+  /** Hash del fichero, para que subir una carpeta no repita lo que ya está
+   *  con otro nombre. null si el registro no lo trae. */
+  sha256: string | null;
 }
 
 /** Una corrida de la sincronización con Notion (notion.admin.estado.ultimas). */

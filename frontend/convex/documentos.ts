@@ -118,6 +118,10 @@ export const listar = query({
       ingestadoEn: d.ingestadoEn,
       titulo: d.titulo ?? null,
       citation: d.citation ?? null,
+      // Para que la subida de carpetas no repita un fichero que ya está con
+      // otro nombre: el navegador calcula el hash antes de subir y lo compara
+      // con esto. Es el hash del fichero, no un secreto.
+      sha256: d.sha256,
       // Para la etiqueta "Notion" del panel: un documento que llegó por la
       // sincronización no se sube ni se borra a mano, lo gobierna Notion.
       origen: d.origen ?? null,

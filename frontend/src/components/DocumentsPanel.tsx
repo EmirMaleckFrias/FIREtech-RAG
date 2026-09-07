@@ -58,6 +58,17 @@ import {
   llevarEmergenteA,
   marcarRespaldoPaginaCompleta,
 } from '../lib/notionEmergente';
+import {
+  SUBIDAS_A_LA_VEZ,
+  desdeDrop,
+  desdeInputDeCarpeta,
+  planificar,
+  resumenDeTanda,
+  textoDeMotivo,
+  type ArchivoConRuta,
+  type ArchivoOmitido,
+  type ArchivoPlaneado,
+} from '../lib/carpetas';
 import { sha256De, subirFichero } from '../lib/subida';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import type { AvisoNotion, BaseNotion, DocumentInfo, DocumentStatus, EstadoNotion } from '../types';
@@ -75,7 +86,6 @@ import {
 } from './icons';
 
 const JUST_READY_MS = 1_800;
-const ALLOWED_EXT_RE = /\.(pdf|docx|xlsx|csv|txt|md)$/i;
 /** Mismo valor que `limiteSubidaMb` en convex/lib/config.ts (100 MB). Es solo el
  *  valor de reserva mientras no llega el real por `estadisticas.sistema`; la
  *  subida por URL firmada no limita el tamaño, el techo lo pone la ingesta. */
@@ -106,6 +116,7 @@ interface DocumentoDoc {
   ingestadoEn?: number;
   _creationTime?: number;
   origen?: string | null;
+  sha256?: string | null;
 }
 
 function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
@@ -125,30 +136,51 @@ function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
           ? d._creationTime
           : 0,
     origen: d.origen === 'notion' || d.origen === 'subida' ? d.origen : null,
+    sha256: typeof d.sha256 === 'string' && d.sha256 !== '' ? d.sha256 : null,
   };
 }
 
-type FaseSubida = 'subiendo' | 'registrando';
-
-interface UploadState {
-  fileName: string;
+/** Un archivo que se está subiendo ahora mismo (hay hasta SUBIDAS_A_LA_VEZ). */
+interface SubidaEnVuelo {
+  nombre: string;
   /** Fracción 0..1, o null si el navegador no computa el progreso. */
-  progress: number | null;
-  fase: FaseSubida;
+  progreso: number | null;
 }
 
-function validateFile(file: File, docs: DocumentInfo[] | null, limitMb: number): string | null {
-  if (!ALLOWED_EXT_RE.test(file.name)) {
-    return 'Formato no admitido. Solo se aceptan PDF, Word (.docx), XLSX, CSV, TXT o MD.';
-  }
-  if (file.size > limitMb * 1024 * 1024) {
-    const mb = (file.size / (1024 * 1024)).toFixed(1);
-    return `El archivo pesa ${mb} MB y el máximo permitido es ${limitMb} MB.`;
-  }
-  if (docs?.some((d) => d.fileName === file.name)) {
-    return 'Ya existe un documento con ese nombre. Bórralo antes de volver a subirlo.';
-  }
-  return null;
+/**
+ * La tanda en curso: uno o muchos archivos (una carpeta entera), con una sola
+ * barra. Es lo que antes era `UploadState` para un archivo, generalizado, y el
+ * caso de un archivo sigue siendo una tanda de uno.
+ *
+ * - `preparando`: se calculan los hashes y se decide qué se sube y qué se
+ *   omite (ver lib/carpetas.ts). Con carpetas grandes tarda unos segundos.
+ * - `subiendo`: la cola avanza; `hechos` cuenta terminados, bien o mal.
+ * - `terminada`: se enseña el resumen (subidos, fallidos, omitidos y por
+ *   qué). Si no hay nada que contar más allá de "todo bien", se cierra solo.
+ */
+interface ColaSubida {
+  fase: 'preparando' | 'subiendo' | 'terminada';
+  total: number;
+  hechos: number;
+  ok: number;
+  enVuelo: SubidaEnVuelo[];
+  fallidos: Array<{ nombre: string; motivo: string }>;
+  omitidos: ArchivoOmitido[];
+  /** Se cortó al tope de archivos por tanda: hay que subir el resto aparte. */
+  truncada: boolean;
+  cancelada: boolean;
+}
+
+/** Fracción global de la barra: terminados más lo avanzado de los que van. */
+function fraccionDeCola(c: ColaSubida): number | null {
+  if (c.total === 0) return null;
+  const parcial = c.enVuelo.reduce((suma, s) => suma + (s.progreso ?? 0), 0);
+  return Math.min(1, (c.hechos + parcial) / c.total);
+}
+
+/** ¿Hay algo que la usuaria deba leer antes de cerrar el resumen? */
+function colaMereceResumen(c: ColaSubida): boolean {
+  return c.fallidos.length > 0 || c.omitidos.length > 0 || c.truncada || c.cancelada;
 }
 
 function ingestedTitle(ms: number): string | undefined {
@@ -832,8 +864,10 @@ export function DocumentsPanel({
     [docsQuery],
   );
 
-  const [upload, setUpload] = useState<UploadState | null>(null);
+  const [cola, setCola] = useState<ColaSubida | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  /** El desplegable de omitidos del resumen. */
+  const [omitidosAbiertos, setOmitidosAbiertos] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
   const [confirmFor, setConfirmFor] = useState<Id<'documents'> | null>(null);
@@ -847,6 +881,9 @@ export function DocumentsPanel({
   const grabberRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** El selector de CARPETA. Es un input aparte porque `webkitdirectory`
+   *  convierte el diálogo en uno de carpetas y deja de admitir archivos. */
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const dragCounterRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const prevDocsRef = useRef<DocumentInfo[] | null>(null);
@@ -899,62 +936,156 @@ export function DocumentsPanel({
     };
   }, [open]);
 
-  // --- subida ---
+  // --- subida (uno o muchos archivos, o una carpeta entera) ---
+  //
+  // Todo entra por aquí: un archivo suelto es una tanda de uno. Los pasos:
+  // 1) hashes de todos (en paralelo, de pocos en pocos); 2) el plan: qué se
+  // sube con qué nombre y qué se omite y por qué (lib/carpetas.ts); 3) la
+  // cola, con SUBIDAS_A_LA_VEZ trabajadores que van cogiendo el siguiente;
+  // 4) el resumen, que se cierra solo si no hay nada que contar.
+  //
+  // Cancelar aborta los XHR en vuelo y deja de coger nuevos; lo ya
+  // registrado se queda (está arriba y en proceso, no tiene sentido fingir
+  // que no).
   const startUpload = useCallback(
-    async (file: File) => {
-      if (uploadAbortRef.current !== null) return; // ya hay una subida en curso
+    async (archivos: ArchivoConRuta[], truncada = false) => {
+      if (uploadAbortRef.current !== null) return; // ya hay una tanda en curso
+      if (archivos.length === 0) return;
       setUploadError(null);
-
-      const invalid = validateFile(file, docs, limitMb);
-      if (invalid !== null) {
-        setUploadError(invalid);
-        return;
-      }
+      setOmitidosAbiertos(false);
 
       const controller = new AbortController();
       uploadAbortRef.current = controller;
-      setUpload({ fileName: file.name, progress: 0, fase: 'subiendo' });
+      const cancelado = () => controller.signal.aborted;
+      setCola({
+        fase: 'preparando',
+        total: archivos.length,
+        hechos: 0,
+        ok: 0,
+        enVuelo: [],
+        fallidos: [],
+        omitidos: [],
+        truncada,
+        cancelada: false,
+      });
 
       try {
-        // La URL firmada y el hash se piden a la vez: el hash recorre el
-        // fichero en memoria y no depende de la red.
-        const [url, sha256] = await Promise.all([urlDeSubida({}), sha256De(file)]);
-        if (controller.signal.aborted) throw new DOMException('Subida cancelada', 'AbortError');
-        const storageId = await subirFichero(
-          url,
-          file,
-          (fraction) => {
-            setUpload((u) => (u === null ? u : { ...u, progress: fraction }));
-          },
-          controller.signal,
+        // 1) Hashes. De cuatro en cuatro: cada uno lee el fichero entero en
+        //    memoria, y una carpeta de cientos de PDF a la vez se la comería.
+        const conHash: Array<ArchivoConRuta & { sha256: string }> = [];
+        for (let i = 0; i < archivos.length && !cancelado(); i += 4) {
+          const lote = archivos.slice(i, i + 4);
+          const hashes = await Promise.all(lote.map((a) => sha256De(a.file)));
+          lote.forEach((a, j) => conHash.push({ ...a, sha256: hashes[j] }));
+        }
+        if (cancelado()) throw new DOMException('Subida cancelada', 'AbortError');
+
+        // 2) El plan, contra lo que ya hay en el corpus.
+        const plan = planificar(
+          conHash,
+          (docs ?? []).map((d) => ({ fileName: d.fileName, sha256: d.sha256 })),
+          limitMb,
         );
-        // Subido: ahora el servidor lo registra y agenda la ingesta. Ya no se
-        // puede cancelar (el fichero está arriba), por eso cambia el texto.
-        setUpload((u) => (u === null ? u : { ...u, progress: 1, fase: 'registrando' }));
-        await registrar({
-          storageId: storageId as Id<'_storage'>,
-          fileName: file.name,
-          sha256,
+        setCola((c) =>
+          c === null
+            ? c
+            : { ...c, fase: 'subiendo', total: plan.aSubir.length, omitidos: plan.omitidos },
+        );
+
+        // 3) La cola.
+        const pendientes: ArchivoPlaneado[] = [...plan.aSubir];
+        const subirUno = async (a: ArchivoPlaneado) => {
+          setCola((c) =>
+            c === null ? c : { ...c, enVuelo: [...c.enVuelo, { nombre: a.nombre, progreso: 0 }] },
+          );
+          const quitarDeVuelo = (c: ColaSubida) => c.enVuelo.filter((v) => v.nombre !== a.nombre);
+          try {
+            const url = await urlDeSubida({});
+            if (cancelado()) throw new DOMException('Subida cancelada', 'AbortError');
+            const storageId = await subirFichero(
+              url,
+              a.file,
+              (fraccion) => {
+                setCola((c) =>
+                  c === null
+                    ? c
+                    : {
+                        ...c,
+                        enVuelo: c.enVuelo.map((v) =>
+                          v.nombre === a.nombre ? { ...v, progreso: fraccion } : v,
+                        ),
+                      },
+                );
+              },
+              controller.signal,
+            );
+            await registrar({
+              storageId: storageId as Id<'_storage'>,
+              fileName: a.nombre,
+              sha256: a.sha256,
+            });
+            setCola((c) =>
+              c === null ? c : { ...c, hechos: c.hechos + 1, ok: c.ok + 1, enVuelo: quitarDeVuelo(c) },
+            );
+          } catch (err) {
+            if (cancelado()) {
+              setCola((c) => (c === null ? c : { ...c, enVuelo: quitarDeVuelo(c) }));
+              return;
+            }
+            if (avisarSiEsFatal(err)) return;
+            const motivo =
+              err instanceof DOMException
+                ? 'no se pudo subir'
+                : mensajeDeError(
+                    err,
+                    err instanceof Error && err.message !== '' ? err.message : 'no se pudo subir',
+                  );
+            setCola((c) =>
+              c === null
+                ? c
+                : {
+                    ...c,
+                    hechos: c.hechos + 1,
+                    enVuelo: quitarDeVuelo(c),
+                    fallidos: [...c.fallidos, { nombre: a.nombre, motivo }],
+                  },
+            );
+          }
+        };
+        const trabajador = async () => {
+          for (;;) {
+            const siguiente = pendientes.shift();
+            if (siguiente === undefined || cancelado()) return;
+            await subirUno(siguiente);
+          }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(SUBIDAS_A_LA_VEZ, pendientes.length) }, trabajador),
+        );
+        if (cancelado()) throw new DOMException('Subida cancelada', 'AbortError');
+
+        // 4) Resumen: solo se queda si hay algo que leer.
+        setCola((c) => {
+          if (c === null) return c;
+          const final: ColaSubida = { ...c, fase: 'terminada', enVuelo: [] };
+          return colaMereceResumen(final) ? final : null;
         });
-        // Aparece como "Procesando" en cuanto la suscripción lo entregue.
       } catch (err) {
         if (controller.signal.aborted) {
-          // cancelado a mano: sin aviso
+          setCola((c) =>
+            c === null ? c : { ...c, fase: 'terminada', enVuelo: [], cancelada: true },
+          );
         } else if (!avisarSiEsFatal(err)) {
+          setCola(null);
           setUploadError(
-            err instanceof DOMException
-              ? 'No se pudo subir el archivo.'
-              : mensajeDeError(
-                  err,
-                  err instanceof Error && err.message !== ''
-                    ? err.message
-                    : 'No se pudo subir el archivo.',
-                ),
+            mensajeDeError(
+              err,
+              err instanceof Error && err.message !== '' ? err.message : 'No se pudo subir.',
+            ),
           );
         }
       } finally {
         if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
-        setUpload(null);
       }
     },
     [docs, limitMb, registrar, urlDeSubida],
@@ -1057,14 +1188,24 @@ export function DocumentsPanel({
     e.preventDefault();
     dragCounterRef.current = 0;
     setDragOver(false);
-    const file = e.dataTransfer.files.length > 0 ? e.dataTransfer.files[0] : null;
-    if (file) void startUpload(file);
+    // Carpetas y archivos, los que sean: `desdeDrop` recorre las carpetas
+    // con la API de entradas y cae a la lista plana si el navegador no la
+    // tiene. Se lee AQUÍ, dentro del evento: el `dataTransfer` deja de ser
+    // legible en cuanto el manejador termina.
+    const dt = e.dataTransfer;
+    void desdeDrop(dt).then(({ archivos, truncado }) => startUpload(archivos, truncado));
   };
 
   const handleFilePicked = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files && e.target.files.length > 0 ? e.target.files[0] : null;
-    e.target.value = ''; // permite re-elegir el mismo archivo
-    if (file) void startUpload(file);
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = ''; // permite re-elegir lo mismo
+    if (files.length > 0) void startUpload(files.map((file) => ({ file, carpeta: '' })));
+  };
+
+  const handleFolderPicked = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? desdeInputDeCarpeta(e.target.files) : [];
+    e.target.value = '';
+    if (files.length > 0) void startUpload(files);
   };
 
   // --- focus trap ligero + Escape ---
@@ -1132,35 +1273,49 @@ export function DocumentsPanel({
             onAvisoVisto={onNotionAvisoVisto}
           />
 
-          {/* zona de subida */}
+          {/* zona de subida: archivos sueltos o carpetas enteras */}
           {(
             <div className="docs-upload">
-              {upload === null ? (
-                <button
-                  type="button"
-                  className={`dropzone ${dragOver ? 'dropzone-active' : ''}`}
-                  onClick={() => fileInputRef.current?.click()}
-                  onDragEnter={handleDragEnter}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
-                  aria-label="Subir un documento: arrastra un archivo aquí o pulsa para elegirlo"
-                >
-                  <IconUpload size={20} />
-                  <span className="dropzone-text">
-                    Arrastra un archivo o haz clic para subirlo
-                  </span>
-                  <span className="dropzone-hint">
-                    PDF, DOCX, XLSX, CSV, TXT o MD · máx. {limitMb} MB
-                  </span>
-                </button>
+              {cola === null ? (
+                <>
+                  <button
+                    type="button"
+                    className={`dropzone ${dragOver ? 'dropzone-active' : ''}`}
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragEnter={handleDragEnter}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    aria-label="Subir documentos: arrastra archivos o una carpeta aquí, o pulsa para elegirlos"
+                  >
+                    <IconUpload size={20} />
+                    <span className="dropzone-text">
+                      Arrastra archivos o una carpeta entera, o haz clic para elegirlos
+                    </span>
+                    <span className="dropzone-hint">
+                      PDF, DOCX, XLSX, CSV, TXT o MD · máx. {limitMb} MB por archivo
+                    </span>
+                  </button>
+                  <div className="dropzone-alt">
+                    ¿Los tienes en una carpeta?{' '}
+                    <button type="button" onClick={() => folderInputRef.current?.click()}>
+                      Elegir una carpeta
+                    </button>
+                  </div>
+                </>
               ) : (
                 <div className="upload-progress" role="status" aria-live="polite">
                   <div className="upload-progress-head">
-                    <span className="upload-file" title={upload.fileName}>
-                      {upload.fileName}
+                    <span className="upload-file">
+                      {cola.fase === 'preparando'
+                        ? plural(cola.total, 'archivo', 'archivos')
+                        : cola.fase === 'subiendo'
+                          ? `${Math.min(cola.hechos + 1, cola.total)} de ${plural(cola.total, 'archivo', 'archivos')}`
+                          : cola.cancelada
+                            ? 'Subida cancelada'
+                            : 'Subida terminada'}
                     </span>
-                    {upload.fase === 'subiendo' && (
+                    {cola.fase !== 'terminada' && (
                       <button
                         type="button"
                         className="upload-cancel"
@@ -1170,38 +1325,109 @@ export function DocumentsPanel({
                       </button>
                     )}
                   </div>
-                  <div className="upload-bar" aria-hidden="true">
-                    {upload.progress === null ? (
-                      <div className="upload-fill upload-fill-indeterminate" />
-                    ) : (
-                      <div
-                        className="upload-fill"
-                        style={{ transform: `scaleX(${Math.min(1, upload.progress)})` }}
-                      />
-                    )}
-                  </div>
-                  <span className="upload-status">
-                    {upload.fase === 'registrando' ? (
-                      <span className="shimmer-text">Registrando el documento…</span>
-                    ) : upload.progress === null ? (
-                      <span className="shimmer-text">Subiendo…</span>
-                    ) : upload.progress >= 1 ? (
-                      <span className="shimmer-text">Procesando la subida…</span>
-                    ) : (
-                      `Subiendo… ${Math.round(upload.progress * 100)} %`
-                    )}
-                  </span>
+                  {cola.fase !== 'terminada' && (
+                    <div className="upload-bar" aria-hidden="true">
+                      {cola.fase === 'preparando' || fraccionDeCola(cola) === null ? (
+                        <div className="upload-fill upload-fill-indeterminate" />
+                      ) : (
+                        <div
+                          className="upload-fill"
+                          style={{ transform: `scaleX(${fraccionDeCola(cola) ?? 0})` }}
+                        />
+                      )}
+                    </div>
+                  )}
+                  {cola.fase === 'preparando' && (
+                    <span className="upload-status">
+                      <span className="shimmer-text">Revisando los archivos…</span>
+                    </span>
+                  )}
+                  {cola.fase === 'subiendo' && (
+                    <span className="upload-status">
+                      {cola.enVuelo.length === 0 ? (
+                        <span className="shimmer-text">Registrando…</span>
+                      ) : (
+                        cola.enVuelo
+                          .map((v) =>
+                            v.progreso === null
+                              ? v.nombre
+                              : `${v.nombre} ${Math.round(v.progreso * 100)} %`,
+                          )
+                          .join(' · ')
+                      )}
+                    </span>
+                  )}
+                  {cola.fase === 'terminada' && (
+                    <>
+                      <span className="upload-status">
+                        {resumenDeTanda(cola.ok, cola.fallidos.length, cola.omitidos)}
+                        {cola.truncada && ' · la carpeta tenía más archivos: sube el resto aparte'}
+                      </span>
+                      <div className="upload-summary-actions">
+                        {(cola.omitidos.length > 0 || cola.fallidos.length > 0) && (
+                          <button
+                            type="button"
+                            className="doc-badge doc-badge-failed"
+                            onClick={() => setOmitidosAbiertos((v) => !v)}
+                            aria-expanded={omitidosAbiertos}
+                          >
+                            <IconAlert size={11} />
+                            Ver cuáles
+                            <IconChevronDown size={11} />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="doc-confirm-btn doc-confirm-no"
+                          onClick={() => setCola(null)}
+                        >
+                          Entendido
+                        </button>
+                      </div>
+                      {omitidosAbiertos && (
+                        <ul className="upload-summary-list">
+                          {cola.fallidos.map((f) => (
+                            <li key={`f-${f.nombre}`}>
+                              <code>{f.nombre}</code>: {f.motivo}
+                            </li>
+                          ))}
+                          {cola.omitidos.map((o, i) => (
+                            <li key={`o-${i}`}>
+                              <code>{o.carpeta ? `${o.carpeta}/` : ''}{o.nombre}</code>:{' '}
+                              {textoDeMotivo(o.motivo, limitMb)}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
 
               <input
                 ref={fileInputRef}
                 type="file"
+                multiple
                 accept=".pdf,.docx,.xlsx,.csv,.txt,.md"
                 style={{ display: 'none' }}
                 tabIndex={-1}
                 aria-hidden="true"
                 onChange={handleFilePicked}
+              />
+              {/* `webkitdirectory` no está en los tipos de React: se pone
+                  como atributo al montar. Sin `accept`: en modo carpeta el
+                  navegador lo ignora y el filtrado lo hace el plan. */}
+              <input
+                ref={(el) => {
+                  folderInputRef.current = el;
+                  el?.setAttribute('webkitdirectory', '');
+                }}
+                type="file"
+                multiple
+                style={{ display: 'none' }}
+                tabIndex={-1}
+                aria-hidden="true"
+                onChange={handleFolderPicked}
               />
 
               {uploadError !== null && (

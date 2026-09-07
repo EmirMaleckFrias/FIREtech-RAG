@@ -539,6 +539,9 @@ describe("documentos", () => {
       ingestadoEn: expect.any(Number),
       titulo: "Un paper",
       citation: null,
+      // El hash viaja al navegador para que subir una carpeta no repita lo
+      // que ya está con otro nombre.
+      sha256: "a".repeat(64),
       // Origen del fichero (subida o notion) y su página, desde la
       // sincronización con Notion; null en los registros anteriores.
       origen: null,
