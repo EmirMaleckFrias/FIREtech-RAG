@@ -1879,18 +1879,38 @@ textarea {
   margin: 1em 0;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--surface);
   scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  /* Sombras de desplazamiento sin JavaScript: dos gradientes que se mueven
+     con el contenido (`local`) tapan a otros dos fijos (`scroll`), así que
+     la sombra solo se ve en el lado hacia el que queda tabla por ver. Sin
+     esto una tabla más ancha que el mensaje parecía recortada. */
+  background:
+    linear-gradient(90deg, var(--surface) 40%, transparent) left / 28px 100% no-repeat local,
+    linear-gradient(270deg, var(--surface) 40%, transparent) right / 28px 100% no-repeat local,
+    linear-gradient(90deg, color-mix(in srgb, var(--text) 16%, transparent), transparent) left / 14px 100% no-repeat scroll,
+    linear-gradient(270deg, color-mix(in srgb, var(--text) 16%, transparent), transparent) right / 14px 100% no-repeat scroll,
+    var(--surface);
 }
 
+/* La tabla ocupa el ancho del mensaje y los párrafos largos ENVUELVEN dentro
+   de su celda, como en Claude. Con `min-width: max-content` (versión anterior)
+   la tabla se hacía tan ancha como su contenido sin envolver y había que
+   desplazarse para leer el resto de cada fila: se veía cortada.
+   `overflow-wrap: break-word` (y no `anywhere`) hace que al repartir el ancho
+   cada palabra cuente entera: un párrafo se parte por los espacios y una
+   etiqueta como "Reconocimiento" no se trocea por dentro. Se probó `anywhere`
+   y dejaba "Reconocimien / to" en la columna de etiquetas. El precio es que
+   una tabla con nombres de fichero crudos ("01_hipertension_arterial.pdf")
+   puede no caber: entonces se desplaza dentro del marco y la sombra lateral
+   lo avisa. El prompt del agente le pide no poner columnas de fichero. */
 .md table {
   border-collapse: collapse;
   width: 100%;
-  min-width: max-content;
   font-size: 0.95em;
   line-height: 1.55;
   word-break: normal;
-  overflow-wrap: normal;
+  overflow-wrap: break-word;
   hyphens: manual;
 }
 
@@ -1900,9 +1920,6 @@ textarea {
   border-bottom: 1px solid var(--border);
   vertical-align: top;
   text-align: left;
-  /* ancho tope por celda: una celda de texto largo envuelve por palabras,
-     no por letras, y la tabla no se hace infinita */
-  max-width: 34em;
 }
 
 .md th {
@@ -1928,9 +1945,14 @@ textarea {
   border-bottom: none;
 }
 
-/* un chip de cita en una celda no se parte ni se recorta */
+/* un chip de cita en una celda no se parte; su nombre de fichero se acorta
+   antes que en el texto corrido, que aquí el sitio es más justo */
 .md td .citation-chip {
   white-space: nowrap;
+}
+
+.md td .citation-file {
+  max-width: 120px;
 }
 
 /* ----------------------------------------------------------------------
