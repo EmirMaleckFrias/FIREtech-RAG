@@ -275,10 +275,10 @@ Variables de Convex Auth, también en el despliegue:
 
 | | |
 |---|---|
-| Formatos | `.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md`. `.doc` (Word 97-2003) se rechaza con un mensaje que dice cómo convertirlo. |
+| Formatos | `.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md`, y las imágenes `.jpg`, `.png`, `.webp` y `.gif`, que se leen por OCR. `.doc` (Word 97-2003) se rechaza con un mensaje que dice cómo convertirlo. Se pueden arrastrar carpetas enteras (con subcarpetas): lo que no se puede indexar se omite con su motivo, el mismo nombre en dos carpetas se renombra con la carpeta delante y el mismo contenido no se sube dos veces. |
 | Tamaño | `UPLOAD_LIMIT_MB`, 100 MB por defecto. El fichero va directo al almacenamiento por URL firmada (sin límite de tamaño, 2 minutos para subirlo); el techo lo pone la ingesta (512 MiB y 10 minutos por acción). |
 | Fragmentos por documento | Máximo 4000 (`MAX_CHUNKS`); por encima, la ingesta falla pidiendo dividir el archivo. Fragmentos de unos 400 tokens con solape de 60; texto por fragmento recortado a 8000 caracteres. |
-| PDF | Se leen las páginas a dos columnas en orden de lectura. Se descarta la bibliografía por defecto, las marcas de descarga y las cabeceras y pies repetidos. Se extraen título, primer autor, año y DOI para citar como "Autor et al., año". Un PDF escaneado sin texto extraíble se rechaza: no hay OCR. |
+| PDF | Se leen las páginas a dos columnas en orden de lectura. Se descarta la bibliografía por defecto, las marcas de descarga y las cabeceras y pies repetidos. Se extraen título, primer autor, año y DOI para citar como "Autor et al., año". Las páginas SIN texto propio (un escaneo) se leen por OCR con un modelo de visión por el AI Gateway (`OCR_MODEL`, por defecto `openai/gpt-5.4-mini`): solo esas páginas, con los píxeles reducidos antes de enviarlos y con caché por hash de la imagen, así que reindexar no vuelve a leer nada. Las imágenes incrustadas en un Word también se leen. `ENABLE_OCR=false` lo apaga. |
 | Word | Párrafos agrupados por sección (encabezado vigente) y una tabla por fragmento, con celdas combinadas resueltas. Sin páginas: se cita por sección o por número de fragmento. |
 | Excel y CSV | Detección de fila de encabezado y un fragmento por fila ("Campo: valor"), citado por número de fila. |
 | Texto y Markdown | Párrafos empaquetados con solape; se cita por número de fragmento. |
