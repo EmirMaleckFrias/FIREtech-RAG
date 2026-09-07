@@ -24,7 +24,10 @@ import {
   _cobertura,
   _tieneAfirmaciones,
   _trocear,
+  claveDeAfirmacion,
+  informeVacio,
   verificar,
+  veredictosDe,
   type Afirmacion,
   type Verificacion,
 } from "./verificador";
@@ -1083,5 +1086,80 @@ describe("varias citas seguidas", () => {
     expect(_tieneAfirmaciones("Los hallazgos son:")).toBe(false);
     expect(_tieneAfirmaciones(". \n- ")).toBe(false);
     expect(_tieneAfirmaciones("")).toBe(false);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Reutilización de veredictos entre rondas del mismo turno
+// ---------------------------------------------------------------------------
+describe("veredictos previos", () => {
+  const ch = frag("c1", "El AUC fue 0.94 en la cohorte de 300 pacientes.", "a.pdf", 3);
+
+  /** Un juez que dictamina "parcial" a todo lo que le llega y apunta qué le llegó. */
+  function juezQueApunta(pedidas: string[]) {
+    espia.mockImplementation(async (kwargs: Record<string, unknown>) => {
+      const payload = ultimoMensaje([kwargs]);
+      const lineas = [...payload.matchAll(/^\[(\d+)\] AFIRMACIÓN[^:]*: (.*)$/gm)];
+      for (const m of lineas) pedidas.push(m[2]);
+      return respuestaJson({ veredictos: lineas.map((m) => ({ i: Number(m[1]), veredicto: "parcial", motivo: "nueva" })) });
+    });
+  }
+
+  test("la misma frase con la misma cita no se vuelve a mandar al modelo; una frase nueva y una sin_verificar sí", async () => {
+    const previo = informeVacio({
+      afirmaciones: [
+        afirmacion({ texto: "El AUC fue 0.94", cita: cita(ch), veredicto: SOSTENIDA, motivo: "coincide", fragmentos: [ch._id] }),
+        afirmacion({ texto: "Nadie la juzgó", cita: cita(ch), veredicto: SIN_VERIFICAR, fragmentos: [ch._id] }),
+      ],
+    });
+    const previos = veredictosDe(previo);
+    // Solo los del modelo entran en el mapa: la sin_verificar se vuelve a preguntar.
+    expect([...previos.keys()]).toEqual([claveDeAfirmacion("El AUC fue 0.94", cita(ch))]);
+
+    const pedidas: string[] = [];
+    juezQueApunta(pedidas);
+    const tel = new Telemetria();
+    const r = await verificar(
+      `El AUC fue   0.94 ${cita(ch)}. Nadie la juzgó ${cita(ch)}. La cohorte tuvo 300 pacientes ${cita(ch)}.`,
+      [ch], null, null, tel, { veredictosPrevios: previos },
+    );
+    // Al modelo solo fueron la sin_verificar y la nueva; la reutilizada
+    // conserva veredicto y motivo aunque el redactor cambiara los espacios.
+    expect(pedidas).toEqual(["Nadie la juzgó", "La cohorte tuvo 300 pacientes"]);
+    expect(r.afirmaciones.map((a) => [a.texto, a.veredicto])).toEqual([
+      ["El AUC fue   0.94", SOSTENIDA],
+      ["Nadie la juzgó", PARCIAL],
+      ["La cohorte tuvo 300 pacientes", PARCIAL],
+    ]);
+    expect(r.afirmaciones[0].motivo).toBe("coincide");
+    expect(tel.contadores.veredictos_reutilizados).toBe(1);
+  });
+
+  test("ADVERSARIAL: la misma frase con OTRA cita no reutiliza nada: la cita es parte de la afirmación", async () => {
+    const otro = frag("c2", "Otro texto.", "otro.pdf", 7);
+    const previos = veredictosDe(
+      informeVacio({
+        afirmaciones: [afirmacion({ texto: "El AUC fue 0.94", cita: cita(ch), veredicto: SOSTENIDA, fragmentos: [ch._id] })],
+      }),
+    );
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "no_sostenida", motivo: "no consta" }] }));
+    const r = await verificar(`El AUC fue 0.94 ${cita(otro)}.`, [ch, otro], null, null, undefined, { veredictosPrevios: previos });
+    expect(espia).toHaveBeenCalledTimes(1);
+    expect(r.afirmaciones[0].veredicto).toBe(NO_SOSTENIDA);
+  });
+
+  test("con todo reutilizado no hay ninguna llamada al modelo y el informe sigue teniendo señal", async () => {
+    const previos = veredictosDe(
+      informeVacio({
+        afirmaciones: [afirmacion({ texto: "El AUC fue 0.94", cita: cita(ch), veredicto: SOSTENIDA, fragmentos: [ch._id] })],
+      }),
+    );
+    const r = await verificar(`El AUC fue 0.94 ${cita(ch)}.`, [ch], null, null, undefined, { veredictosPrevios: previos });
+    expect(espia).not.toHaveBeenCalled();
+    expect(r.afirmaciones).toHaveLength(1);
+    expect(r.fidelidad).toBe(1);
+    expect(r.ok).toBe(true);
+    expect(revisor.sinSenal(r)).toBe(false);
   });
 });

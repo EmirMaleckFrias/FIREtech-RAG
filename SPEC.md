@@ -502,12 +502,27 @@ Flujo, bajo un tope `min(PRE_RESPONSE_REVIEW_TIMEOUT_S, lo que quede del reloj t
    con la política anterior, una respuesta con 22 afirmaciones sostenidas y 4 sin respaldo
    acababa entera en abstención segura. `parcial` y `sin_verificar` no bloquean ni se
    recortan.
-6. Si el recorte no deja nada verificable, no se localiza alguna frase, vence el tope, no hay
-   señal del verificador o algo lanza: **abstención segura**, verificada también
-   para que traiga cobertura. El resultado lleva `motivoAbstencion` (`borrador_vacio`,
-   `sin_senal`, `rechazada_tras_correccion`, `timeout` o `error`) y `informeBorrador`, el
-   último informe real del borrador o de su corrección; el bucle los guarda en
-   `metrics.meta.barrera` para que una abstención se pueda diagnosticar.
+6. **Tope con un borrador ya verificado.** Si el reloj vence (o la corrección lanza) DESPUÉS
+   de que el verificador haya juzgado un borrador, se publica ese último borrador verificado
+   recortado de sus frases bloqueantes y de las citas que no resolvían, con el informe de las
+   afirmaciones que quedan (recalculados fidelidad y cobertura) y una nota que lo dice; el
+   resultado lleva `publicadaTrasTope: true` y el bucle anota
+   `metrics.meta.barrera.publicada_recortada`. No hay verificación nueva del texto recortado:
+   solo quita frases enteras ya juzgadas. Medido: la misma pregunta que había salido con 52
+   afirmaciones comprobadas acabó dos veces en abstención por `timeout` con evidencia en los
+   cinco puntos, porque el verificador tardó 167 s en vez de 40.
+7. Si el recorte no deja nada verificable, no se localiza alguna frase, vence el tope antes de
+   la primera verificación, no hay señal del verificador o algo lanza sin candidato:
+   **abstención segura**, verificada también para que traiga cobertura. El resultado lleva
+   `motivoAbstencion` (`borrador_vacio`, `sin_senal`, `rechazada_tras_correccion`, `timeout` o
+   `error`) y `informeBorrador`, el último informe real del borrador o de su corrección; el
+   bucle los guarda en `metrics.meta.barrera` para que una abstención se pueda diagnosticar.
+
+Las rondas **reutilizan los veredictos**: una afirmación cuya frase y cita no cambiaron entre
+el borrador y su corrección no se vuelve a mandar al verificador (clave: texto con espacios
+colapsados más la cita; solo veredictos del modelo, nunca `sin_verificar`). Es lo que hace que
+la segunda y tercera verificación de un turno cuesten solo lo que el redactor tocó. Contador:
+`veredictos_reutilizados`.
 
 Abstención segura, literal: "No puedo ofrecer una respuesta verificable con la evidencia
 recuperada. No encuentro respaldo suficiente en los documentos para responder con la fidelidad

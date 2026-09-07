@@ -656,6 +656,12 @@ export const correr = internalAction({
         revisiones = r.revisiones;
         abstencionSegura = r.usoAbstencionSegura;
         if (revisiones) tel.incr("respuestas_revisadas");
+        if (r.publicadaTrasTope) {
+          // El reloj (o un fallo de la corrección) cortó la revisión con un
+          // borrador ya verificado: se publicó recortado en vez de abstener.
+          // Queda anotado para medir cuántas respuestas salen por aquí.
+          tel.fija({ barrera: { motivo: "tope_con_borrador_verificado", publicada_recortada: true } });
+        }
         if (r.frasesEliminadas?.length) {
           // Última barrera antes de la abstención: se publicó el texto SIN
           // las frases que no se pudieron sostener. Queda contado y listado

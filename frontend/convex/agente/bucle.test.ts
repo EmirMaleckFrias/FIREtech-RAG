@@ -306,7 +306,7 @@ function cobertura(id: string, estado: CoberturaPunto["estado"]): CoberturaPunto
   return { id, evidence_needed: `dato ${id}`, estado, n_fragmentos: 1, documentos: ["a.pdf"], afirmaciones: [] };
 }
 function aprobar(borrador: string, informe = informeVacio()): revisor.ResultadoRevision {
-  return { contenido: borrador, informe, revisiones: 0, usoAbstencionSegura: false, motivoAbstencion: null, informeBorrador: null, frasesEliminadas: [] };
+  return { contenido: borrador, informe, revisiones: 0, usoAbstencionSegura: false, motivoAbstencion: null, informeBorrador: null, frasesEliminadas: [], publicadaTrasTope: false };
 }
 function abstenerse(motivo = "rechazada_tras_correccion"): revisor.ResultadoRevision {
   return {
@@ -316,6 +316,7 @@ function abstenerse(motivo = "rechazada_tras_correccion"): revisor.ResultadoRevi
     usoAbstencionSegura: true,
     motivoAbstencion: motivo,
     informeBorrador: informeVacio({ ok: false, nota: "el borrador no se sostenía" }),    frasesEliminadas: [],
+    publicadaTrasTope: false,
   };
 }
 

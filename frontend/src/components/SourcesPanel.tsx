@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useSheetDrag } from '../lib/useSheetDrag';
-import { ANCLA } from '../lib/cobertura';
+import { piezasDeMeta, tituloDeFuente } from '../lib/fuentes';
 import { citationFileKey, citationPages, extractCitations } from '../lib/markdown';
-import type { ChatMessage, PlanItem, Source, SourceFocus } from '../types';
+import type { ChatMessage, Source, SourceFocus } from '../types';
 import { IconChevronDown, IconDocument } from './icons';
 
 interface SourcesPanelProps {
@@ -119,13 +119,6 @@ function scorePercent(score: number | null): number | null {
   return Math.round(clamped * 100);
 }
 
-/** Título de la tarjeta: la referencia del trabajo si se conoce.
- *  Para quien investiga, "Allegri et al., 2021" identifica la fuente; el
- *  nombre del archivo es solo dónde está guardada. */
-function cardTitle(s: Source): string {
-  return s.citation || s.title || s.source_file;
-}
-
 /** Badge del tipo de fragmento (solo los que aportan contexto). */
 function chunkBadge(chunkType: string | undefined): string | null {
   if (chunkType === 'table') return 'Tabla';
@@ -138,24 +131,6 @@ function gradoLabel(grado: Source['grado']): string | null {
   if (grado === 'directa') return 'Directa';
   if (grado === 'parcial') return 'Parcial';
   return null;
-}
-
-/** Puntos del plan a los que sirvio la fuente, sin el ancla e0 (la pregunta
- *  entera): "sirvio para 1 punto" siendo ese punto la propia pregunta no
- *  informa de nada. Devuelve el texto corto y el tooltip con los
- *  evidence_needed cuando se conoce el plan (mensaje de esta sesion). */
-function sirvioPara(
-  s: Source,
-  plan: PlanItem[],
-): { texto: string; tooltip: string } | null {
-  const ids = (s.plan_items ?? []).filter((id) => id !== ANCLA);
-  if (ids.length === 0) return null;
-  const porId = new Map(plan.map((p) => [p.id, p.evidence_needed]));
-  const nombres = ids.map((id) => porId.get(id)).filter((x): x is string => !!x);
-  return {
-    texto: `sirvio para ${ids.length} ${ids.length === 1 ? 'punto' : 'puntos'}`,
-    tooltip: nombres.length > 0 ? nombres.join('\n') : 'Puntos del plan de evidencia',
-  };
 }
 
 function prefersReducedMotion(): boolean {
@@ -271,32 +246,15 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
 
   const renderCard = (item: SourceItem) => {
     const s = item.source;
-    const title = cardTitle(s);
-    const titleIsFile = title === s.source_file;
+    const title = tituloDeFuente(s);
     const badge = chunkBadge(s.chunk_type);
     const isOpen = expandedCards.has(item.key);
     const dimmed = citedCount > 0 && !item.cited;
     const pct = scorePercent(s.score);
     const grado = gradoLabel(s.grado);
-    const puntos = sirvioPara(s, plan);
-
-    // Subtítulo archivo, páginas y contexto documental.
-    const metaParts: { text: string; className?: string; title?: string }[] = [];
-    if (!titleIsFile) {
-      metaParts.push({ text: s.source_file, className: 'source-meta-file', title: s.source_file });
-    }
-    // El localizador lo decide el backend segun el formato: un .docx no tiene
-    // paginas, asi que la UI no debe inventarse un "pag. N".
-    const locator = s.locator || (s.page !== null ? `pág. ${s.page}` : '');
-    if (locator) metaParts.push({ text: locator });
-    if (s.section && locator !== `sección: ${s.section}`) {
-      metaParts.push({ text: s.section });
-    }
-    if (s.document_type) metaParts.push({ text: s.document_type });
-    if (s.language) metaParts.push({ text: s.language });
-    if (puntos !== null) {
-      metaParts.push({ text: puntos.texto, className: 'source-meta-plan', title: puntos.tooltip });
-    }
+    // De dónde sale y para qué sirvió, sin repetir lo que ya dice el título
+    // (ver lib/fuentes.ts).
+    const meta = piezasDeMeta(s, plan, title);
 
     return (
       <div
@@ -334,15 +292,24 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
               )}
               {badge !== null && <span className="badge-type">{badge}</span>}
             </span>
-            {metaParts.length > 0 && (
+            {/* Las piezas van cada una en su caja y la fila las deja pasar
+                de línea: en 320 px, un `flex` sin envoltura las aplastaba por
+                debajo de su contenido y el texto se pintaba encima de la
+                vecina. El separador es hermano, no hijo, para que el nombre
+                del fichero pueda recortarse sin llevárselo. */}
+            {meta.length > 0 && (
               <span className="source-meta">
-                {metaParts.map((part, i) => (
-                  <span key={i} className="source-meta-item">
-                    {i > 0 && <span className="source-sep">·</span>}
-                    <span className={part.className} title={part.title}>
-                      {part.text}
+                {meta.map((pieza, i) => (
+                  <Fragment key={i}>
+                    {i > 0 && (
+                      <span className="source-sep" aria-hidden="true">
+                        ·
+                      </span>
+                    )}
+                    <span className={`source-meta-item ${pieza.clase ?? ''}`} title={pieza.titulo}>
+                      {pieza.texto}
                     </span>
-                  </span>
+                  </Fragment>
                 ))}
               </span>
             )}

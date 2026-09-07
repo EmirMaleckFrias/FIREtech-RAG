@@ -66,7 +66,7 @@ export const CITA_NO_RESUELVE = "cita_no_resuelve";
 export const SIN_CITA = "sin_cita";
 export const SIN_VERIFICAR = "sin_verificar";
 
-const VEREDICTOS_MODELO: ReadonlySet<string> = new Set([SOSTENIDA, NO_SOSTENIDA, PARCIAL]);
+export const VEREDICTOS_MODELO: ReadonlySet<string> = new Set([SOSTENIDA, NO_SOSTENIDA, PARCIAL]);
 
 // Estados de cobertura de un punto del plan (contrato compartido con el
 // frontend y con el revisor). Los calcula código, no el modelo. `PARCIAL` se
@@ -215,7 +215,7 @@ function afirmacion(campos: Partial<Afirmacion> & { texto: string; cita: string 
   };
 }
 
-function informeVacio(campos: Partial<Verificacion> = {}): Verificacion {
+export function informeVacio(campos: Partial<Verificacion> = {}): Verificacion {
   return {
     afirmaciones: [],
     evidencia_sin_cubrir: [],
@@ -734,7 +734,7 @@ export function _cobertura(
  *  Se aplica también a la abstención completa, al inventario y a la
  *  respuesta sin citas: la médica tiene que ver, incluso cuando el sistema
  *  se abstiene, qué puntos tenían evidencia recuperada y cuáles no. */
-function conCobertura(
+export function conCobertura(
   informe: Verificacion,
   evidenciaRequerida: Record<string, string> | null | undefined,
   mapaPlan: Record<string, string[]> | null | undefined,
@@ -760,15 +760,49 @@ function conCobertura(
  *  `mapaPlan` es `_id` del fragmento -> ids de los puntos que lo recuperaron;
  *  con él la cobertura se calcula POR PUNTO (ver `_cobertura`); sin él se
  *  conserva la lectura antigua, todo o nada. e0 se excluye de la cobertura. */
+/** Clave con la que un veredicto se puede reutilizar: la misma frase con la
+ *  misma cita es la misma afirmación, la juzgue quien la juzgue. Espacios
+ *  colapsados para que un reformateo del redactor no la haga distinta. */
+export function claveDeAfirmacion(texto: string, cita: string): string {
+  return `${texto.replace(/\s+/g, " ").trim()}|${cita.replace(/\s+/g, " ").trim()}`;
+}
+
+/** Los veredictos del modelo de un informe, por clave de afirmación. Solo los
+ *  del modelo (sostenida, parcial, no_sostenida): un `sin_verificar` es una
+ *  afirmación que NO se juzgó y hay que volver a preguntar; los
+ *  deterministas (sin cita, cita que no resuelve) se recalculan solos. */
+export function veredictosDe(informe: Verificacion): Map<string, Afirmacion> {
+  const salida = new Map<string, Afirmacion>();
+  for (const af of informe.afirmaciones) {
+    if (VEREDICTOS_MODELO.has(af.veredicto)) salida.set(claveDeAfirmacion(af.texto, af.cita), af);
+  }
+  return salida;
+}
+
+export interface OpcionesVerificacion {
+  /** Veredictos de verificaciones anteriores del MISMO turno (las rondas de
+   *  corrección de la revisión previa). Una afirmación cuya frase y cita no
+   *  han cambiado no se vuelve a mandar al modelo: se reutiliza su veredicto.
+   *
+   *  Medido el 7 sep 2026: cada ronda de corrección volvía a juzgar las ~50
+   *  afirmaciones enteras aunque el redactor solo hubiera tocado una o dos, y
+   *  el verificador sumaba 167 s en un turno que acabó venciendo el tope de la
+   *  revisión. La misma frase con la misma cita contra los mismos fragmentos
+   *  es la misma pregunta al juez; repetirla es tiempo, no seguridad. */
+  veredictosPrevios?: ReadonlyMap<string, Afirmacion>;
+}
+
 export async function verificar(
   respuesta: string,
   fragmentos: Fragmento[],
   evidenciaRequerida: Record<string, string> | null = null,
   mapaPlan: Record<string, string[]> | null = null,
   tel?: Telemetria,
+  opciones: OpcionesVerificacion = {},
 ): Promise<Verificacion> {
   const a = ajustes();
   const t = tel ?? new Telemetria();
+  const previos = opciones.veredictosPrevios;
   const { trozos, hayCitas } = _trocear(respuesta);
 
   if (!hayCitas) {
@@ -831,6 +865,7 @@ export async function verificar(
   const pendientes: Pendiente[] = [];
   const citasSinResolver: string[] = [];
   let haySinCita = false;
+  let reutilizadas = 0;
 
   for (const trozo of trozos) {
     const { texto } = trozo;
@@ -884,9 +919,18 @@ export async function verificar(
       fragmento_id: cita(hermanos[0]),
       fragmentos: hermanos.map((c) => c._id),
     });
+    // Ya juzgada en una ronda anterior con la misma frase y la misma cita:
+    // se reutiliza el veredicto y no se manda al modelo.
+    const previo = previos?.get(claveDeAfirmacion(texto, trozo.cita));
+    if (previo && VEREDICTOS_MODELO.has(previo.veredicto)) {
+      afirmaciones.push({ ...af, veredicto: previo.veredicto, motivo: previo.motivo });
+      reutilizadas += 1;
+      continue;
+    }
     pendientes.push({ pos: afirmaciones.length, af, fragmentos: hermanos });
     afirmaciones.push(af);
   }
+  if (reutilizadas) t.incr("veredictos_reutilizados", reutilizadas);
 
   let nota = "";
   let ok = !haySinCita;

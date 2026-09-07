@@ -56,6 +56,11 @@ export interface ResultadoRevision {
   /** Frases que la eliminación determinista quitó del texto publicado por no
    *  poder sostenerse con la evidencia (vacío si no hizo falta o se abstuvo). */
   frasesEliminadas: string[];
+  /** La revisión venció su tope (o la corrección lanzó) DESPUÉS de haber
+   *  verificado un borrador, y lo que se publica es ese borrador recortado
+   *  de sus frases bloqueantes, sin una nueva ronda de verificación. Ver
+   *  `_publicarLoVerificado`. */
+  publicadaTrasTope: boolean;
 }
 
 // Veredictos que son una ATRIBUCIÓN FALSA: la respuesta apunta a una fuente
@@ -524,6 +529,7 @@ function publicada(
   informe: Verificacion,
   revisiones: number,
   frasesEliminadas: string[],
+  publicadaTrasTope = false,
 ): ResultadoRevision {
   return {
     contenido,
@@ -533,7 +539,94 @@ function publicada(
     motivoAbstencion: null,
     informeBorrador: null,
     frasesEliminadas,
+    publicadaTrasTope,
   };
+}
+
+/** Un texto que ya pasó por el verificador, con su informe. */
+interface Candidato {
+  texto: string;
+  informe: Verificacion;
+  /** Rondas de corrección que llevaba. */
+  revisiones: number;
+}
+
+/**
+ * Lo que se publica cuando el reloj vence (o la corrección lanza) con un
+ * borrador YA verificado en la mano: ese borrador sin sus frases bloqueantes.
+ *
+ * Por qué existe. Medido el 7 sep 2026 en el despliegue con "háblame
+ * profundamente de la hipertensión arterial": la misma pregunta que minutos
+ * antes había salido con 52 afirmaciones comprobadas acabó dos veces seguidas
+ * en la abstención segura por `timeout`, con evidencia recuperada en los
+ * cinco puntos del plan y un borrador que el verificador ya había juzgado.
+ * El verificador tardó 167 s en vez de 40 (variación del gateway), la ronda
+ * de corrección no llegó a tiempo, y el tope tiraba TODO el trabajo: la
+ * médica recibía "no puedo ofrecer una respuesta verificable" sobre un
+ * documento que sí respondía.
+ *
+ * La garantía no cambia: cada frase que se publica fue juzgada por el
+ * verificador (sostenida, parcial o sin veredicto, nunca bloqueante), y las
+ * citas que no resolvían se quitan. Lo que NO se hace es la verificación del
+ * texto recortado, que es la que no cabe en el reloj; el recorte solo quita
+ * frases enteras y citas sueltas, así que las afirmaciones que quedan son las
+ * mismas que ya se juzgaron. Si el recorte no puede hacerse limpio (una frase
+ * bloqueante que no se localiza, una cita que no se puede quitar, nada con
+ * contenido, o un informe sin señal), se mantiene la abstención de antes.
+ */
+export function _publicarLoVerificado(
+  candidato: Candidato,
+  motivo: string,
+  evidenciaRequerida: Record<string, string> | null,
+  mapaPlan: Record<string, string[]> | null,
+  fragmentos: Fragmento[],
+): ResultadoRevision | null {
+  const { texto, informe } = candidato;
+  if (sinSenal(informe)) return null;
+  const recorte = _recortar(texto, informe);
+  if (!recorte || !TIENE_CONTENIDO.test(recorte.texto)) return null;
+  // Toda cita que no resolvía tiene que haber salido del texto: una que
+  // quede es una atribución a una fuente que no existe, y eso no se publica.
+  const quitadas = new Set(recorte.citasQuitadas);
+  if (informe.citas_sin_resolver.some((c) => !quitadas.has(c) && recorte.texto.includes(c))) return null;
+
+  const eliminadas = new Set(recorte.eliminadas);
+  const afirmaciones = informe.afirmaciones.filter((af) => !eliminadas.has(af.texto));
+  if (afirmaciones.some((af) => BLOQUEANTES.has(af.veredicto))) return null;
+  const juzgadas = afirmaciones.filter((af) => verificador.VEREDICTOS_MODELO.has(af.veredicto));
+  const fidelidad = juzgadas.length
+    ? juzgadas.filter((af) => af.veredicto === verificador.SOSTENIDA).length / juzgadas.length
+    : null;
+  const partes = [
+    motivo === "timeout"
+      ? "la corrección no terminó dentro del tiempo: se publica el borrador ya verificado"
+      : "la corrección falló: se publica el borrador ya verificado",
+  ];
+  if (recorte.eliminadas.length) {
+    partes.push(
+      `se ${recorte.eliminadas.length === 1 ? "eliminó" : "eliminaron"} ` +
+        `${contar(recorte.eliminadas.length, "frase", "frases")} por no poder sostenerse con la evidencia`,
+    );
+  }
+  if (recorte.citasQuitadas.length) {
+    partes.push(
+      `se ${recorte.citasQuitadas.length === 1 ? "quitó" : "quitaron"} ` +
+        `${contar(recorte.citasQuitadas.length, "cita", "citas")} que no correspondían a ningún fragmento recuperado`,
+    );
+  }
+  const informeRecortado = verificador.conCobertura(
+    verificador.informeVacio({
+      afirmaciones,
+      citas_sin_resolver: [],
+      fidelidad,
+      ok: true,
+      nota: partes.join("; "),
+    }),
+    evidenciaRequerida,
+    mapaPlan,
+    fragmentos,
+  );
+  return publicada(recorte.texto, informeRecortado, candidato.revisiones, recorte.eliminadas, true);
 }
 
 /** Verifica, corrige y vuelve a verificar antes de liberar texto.
@@ -589,7 +682,7 @@ export async function revisarAntesDePublicar(
     return {
       contenido: ABSTENCION_SEGURA, informe: informeVacio, revisiones: 0,
       usoAbstencionSegura: true, motivoAbstencion: "borrador_vacio", informeBorrador: null,
-      frasesEliminadas: [],
+      frasesEliminadas: [], publicadaTrasTope: false,
     };
   }
 
@@ -599,10 +692,25 @@ export async function revisarAntesDePublicar(
 
   let motivo: string | null = null;
   let ultimoInforme: Verificacion | null = null;
+  // El último texto que el verificador llegó a juzgar, con su informe. Si el
+  // reloj vence a mitad de la corrección, es lo que se publica recortado.
+  let candidato: Candidato | null = null;
+  // Veredictos acumulados de las rondas de este turno: una frase que la
+  // corrección no toca no se vuelve a juzgar (ver
+  // verificador.OpcionesVerificacion.veredictosPrevios).
+  const conocidos = new Map<string, Afirmacion>();
+  const verificar = async (texto: string): Promise<Verificacion> => {
+    const informe = await verificador.verificar(texto, fragmentos, evidenciaRequerida, mapaPlan, t, {
+      veredictosPrevios: conocidos,
+    });
+    for (const [k, af] of verificador.veredictosDe(informe)) conocidos.set(k, af);
+    return informe;
+  };
   try {
     const resultado = await conTope(tope * 1000, async (): Promise<ResultadoRevision | null> => {
-      let informe = await verificador.verificar(borrador, fragmentos, evidenciaRequerida, mapaPlan, t);
+      let informe = await verificar(borrador);
       ultimoInforme = informe;
+      candidato = { texto: borrador, informe, revisiones: 0 };
       if (aprobada(informe)) return publicada(borrador, informe, 0, []);
       // `ok=false` también se usa para una respuesta factual sin citas: ese
       // es un veredicto determinista y SÍ se puede corregir.
@@ -624,8 +732,9 @@ export async function revisarAntesDePublicar(
         actual = await _corregir(pregunta, actual, mensajesConEvidencia, informe, a, t, {
           ordenarBorrado: ronda === maxRevisiones && ronda >= 2,
         });
-        informe = await verificador.verificar(actual, fragmentos, evidenciaRequerida, mapaPlan, t);
+        informe = await verificar(actual);
         ultimoInforme = informe;
+        candidato = { texto: actual, informe, revisiones: ronda };
         if (aprobada(informe)) return publicada(actual, informe, ronda, []);
       }
 
@@ -640,9 +749,9 @@ export async function revisarAntesDePublicar(
         motivo = "rechazada_tras_correccion";
         return null;
       }
-      const informeRecorte = await verificador.verificar(
-        recorte.texto, fragmentos, evidenciaRequerida, mapaPlan, t,
-      );
+      // Con los veredictos reutilizados, verificar el recorte es casi
+      // gratis: sus frases son las mismas que ya se juzgaron.
+      const informeRecorte = await verificar(recorte.texto);
       ultimoInforme = informeRecorte;
       if (!aprobada(informeRecorte)) {
         motivo = "rechazada_tras_correccion";
@@ -672,6 +781,23 @@ export async function revisarAntesDePublicar(
     if (resultado) return resultado;
   } catch (exc) {
     if (!motivo) motivo = /superó su tope/.test(String(exc)) ? "timeout" : "error";
+    // Con un borrador ya verificado en la mano, el reloj o un fallo de la
+    // corrección no tiran el trabajo: se publica recortado (ver
+    // `_publicarLoVerificado`). Sin candidato (el reloj venció durante la
+    // primera verificación), abstención como siempre.
+    if ((motivo === "timeout" || motivo === "error") && candidato !== null) {
+      const salvado = _publicarLoVerificado(candidato, motivo, evidenciaRequerida, mapaPlan, fragmentos);
+      if (salvado) {
+        t.incr("publicadas_tras_tope");
+        t.incr("frases_eliminadas", salvado.frasesEliminadas.length);
+        console.warn(
+          `Revisión previa cortada (${motivo}); se publica el borrador verificado` +
+            (salvado.frasesEliminadas.length ? ` sin ${salvado.frasesEliminadas.length} frase(s)` : "") +
+            `.`,
+        );
+        return salvado;
+      }
+    }
     console.warn(`Revisión previa no disponible; abstención segura (${motivo}: ${String(exc)}).`);
   }
 
@@ -686,5 +812,6 @@ export async function revisarAntesDePublicar(
     motivoAbstencion: motivo ?? "rechazada_tras_correccion",
     informeBorrador: ultimoInforme,
     frasesEliminadas: [],
+    publicadaTrasTope: false,
   };
 }

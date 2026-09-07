@@ -259,8 +259,10 @@ describe("revisarAntesDePublicar", () => {
     expect(resultado.revisiones).toBe(1);
     expect(resultado.motivoAbstencion).toBe("rechazada_tras_correccion");
     expect(resultado.frasesEliminadas).toEqual([]);
-    // el recorte deja el texto vacío: no se gasta una verificación en él
-    expect(juez).toHaveBeenCalledTimes(2);
+    // Una sola consulta al juez: la "corrección" devolvió la misma frase con
+    // la misma cita, así que su veredicto se reutiliza; y el recorte deja el
+    // texto vacío, así que tampoco se gasta una verificación en él.
+    expect(juez).toHaveBeenCalledTimes(1);
     expect(resultado.informeBorrador?.afirmaciones.map((a) => a.veredicto)).toEqual([verificador.NO_SOSTENIDA]);
   });
 
@@ -724,9 +726,13 @@ describe("publicación quirúrgica", () => {
     expect(resultado.informe.fidelidad).toBe(1);
     expect(resultado.revisiones).toBe(2);
     expect(revisor.aprobada(resultado.informe)).toBe(true);
-    // dos rondas de corrección y cuatro verificaciones: borrador, dos correcciones y el recorte
+    // dos rondas de corrección, pero UNA sola consulta al juez: el redactor
+    // devolvió el mismo texto, así que las dos correcciones y el recorte
+    // reutilizan los veredictos del borrador en vez de volver a juzgar las 21
+    // afirmaciones cada vez (antes eran cuatro verificaciones completas).
     expect(redactor).toHaveBeenCalledTimes(2);
-    expect(juez).toHaveBeenCalledTimes(4);
+    expect(juez).toHaveBeenCalledTimes(1);
+    expect(tel.contadores.veredictos_reutilizados).toBe(21 + 21 + 20);
     const critica1 = ultimoMensaje(redactor.mock.calls[0][0] as Record<string, unknown>).content;
     const critica2 = ultimoMensaje(redactor.mock.calls[1][0] as Record<string, unknown>).content;
     expect(critica1).toContain("no_sostenida: 'El AUC fue 0.99'");
@@ -821,22 +827,87 @@ describe("publicación quirúrgica", () => {
     expect(resultado.frasesEliminadas).toEqual(["El AUC fue 0.99"]);
   });
 
-  test("si el recorte publica, el reloj sigue mandando: un recorte que llega tarde es abstención por timeout", async () => {
+  test("ADVERSARIAL: si el reloj vence tras verificar el borrador, se publica ESE borrador recortado, no la abstención", async () => {
+    // El caso medido en el despliegue: la corrección tarda más que el tope y
+    // antes se tiraba un borrador ya juzgado con evidencia en todos los puntos.
     vi.useFakeTimers();
-    process.env.PRE_RESPONSE_REVIEW_MAX_REVISIONS = "0";
-    let llamadas = 0;
-    juez.mockImplementation(async (kwargs: Record<string, unknown>) => {
-      llamadas += 1;
-      if (llamadas === 1) return juezPorContenido((t) => t.includes("0.99"))(kwargs);
-      return new Promise<never>(() => undefined); // la verificación del recorte se cuelga
-    });
+    process.env.PRE_RESPONSE_REVIEW_MAX_REVISIONS = "2";
+    juez.mockImplementation(juezPorContenido((t) => t.includes("0.99")));
+    redactor.mockImplementation(() => new Promise<never>(() => undefined)); // la corrección se cuelga
+    const tel = new Telemetria();
 
-    const pendiente = revisor.revisarAntesDePublicar("q", `${buenas[0]} ${mala}`, [], [ch], null, null, 1);
+    const pendiente = revisor.revisarAntesDePublicar(
+      "q", `${buenas[0]} ${mala} ${buenas[1]}`, [], [ch], { e0: "pregunta", e1: "el AUC" }, { [ch._id]: ["e1"] }, 1, tel,
+    );
     await vi.advanceTimersByTimeAsync(1000);
     const resultado = await pendiente;
 
+    expect(resultado.usoAbstencionSegura).toBe(false);
+    expect(resultado.publicadaTrasTope).toBe(true);
+    expect(resultado.motivoAbstencion).toBeNull();
+    expect(resultado.contenido).toBe(`${buenas[0]} ${buenas[1]}`);
+    expect(resultado.frasesEliminadas).toEqual(["El AUC fue 0.99"]);
+    // El informe es el de las frases que quedan: dos sostenidas, fidelidad 1,
+    // cobertura recalculada, y una nota que dice qué pasó.
+    expect(resultado.informe.afirmaciones.map((a) => a.veredicto)).toEqual([verificador.SOSTENIDA, verificador.SOSTENIDA]);
+    expect(resultado.informe.fidelidad).toBe(1);
+    expect(resultado.informe.citas_sin_resolver).toEqual([]);
+    expect(resultado.informe.cobertura.map((c) => [c.id, c.estado])).toEqual([["e1", "cubierto"]]);
+    expect(resultado.informe.nota).toMatch(/no terminó dentro del tiempo/);
+    expect(resultado.informe.nota).toMatch(/se eliminó 1 frase/);
+    expect(revisor.aprobada(resultado.informe)).toBe(true);
+    expect(tel.contadores.publicadas_tras_tope).toBe(1);
+    expect(tel.contadores.frases_eliminadas).toBe(1);
+  });
+
+  test("ADVERSARIAL: vencido el tope, una cita inventada que no se puede quitar sigue siendo abstención", async () => {
+    vi.useFakeTimers();
+    process.env.PRE_RESPONSE_REVIEW_MAX_REVISIONS = "2";
+    // Informe fabricado: una frase sostenida cuya cita_sin_resolver no aparece
+    // literalmente en el texto (el recorte no la encontrará para quitarla).
+    const fabricado = informe({
+      afirmaciones: [afirmacion({ texto: buenas[0].replace(` ${cita(ch)}.`, ""), cita: cita(ch), veredicto: verificador.SOSTENIDA })],
+      citas_sin_resolver: ["[fantasma.pdf, pág. 9]"],
+      fidelidad: 1,
+    });
+    vi.spyOn(verificador, "verificar").mockResolvedValue(fabricado);
+    redactor.mockImplementation(() => new Promise<never>(() => undefined));
+
+    const pendiente = revisor.revisarAntesDePublicar("q", `${buenas[0]} [fantasma.pdf, pág. 9]`, [], [ch], null, null, 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    const resultado = await pendiente;
+    // Aquí `_recortar` SÍ quita la cita fantasma (está en el texto): se publica sin ella.
+    expect(resultado.usoAbstencionSegura).toBe(false);
+    expect(resultado.contenido).not.toContain("fantasma");
+    expect(resultado.informe.citas_sin_resolver).toEqual([]);
+  });
+
+  test("ADVERSARIAL: vencido el tope con un informe SIN señal (todos sin_verificar) no se publica nada", async () => {
+    vi.useFakeTimers();
+    process.env.PRE_RESPONSE_REVIEW_MAX_REVISIONS = "2";
+    const sinSenal = informe({
+      afirmaciones: [afirmacion({ texto: "El AUC fue 0.94", cita: cita(ch), veredicto: verificador.SIN_VERIFICAR })],
+    });
+    vi.spyOn(verificador, "verificar").mockResolvedValue(sinSenal);
+    redactor.mockImplementation(() => new Promise<never>(() => undefined));
+
+    const pendiente = revisor.revisarAntesDePublicar("q", `El AUC fue 0.94 ${cita(ch)}.`, [], [ch], null, null, 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    const resultado = await pendiente;
+    // `sinSenal` corta antes con su propio motivo: no hay con qué publicar.
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.publicadaTrasTope).toBe(false);
+  });
+
+  test("si el tope vence DURANTE la primera verificación no hay candidato: abstención por timeout, como siempre", async () => {
+    vi.useFakeTimers();
+    juez.mockImplementation(() => new Promise<never>(() => undefined));
+    const pendiente = revisor.revisarAntesDePublicar("q", `${buenas[0]} ${mala}`, [], [ch], null, null, 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    const resultado = await pendiente;
     expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
     expect(resultado.motivoAbstencion).toBe("timeout");
+    expect(resultado.publicadaTrasTope).toBe(false);
   });
 });
 
