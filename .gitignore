@@ -33,3 +33,6 @@ Thumbs.db
 .vscode/
 # Reportes de evaluación pueden contener preguntas o respuestas sensibles.
 backend/evals/results/
+
+# node_modules en cualquier nivel (la raiz tambien: vitest deja resultados ahi)
+node_modules/
