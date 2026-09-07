@@ -9,6 +9,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { ajustes } from "./lib/config";
 
 const CORREO_PRUEBAS = "pruebas@airobotix.net";
 
@@ -271,11 +272,12 @@ export const borrarDocumentoDePrueba = internalMutation({
  *  como si fueran uso real. Los mensajes se borran por lotes con la mutación
  *  interna de `mensajes`. */
 export const borrarUsuarioDePrueba = internalMutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { email: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    const correo = args.email ?? CORREO_PRUEBAS;
     const usuario = await ctx.db
       .query("users")
-      .withIndex("email", (q) => q.eq("email", CORREO_PRUEBAS))
+      .withIndex("email", (q) => q.eq("email", correo))
       .first();
     if (!usuario) return { estado: "no_existe" };
     const sesiones = await ctx.db
@@ -289,8 +291,37 @@ export const borrarUsuarioDePrueba = internalMutation({
       .collect();
     for (const f of votos) await ctx.db.delete(f._id);
     await ctx.scheduler.runAfter(0, internal.mensajes.borrarRestantes, { userId: usuario._id });
+
+    // Credenciales y sesiones de Convex Auth. Las tablas son diminutas, así
+    // que se filtran recorriéndolas; el orden importa: los refresh tokens
+    // cuelgan de la sesión.
+    const cuentas = await ctx.db
+      .query("authAccounts")
+      .filter((q) => q.eq(q.field("userId"), usuario._id))
+      .collect();
+    for (const c of cuentas) await ctx.db.delete(c._id);
+    const abiertas = await ctx.db
+      .query("authSessions")
+      .filter((q) => q.eq(q.field("userId"), usuario._id))
+      .collect();
+    for (const s of abiertas) {
+      const tokens = await ctx.db
+        .query("authRefreshTokens")
+        .filter((q) => q.eq(q.field("sessionId"), s._id))
+        .collect();
+      for (const t of tokens) await ctx.db.delete(t._id);
+      await ctx.db.delete(s._id);
+    }
+
     await ctx.db.delete(usuario._id);
-    return { estado: "borrado", sesiones: sesiones.length, votos: votos.length };
+    return {
+      estado: "borrado",
+      correo,
+      sesiones: sesiones.length,
+      votos: votos.length,
+      cuentas: cuentas.length,
+      sesionesAbiertas: abiertas.length,
+    };
   },
 });
 
@@ -303,5 +334,40 @@ export const probarAleatorio = internalMutation({
     const bytes = new Uint8Array(8);
     crypto.getRandomValues(bytes);
     return { uuid: crypto.randomUUID(), bytes: Array.from(bytes) };
+  },
+});
+
+/** Asciende (o degrada) una cuenta por correo. Solo para comprobaciones E2E
+ *  con una cuenta de prueba; el camino real es `usuarios.actualizar`. */
+export const hacerAdminDePrueba = internalMutation({
+  args: { email: v.string(), admin: v.boolean() },
+  handler: async (ctx, args) => {
+    const u = await ctx.db.query("users").withIndex("email", (q) => q.eq("email", args.email)).first();
+    if (!u) return { estado: "no_existe" };
+    await ctx.db.patch(u._id, { rol: args.admin ? "admin" : "lector" });
+    return { estado: "ok", rol: args.admin ? "admin" : "lector" };
+  },
+});
+
+/** Diagnóstico del flujo OAuth de Notion: qué credenciales ve el despliegue,
+ *  qué redirect URI hay que registrar en Notion y si el sitio de las rutas
+ *  HTTP (`CONVEX_SITE_URL`, que la pone la plataforma) llega de verdad. Sin
+ *  esto, un `iniciar` fallaba con "este despliegue no puede recibir la
+ *  respuesta de Notion" sin decir por qué. No devuelve ningún secreto: solo
+ *  si está o no, y su longitud. */
+export const diagnosticoNotion = internalQuery({
+  args: {},
+  handler: async () => {
+    const a = ajustes();
+    return {
+      clientId: a.notionClientId ? `presente (${a.notionClientId.length} car.)` : "FALTA",
+      clientSecret: a.notionClientSecret ? `presente (${a.notionClientSecret.length} car.)` : "FALTA",
+      tokenInterno: a.notionToken ? "presente" : "ausente",
+      databaseId: a.notionDatabaseId || "ausente",
+      convexSiteUrl: a.convexSiteUrl || "FALTA",
+      siteUrl: a.siteUrl || "FALTA",
+      redirectUriARegistrar: a.convexSiteUrl ? `${a.convexSiteUrl}/notion/callback` : "no se puede calcular",
+      habilitada: Boolean(a.notionClientId && a.notionClientSecret),
+    };
   },
 });
