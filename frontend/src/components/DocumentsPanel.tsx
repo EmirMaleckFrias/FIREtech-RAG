@@ -656,9 +656,15 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                 <span style={{ fontWeight: 600 }} id="notion-bases-titulo">
                   Bases de datos a sincronizar
                 </span>
-                {bases === null && basesError === null ? (
+                {bases === null && basesError === null && (
                   <span className="shimmer-text">Buscando tus bases de datos…</span>
-                ) : basesError !== null ? (
+                )}
+                {/* Si Notion no responde, el fallo va ENCIMA de la lista y no
+                    en lugar de ella: las bases que ya se sincronizan se
+                    conocen sin preguntarle nada a Notion, y sacarlas de la
+                    pantalla significaría no poder quitar ninguna hasta que
+                    Notion volviera. */}
+                {basesError !== null && (
                   <div style={FILA}>
                     <span className="doc-row-error" style={{ padding: 0, ...CRECE }}>
                       {basesError}
@@ -671,22 +677,25 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                       Reintentar
                     </button>
                   </div>
-                ) : opciones.length === 0 ? (
-                  <div style={FILA}>
-                    <span style={CRECE}>
-                      Notion no compartió ninguna base de datos con la aplicación. Vuelve a pulsar
-                      "Conectar con Notion" y marca las que quieres compartir.
-                    </span>
-                    <button
-                      type="button"
-                      className="user-act-btn user-act-promote"
-                      disabled={ocupado !== null}
-                      onClick={() => void conectar()}
-                    >
-                      {ocupado === 'conectar' ? <IconSpinner size={13} /> : null}
-                      Conectar con Notion
-                    </button>
-                  </div>
+                )}
+                {bases === null && basesError === null ? null : opciones.length === 0 ? (
+                  basesError !== null ? null : (
+                    <div style={FILA}>
+                      <span style={CRECE}>
+                        Notion no compartió ninguna base de datos con la aplicación. Vuelve a
+                        pulsar "Conectar con Notion" y marca las que quieres compartir.
+                      </span>
+                      <button
+                        type="button"
+                        className="user-act-btn user-act-promote"
+                        disabled={ocupado !== null}
+                        onClick={() => void conectar()}
+                      >
+                        {ocupado === 'conectar' ? <IconSpinner size={13} /> : null}
+                        Conectar con Notion
+                      </button>
+                    </div>
+                  )
                 ) : (
                   <>
                     {/* Casillas y no un desplegable: se pueden marcar varias,
