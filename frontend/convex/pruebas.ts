@@ -322,6 +322,12 @@ export const borrarUsuarioDePrueba = internalMutation({
       .collect();
     for (const f of votos) await ctx.db.delete(f._id);
     await ctx.scheduler.runAfter(0, internal.mensajes.borrarRestantes, { userId: usuario._id });
+    // Y su corpus, igual que `usuarios.borrar`: sin esto quedaban documentos
+    // con un propietario que ya no existe, invisibles para todo el mundo y
+    // ocupando almacenamiento. Pasó en producción con una cuenta de prueba.
+    await ctx.scheduler.runAfter(0, internal.documentos.borrarCorpusDeUsuario, {
+      userId: usuario._id,
+    });
 
     // Credenciales y sesiones de Convex Auth. Las tablas son diminutas, así
     // que se filtran recorriéndolas; el orden importa: los refresh tokens
