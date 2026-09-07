@@ -30,6 +30,7 @@ import { codigoDeError, mensajeDeError } from './lib/errores';
 import type { CitationRef } from './lib/markdown';
 import { mensajeDesdeDoc, type MensajeDoc } from './lib/mensajes';
 import { leerAvisoNotion, urlSinAvisoNotion } from './lib/notion';
+import { escucharAvisos } from './lib/notionEmergente';
 import type {
   AvisoNotion,
   ChatMessage,
@@ -312,6 +313,20 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   // sitio y scrim, así que nunca están abiertos los dos a la vez.
   const [docsOpen, setDocsOpen] = useState(() => notionAviso !== null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Y el camino normal: la emergente que pidió el consentimiento a Notion
+  // manda el aviso por el canal de mismo origen y se cierra. Se escucha aquí,
+  // en App, y no en el bloque de Notion, porque el bloque solo existe mientras
+  // el panel de documentos está abierto y la usuaria puede haberlo cerrado
+  // mientras Notion le preguntaba. El estado de la conexión no llega por aquí:
+  // lo trae la suscripción a `notion.admin.estado`.
+  useEffect(() => {
+    return escucharAvisos((aviso) => {
+      setNotionAviso(aviso);
+      setDocsOpen(true);
+      window.focus();
+    });
+  }, []);
 
   const selectSession = useCallback(
     (id: Id<'sessions'>) => {

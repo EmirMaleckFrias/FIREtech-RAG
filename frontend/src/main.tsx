@@ -4,6 +4,7 @@ import { ConvexAuthProvider } from '@convex-dev/auth/react';
 import '@fontsource-variable/inter';
 import App from './App';
 import { convex } from './lib/convex';
+import { anunciarAviso, avisoDeEmergente, despedirEmergente } from './lib/notionEmergente';
 import { observarSistema } from './lib/theme';
 import './styles.css';
 
@@ -17,16 +18,43 @@ if (!rootElement) {
   throw new Error('No se encontró el elemento #root');
 }
 
+// Vuelta de Notion en la ventana emergente: se le pasa el aviso a la ventana
+// principal, que sigue montada con la aplicación, y esta se cierra. NO se monta
+// React aquí: montarlo enseñaría la aplicación entera dentro de una ventanita
+// durante el instante que tarda en cerrarse.
+//
+// El orden lo garantiza `avisoParaCerrarEmergente`: primero se mira si la URL
+// trae `?notion=`, porque consumir la marca es destructivo y una carga normal
+// (una recarga de la ventana principal con la emergente abierta) no debe
+// gastarla.
+//
+// Si el navegador se niega a cerrar la ventana, a los 400 ms se monta la
+// aplicación igualmente: mejor la app en una ventana pequeña que un texto
+// muerto. Y si no había marca (porque el navegador bloqueó las emergentes y se
+// usó el redirigido de página completa), esto no se activa y la aplicación se
+// monta como siempre, leyendo el aviso de la URL.
+const avisoDeVuelta = avisoDeEmergente();
+
 // ConvexAuthProvider sustituye a ConvexProvider: ademas de dar el cliente a
 // useQuery/useMutation, guarda y renueva los tokens de Convex Auth y expone
 // useConvexAuth (isLoading / isAuthenticated), que es lo que App consulta.
-createRoot(rootElement).render(
-  <StrictMode>
-    <ConvexAuthProvider client={convex}>
-      <App />
-    </ConvexAuthProvider>
-  </StrictMode>,
-);
+function montar() {
+  createRoot(rootElement!).render(
+    <StrictMode>
+      <ConvexAuthProvider client={convex}>
+        <App />
+      </ConvexAuthProvider>
+    </StrictMode>,
+  );
+}
+
+if (avisoDeVuelta !== null) {
+  anunciarAviso(avisoDeVuelta);
+  despedirEmergente(avisoDeVuelta.tipo === 'conectado');
+  window.setTimeout(montar, 400);
+} else {
+  montar();
+}
 
 // Service worker (solo producción): network-first para navegaciones y
 // cache-first para /assets/ hasheados. Solo cachea estáticos del propio

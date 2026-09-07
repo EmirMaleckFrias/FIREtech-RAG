@@ -48,6 +48,12 @@ import {
   plural,
   textoDeAviso,
 } from '../lib/notion';
+import {
+  abrirEmergenteEnBlanco,
+  cerrarEmergente,
+  llevarEmergenteA,
+  marcarRespaldoPaginaCompleta,
+} from '../lib/notionEmergente';
 import { sha256De, subirFichero } from '../lib/subida';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import type { AvisoNotion, BaseNotion, DocumentInfo, DocumentStatus, EstadoNotion } from '../types';
@@ -202,6 +208,9 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
   const [seleccion, setSeleccion] = useState('');
   const [confirmDesconectar, setConfirmDesconectar] = useState(false);
   const [avisosAbiertos, setAvisosAbiertos] = useState(false);
+  /** La emergente de Notion está abierta y se espera su respuesta. */
+  const [esperandoNotion, setEsperandoNotion] = useState(false);
+  const emergente = useRef<Window | null>(null);
 
   const conexion = estado?.conexion ?? null;
   const conectadoEn = conexion?.conectadoEn ?? null;
@@ -266,19 +275,93 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
     });
   }, [bases, opciones, baseId]);
 
+  /** Deja de esperar: cierra la emergente si sigue abierta y retira la marca. */
+  const cancelarEspera = useCallback(() => {
+    cerrarEmergente(emergente.current);
+    emergente.current = null;
+    setEsperandoNotion(false);
+    setOcupado(null);
+  }, []);
+
+  // Al desmontar (cerrar el panel) no se deja una emergente huérfana esperando
+  // una ventana que ya no escucha... salvo que sí escucha: el aviso lo recoge
+  // App, que no se desmonta. Así que la emergente se DEJA abierta a propósito
+  // y solo se suelta la referencia.
+  useEffect(() => () => {
+    emergente.current = null;
+  }, []);
+
+  /**
+   * Conectar con Notion sin abandonar la aplicación.
+   *
+   * El orden es lo importante: la emergente se abre EN BLANCO dentro del
+   * propio clic, porque la URL de autorización llega después de un `await` y
+   * para entonces el navegador ya no ve un gesto de la usuaria y la bloquea.
+   * Si aun así la bloquea, se cae al redirigido de página completa, que es lo
+   * que hacía antes y sigue funcionando.
+   */
   const conectar = useCallback(async () => {
     setError(null);
     setOcupado('conectar');
+    const ventana = abrirEmergenteEnBlanco();
+    if (ventana === null) marcarRespaldoPaginaCompleta();
+    emergente.current = ventana;
     try {
       const { url } = await iniciar({ origen: window.location.origin });
-      // Se abandona la app: el botón se queda "Abriendo Notion…" hasta que
-      // el navegador navega, sin rebotar a su estado normal.
-      window.location.assign(url);
+      if (ventana === null) {
+        // Respaldo: sin emergente se lleva la pestaña, como antes. El botón se
+        // queda "Abriendo Notion…" hasta que el navegador navega.
+        window.location.assign(url);
+        return;
+      }
+      llevarEmergenteA(ventana, url);
+      setOcupado(null);
+      setEsperandoNotion(true);
     } catch (err) {
+      cerrarEmergente(ventana);
+      emergente.current = null;
       if (!avisarSiEsFatal(err)) setError(mensajeDeError(err, 'No se pudo abrir la conexión con Notion.'));
       setOcupado(null);
     }
   }, [iniciar]);
+
+  // Llegó la respuesta de Notion (App la recibe por el canal y la baja como
+  // `aviso`), o la conexión cambió: se deja de esperar.
+  useEffect(() => {
+    if (aviso !== null || conectadoEn !== null) {
+      emergente.current = null;
+      setEsperandoNotion(false);
+    }
+  }, [aviso, conectadoEn]);
+
+  // La usuaria cerró la emergente sin terminar: se suelta la espera. Se usa
+  // solo para eso, nunca para deducir un resultado (cerrar la ventana no dice
+  // si Notion guardó algo o no; eso lo dice el servidor).
+  //
+  // Medido el 7 sep 2026 con curl: ni `api.notion.com/v1/oauth/authorize` ni
+  // `app.notion.com` mandan `Cross-Origin-Opener-Policy`, así que el manejador
+  // de la ventana sobrevive a la navegación y `closed` es fiable. Si algún día
+  // lo mandaran, `closed` empezaría a dar true en cuanto navegase y esto se
+  // limitaría a quitar la fila de espera antes de tiempo: el aviso seguiría
+  // llegando por el canal y la conexión por la suscripción reactiva.
+  useEffect(() => {
+    if (!esperandoNotion) return;
+    const t = window.setInterval(() => {
+      const v = emergente.current;
+      if (v === null) return;
+      let cerrada = false;
+      try {
+        cerrada = v.closed;
+      } catch {
+        cerrada = true;
+      }
+      if (cerrada) {
+        emergente.current = null;
+        setEsperandoNotion(false);
+      }
+    }, 1500);
+    return () => window.clearInterval(t);
+  }, [esperandoNotion]);
 
   const guardar = useCallback(async () => {
     const elegida = opciones.find((b) => b.id === seleccion);
@@ -450,7 +533,7 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                     ? 'Trae los protocolos y guías directamente desde Notion.'
                     : 'La conexión con Notion aún no está habilitada por el equipo técnico.'}
               </span>
-              {estado.habilitada && (
+              {estado.habilitada && !esperandoNotion && (
                 <button
                   type="button"
                   className="user-act-btn user-act-promote"
@@ -468,6 +551,24 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                 </button>
               )}
             </div>
+            {/* La emergente está abierta: se dice dónde mirar y se ofrece
+                salir de la espera. La aplicación sigue aquí, entera. */}
+            {esperandoNotion && (
+              <div style={FILA} role="status">
+                <IconSpinner size={13} />
+                <span style={CRECE}>
+                  Termina en la ventana de Notion que se acaba de abrir: inicia sesión y elige qué
+                  páginas compartir. Esta pantalla se actualizará sola.
+                </span>
+                <button
+                  type="button"
+                  className="doc-confirm-btn doc-confirm-no"
+                  onClick={cancelarEspera}
+                >
+                  Cancelar
+                </button>
+              </div>
+            )}
             {estado.porEntorno && filaSincronizacion()}
           </>
         ) : (

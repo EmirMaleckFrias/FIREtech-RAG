@@ -97,3 +97,125 @@ export function fraccionProgreso(p: ProgresoNotion): number | null {
 export function iconoEsImagen(icono: string | null): boolean {
   return icono !== null && /^https?:\/\//i.test(icono);
 }
+
+// ---------------------------------------------------------------------------
+// Vuelta de Notion sin abandonar la aplicación
+// ---------------------------------------------------------------------------
+//
+// La primera versión llevaba la pestaña entera a Notion con
+// `location.assign`. Si algo salía mal allí, la usuaria se quedaba plantada en
+// la web de Notion y perdía de vista la aplicación. Ahora el consentimiento se
+// pide en una ventana EMERGENTE y la app se queda montada detrás.
+//
+// El aviso vuelve de la emergente a la ventana principal por un canal de
+// mismo origen (`BroadcastChannel`), no por `window.opener`: Notion puede
+// mandar `Cross-Origin-Opener-Policy` y romper esa referencia al navegar, y
+// entonces la emergente no tendría a quién avisar. El canal no depende de eso.
+//
+// Y para saber si la página que vuelve es una emergente que debe cerrarse, o
+// una pestaña normal que viene del respaldo de página completa, se deja una
+// MARCA en `localStorage` al abrir la emergente. Sin marca, la página se
+// monta como siempre.
+//
+// El estado de la conexión NO viaja por aquí: eso lo trae la suscripción
+// reactiva a `notion.admin.estado`, que es la verdad del servidor. Por el
+// canal solo va el texto del aviso, así que si el navegador no tuviera
+// `BroadcastChannel` lo único que se pierde es la frase, no la conexión.
+
+export const CANAL_NOTION = 'rag-notion';
+export const CLAVE_MARCA_NOTION = 'rag:notion-conectando';
+
+/** Cuánto vale la marca. Un poco más que los 10 minutos que vive el `state`
+ *  en el servidor: si el `state` ya caducó, la emergente vuelve con
+ *  `?notion=error&motivo=estado` y también hay que cerrarla. */
+export const MARCA_VIDA_MS = 12 * 60_000;
+
+/** Lo mínimo de `localStorage` que se usa aquí, para poder probarlo sin
+ *  navegador (las pruebas corren en `edge-runtime`, no en jsdom). */
+export interface AlmacenSimple {
+  getItem(clave: string): string | null;
+  setItem(clave: string, valor: string): void;
+  removeItem(clave: string): void;
+}
+
+/** ¿Es esto un aviso de Notion válido? Lo que llega por el canal viene de otra
+ *  ventana del mismo origen, pero se valida igual: solo se pinta lo que se
+ *  reconoce. */
+export function esAvisoNotion(dato: unknown): dato is AvisoNotion {
+  if (typeof dato !== 'object' || dato === null) return false;
+  const d = dato as { tipo?: unknown; motivo?: unknown };
+  if (d.tipo === 'conectado' || d.tipo === 'cancelado') return true;
+  if (d.tipo !== 'error') return false;
+  return d.motivo === null || d.motivo === undefined || typeof d.motivo === 'string';
+}
+
+/** Se deja al abrir la emergente. Un almacén que lance (modo privado con las
+ *  cookies bloqueadas) no debe tumbar el flujo: sin marca, la vuelta se
+ *  comporta como el respaldo de página completa. */
+export function ponerMarcaConexion(almacen: AlmacenSimple, ahora: number): void {
+  try {
+    almacen.setItem(CLAVE_MARCA_NOTION, String(ahora));
+  } catch {
+    /* sin almacén: la vuelta se montará como página normal */
+  }
+}
+
+export function quitarMarcaConexion(almacen: AlmacenSimple): void {
+  try {
+    almacen.removeItem(CLAVE_MARCA_NOTION);
+  } catch {
+    /* nada que quitar */
+  }
+}
+
+/** ¿Venimos de una emergente que abrimos nosotros? Consume la marca: la
+ *  segunda vez ya no está, así que una pestaña que se recargue o que se abra
+ *  luego con la misma URL no intenta cerrarse. Una marca vieja o ilegible no
+ *  cuenta. */
+export function consumirMarcaConexion(almacen: AlmacenSimple, ahora: number): boolean {
+  let crudo: string | null = null;
+  try {
+    crudo = almacen.getItem(CLAVE_MARCA_NOTION);
+  } catch {
+    return false;
+  }
+  quitarMarcaConexion(almacen);
+  if (crudo === null) return false;
+  const puesta = Number(crudo);
+  return Number.isFinite(puesta) && ahora - puesta >= 0 && ahora - puesta < MARCA_VIDA_MS;
+}
+
+/** Rasgos de `window.open`: una ventana centrada en la pantalla de la usuaria,
+ *  del tamaño que pide la pantalla de permisos de Notion. */
+export function rasgosEmergente(pantalla: { width: number; height: number }): string {
+  const ancho = Math.min(820, Math.max(420, pantalla.width - 80));
+  const alto = Math.min(860, Math.max(480, pantalla.height - 120));
+  const izquierda = Math.max(0, Math.round((pantalla.width - ancho) / 2));
+  const arriba = Math.max(0, Math.round((pantalla.height - alto) / 2));
+  return `popup=yes,width=${ancho},height=${alto},left=${izquierda},top=${arriba},noopener=no,noreferrer=no`;
+}
+
+/**
+ * ¿Esta carga de la página es la vuelta de nuestra emergente, que debe
+ * anunciar el aviso y cerrarse?
+ *
+ * El orden de las dos condiciones es la razón de que esto sea una función y no
+ * dos líneas suel­tas: se mira PRIMERO que la URL traiga `?notion=`, porque
+ * consumir la marca es destructivo y una carga cualquiera (una recarga de la
+ * ventana principal mientras la emergente sigue abierta) no debe gastarla. Si
+ * la gastara, la emergente volvería sin marca y se montaría la aplicación
+ * entera dentro de la ventanita.
+ *
+ * Devuelve el aviso a anunciar, o `null` si hay que montar la aplicación
+ * normalmente (incluido el caso del respaldo de página completa, que trae
+ * `?notion=` pero no deja marca).
+ */
+export function avisoParaCerrarEmergente(
+  search: string,
+  almacen: AlmacenSimple,
+  ahora: number,
+): AvisoNotion | null {
+  const aviso = leerAvisoNotion(search);
+  if (aviso === null) return null;
+  return consumirMarcaConexion(almacen, ahora) ? aviso : null;
+}
