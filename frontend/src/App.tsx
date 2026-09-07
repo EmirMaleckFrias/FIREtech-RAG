@@ -324,13 +324,12 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   );
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const hayNotion = leerAvisoNotion(window.location.search) !== null;
-    const hayNube = leerAvisoNube(window.location.search) !== null;
-    if (!hayNotion && !hayNube) return;
-    let href = window.location.href;
-    if (hayNotion) href = new URL(urlSinAvisoNotion(href), window.location.origin).href;
-    if (hayNube) href = new URL(urlSinAvisoNube(href), window.location.origin).href;
-    window.history.replaceState(window.history.state, '', urlSinAvisoNube(urlSinAvisoNotion(href)));
+    if (leerAvisoNotion(window.location.search) === null && leerAvisoNube(window.location.search) === null) return;
+    // Las dos limpiezas devuelven una ruta RELATIVA, así que entre una y otra
+    // se vuelve a absoluta: `urlSinAvisoNube` hace `new URL(href)` y con una
+    // relativa lanzaría.
+    const sinNotion = new URL(urlSinAvisoNotion(window.location.href), window.location.origin).href;
+    window.history.replaceState(window.history.state, '', urlSinAvisoNube(sinNotion));
   }, []);
 
   // Slide-overs de gestión (siempre overlay, desde la derecha). Comparten
