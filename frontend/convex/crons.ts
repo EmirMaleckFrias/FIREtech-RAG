@@ -1,4 +1,5 @@
-// Tareas periódicas. Por ahora una: traer el corpus desde Notion.
+// Tareas periódicas. Por ahora una: traer el corpus desde las fuentes
+// conectadas (Notion, Google Drive, OneDrive).
 //
 // El intervalo del cron es estático en el código, así que aquí va cada hora
 // y es la acción la que decide si toca: se salta la corrida si NOTION_SYNC_MINUTES
@@ -19,7 +20,8 @@ import { internalMutation } from "./_generated/server";
 
 const crons = cronJobs();
 
-/** Agenda una sincronización por cada cuenta con Notion conectado. */
+/** Agenda una sincronización por cada conexión (Notion, Google Drive,
+ *  OneDrive) que tenga algo elegido que traer. */
 export const repartirSincronizaciones = internalMutation({
   args: {},
   handler: async (ctx): Promise<{ agendadas: number }> => {
@@ -34,10 +36,22 @@ export const repartirSincronizaciones = internalMutation({
       });
       agendadas += 1;
     }
+    // Y las nubes de ficheros: una corrida por conexión con carpetas. Las
+    // marcadas para reconectar se agendan igual y es la acción la que las
+    // salta: así la regla vive en un solo sitio.
+    const nubes = await ctx.db.query("nubeConexion").collect();
+    for (const c of nubes) {
+      if (c.carpetas.length === 0) continue;
+      await ctx.scheduler.runAfter(0, internal.nube.sync.sincronizar, {
+        propietario: c.conectadoPor,
+        proveedor: c.proveedor,
+      });
+      agendadas += 1;
+    }
     return { agendadas };
   },
 });
 
-crons.interval("sincronizar notion", { minutes: 60 }, internal.crons.repartirSincronizaciones, {});
+crons.interval("sincronizar fuentes conectadas", { minutes: 60 }, internal.crons.repartirSincronizaciones, {});
 
 export default crons;

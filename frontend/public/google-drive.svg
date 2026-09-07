@@ -1,0 +1,6 @@
+<!-- Marca de Google Drive, simplificada: el triángulo de tres bandas. -->
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <polygon points="12,2 12,8 6.2,18 1,21" fill="#1FA463"/>
+  <polygon points="12,2 23,21 17.8,18 12,8" fill="#FFBA00"/>
+  <polygon points="1,21 23,21 17.8,18 6.2,18" fill="#4185F3"/>
+</svg>

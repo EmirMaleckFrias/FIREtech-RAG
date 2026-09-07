@@ -339,6 +339,21 @@ export const borrarUsuarioDePrueba = internalMutation({
     await ctx.scheduler.runAfter(0, internal.documentos.borrarCorpusDeUsuario, {
       userId: usuario._id,
     });
+    // Y sus conexiones (Notion, Google Drive, OneDrive) con su rastro, como
+    // hace `usuarios.borrar`: un token de una cuenta que ya no existe no debe
+    // quedarse en la base.
+    const notion = await ctx.db
+      .query("notionConexion")
+      .withIndex("porUsuario", (q) => q.eq("conectadoPor", usuario._id))
+      .collect();
+    for (const c of notion) await ctx.db.delete(c._id);
+    await ctx.scheduler.runAfter(0, internal.notion.datos.borrarRastroDeUsuario, { propietario: usuario._id });
+    const nubes = await ctx.db
+      .query("nubeConexion")
+      .withIndex("porUsuarioYProveedor", (q) => q.eq("conectadoPor", usuario._id))
+      .collect();
+    for (const c of nubes) await ctx.db.delete(c._id);
+    await ctx.scheduler.runAfter(0, internal.nube.datos.borrarRastroDeUsuario, { propietario: usuario._id });
 
     // Credenciales y sesiones de Convex Auth. Las tablas son diminutas, así
     // que se filtran recorriéndolas; el orden importa: los refresh tokens
@@ -415,6 +430,73 @@ export const diagnosticoNotion = internalQuery({
       redirectUriARegistrar: a.convexSiteUrl ? `${a.convexSiteUrl}/notion/callback` : "no se puede calcular",
       habilitada: Boolean(a.notionClientId && a.notionClientSecret),
     };
+  },
+});
+
+/** Lo mismo para las nubes de ficheros: qué credenciales de aplicación ve el
+ *  despliegue y qué URI de redirección hay que registrar en Google Cloud y en
+ *  Microsoft Entra. Sin secretos: solo si están y su longitud. */
+export const diagnosticoNube = internalQuery({
+  args: {},
+  handler: async () => {
+    const a = ajustes();
+    const presente = (valor: string) => (valor ? `presente (${valor.length} car.)` : "FALTA");
+    return {
+      convexSiteUrl: a.convexSiteUrl || "FALTA",
+      siteUrl: a.siteUrl || "FALTA",
+      google: {
+        clientId: presente(a.googleClientId),
+        clientSecret: presente(a.googleClientSecret),
+        redirectUriARegistrar: a.convexSiteUrl ? `${a.convexSiteUrl}/google/callback` : "no se puede calcular",
+        habilitada: Boolean(a.googleClientId && a.googleClientSecret),
+      },
+      onedrive: {
+        clientId: presente(a.microsoftClientId),
+        clientSecret: presente(a.microsoftClientSecret),
+        redirectUriARegistrar: a.convexSiteUrl ? `${a.convexSiteUrl}/onedrive/callback` : "no se puede calcular",
+        habilitada: Boolean(a.microsoftClientId && a.microsoftClientSecret),
+      },
+      periodicaMinutos: a.nubeSyncMinutes,
+    };
+  },
+});
+
+/** Siembra una conexión con una nube en una cuenta de prueba, con tokens que
+ *  NO valen: para revisar el bloque conectado del panel (cuenta, carpetas,
+ *  "Volver a conectar" cuando el proveedor rechaza la renovación) sin pasar
+ *  por el consentimiento real. Solo para E2E; se limpia con
+ *  `borrarUsuarioDePrueba`. */
+export const sembrarConexionNubeDePrueba = internalMutation({
+  args: {
+    email: v.string(),
+    proveedor: v.union(v.literal("google"), v.literal("onedrive")),
+    necesitaReconexion: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const u = await ctx.db.query("users").withIndex("email", (q) => q.eq("email", args.email)).first();
+    if (!u) return { estado: "no_existe" };
+    const previas = await ctx.db
+      .query("nubeConexion")
+      .withIndex("porUsuarioYProveedor", (q) => q.eq("conectadoPor", u._id).eq("proveedor", args.proveedor))
+      .collect();
+    for (const p of previas) await ctx.db.delete(p._id);
+    const id = await ctx.db.insert("nubeConexion", {
+      proveedor: args.proveedor,
+      accessToken: "token-de-prueba-que-no-vale",
+      refreshToken: "refresco-de-prueba-que-no-vale",
+      expiraEn: Date.now() - 1,
+      cuentaId: "cuenta-de-prueba",
+      cuentaNombre: "Dra. de Prueba",
+      cuentaCorreo: args.email,
+      conectadoPor: u._id,
+      conectadoEn: Date.now(),
+      carpetas: [
+        { id: "carpeta-prueba-1", nombre: "Protocolos", ruta: "Mi unidad / Clínica / Protocolos" },
+        { id: "carpeta-prueba-2", nombre: "Guías 2026", ruta: "Mi unidad / Guías 2026" },
+      ],
+      necesitaReconexion: args.necesitaReconexion,
+    });
+    return { estado: "ok", id };
   },
 });
 

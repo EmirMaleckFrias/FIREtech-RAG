@@ -5547,6 +5547,13 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
   opacity: 0.75;
 }
 
+/* Las tarjetas de Google Drive y OneDrive reutilizan la de Notion; solo la
+   lista de carpetas enseña además la ruta, en pequeño, debajo del nombre. */
+.nube-carpetas-lista label { align-items: flex-start; }
+.nube-carpetas-lista label > span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.nube-carpeta-ruta { font-size: 10.5px; color: var(--text-3); overflow-wrap: anywhere; }
+.nube-carpetas-lista input { margin-top: 3px; }
+
 .ficha-insignia {
   display: inline-flex;
   align-items: center;

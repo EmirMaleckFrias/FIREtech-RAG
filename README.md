@@ -62,7 +62,8 @@ operación diaria (cuentas, documentos, telemetría, variables) en
   (`pensando`, `buscando`, `redactando`, `revisando`, `listo` o `error`) y el navegador está
   suscrito a la conversación. Una respuesta sobrevive a que se cierre la pestaña.
 - **Cuentas y roles.** Alta con correo y contraseña del dominio permitido. Roles `admin` y
-  `lector`. Cualquier cuenta gestiona SU corpus (subir, reindexar, borrar, conectar Notion);
+  `lector`. Cualquier cuenta gestiona SU corpus (subir, reindexar, borrar, conectar Notion,
+  Google Drive u OneDrive);
   ser administrador sirve para gestionar cuentas y ver estadísticas agregadas, no para tocar
   los documentos ni las conversaciones de otra persona. Nadie puede cambiarse, bloquearse ni
   borrarse a sí mismo. Al borrar una cuenta se borra su corpus con ella.

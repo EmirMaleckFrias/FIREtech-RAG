@@ -24,6 +24,7 @@
 //   visibles, porque ahí no hay "pasar por encima".
 import type { KeyboardEvent } from 'react';
 import { cifra, fechaCorta, formatoDe, identidadDe, pesoRelativo } from '../lib/biblioteca';
+import { fuenteDe } from '../lib/origenes';
 import type { DocumentInfo } from '../types';
 import { IconAlert, IconCheck, IconRefresh, IconSpinner, IconTrash } from './icons';
 
@@ -83,6 +84,8 @@ export function FichaDocumento({
 }: FichaDocumentoProps) {
   const formato = formatoDe(doc.fileName);
   const { principal, secundaria, fichero } = identidadDe(doc);
+  // De qué fuente llegó (Notion, Google Drive, OneDrive), o null si se subió a mano.
+  const fuente = fuenteDe(doc.origen);
   const listo = doc.status === 'ready';
   const peso = listo ? pesoRelativo(doc.chunks, maximo) : 0;
 
@@ -164,10 +167,10 @@ export function FichaDocumento({
                 No se pudo leer
               </button>
             )}
-            {doc.origen === 'notion' && (
-              <span className="ficha-dato ficha-notion" title="Llegó desde tu Notion">
-                <img src="/notion.svg" alt="" width={11} height={11} />
-                Notion
+            {fuente !== null && (
+              <span className="ficha-dato ficha-notion" title={`Llegó desde tu ${fuente.nombre}`}>
+                <img src={fuente.icono} alt="" width={11} height={11} />
+                {fuente.nombre}
               </span>
             )}
             <span className="ficha-dato ficha-fecha" title={fechaLarga(doc.ingestadoEn)}>

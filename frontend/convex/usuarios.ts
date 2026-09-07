@@ -311,6 +311,24 @@ export const borrar = mutation({
     if (algunaPagina || algunaCorrida) {
       await ctx.scheduler.runAfter(0, internal.notion.datos.borrarRastroDeUsuario, { propietario: u._id });
     }
+    // Lo mismo con sus nubes de ficheros (Google Drive, OneDrive): sus
+    // conexiones ya, con sus tokens; ficheros y corridas por lotes.
+    const nubes = await ctx.db
+      .query("nubeConexion")
+      .withIndex("porUsuarioYProveedor", (q) => q.eq("conectadoPor", u._id))
+      .collect();
+    for (const c of nubes) await ctx.db.delete(c._id);
+    const algunFichero = await ctx.db
+      .query("nubeFicheros")
+      .withIndex("porPropietarioYFichero", (q) => q.eq("propietario", u._id))
+      .first();
+    const algunaCorridaNube = await ctx.db
+      .query("nubeSincronizaciones")
+      .withIndex("porPropietarioYProveedor", (q) => q.eq("propietario", u._id))
+      .first();
+    if (algunFichero || algunaCorridaNube) {
+      await ctx.scheduler.runAfter(0, internal.nube.datos.borrarRastroDeUsuario, { propietario: u._id });
+    }
 
     // 4. Convex Auth y la cuenta.
     const sesionesAuth = await ctx.db

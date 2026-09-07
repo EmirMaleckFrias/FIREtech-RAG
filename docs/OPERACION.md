@@ -36,6 +36,35 @@ npx convex run semilla:sembrarAdmins       # {insertados, total}
 npx convex run pruebas:prepararPregunta '{"texto":"¿Cuántos documentos hay indexados?","modo":"normal"}'
 ```
 
+### Fuentes conectadas: Notion, Google Drive y OneDrive
+
+Cada persona conecta su propia cuenta desde el panel de documentos con un botón; lo único que
+hace el equipo técnico, una vez, es registrar la APLICACIÓN en cada proveedor y poner sus
+credenciales en el despliegue. Sin ellas, el bloque correspondiente dice "aún no está
+habilitada por el equipo técnico" y no ofrece ningún botón. La URI de redirección de cada uno
+sale de `CONVEX_SITE_URL` (la URL `*.convex.site` del despliegue); `npx convex run
+pruebas:diagnosticoNube` y `pruebas:diagnosticoNotion` la calculan y dicen qué falta.
+
+- **Notion**: integración PÚBLICA en notion.so/my-integrations, redirect
+  `${CONVEX_SITE_URL}/notion/callback`; `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET`.
+- **Google Drive**: en Google Cloud, un proyecto con la API de Google Drive activada, la
+  pantalla de consentimiento configurada (ámbito `.../auth/drive.readonly`; mientras la app
+  esté en modo de prueba solo entran los correos añadidos como usuarios de prueba) y un
+  cliente OAuth de tipo "Aplicación web" con la URI de redirección autorizada
+  `${CONVEX_SITE_URL}/google/callback`; `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
+- **OneDrive**: en Microsoft Entra (portal.azure.com → Registros de aplicaciones), una
+  aplicación para "cuentas en cualquier directorio y cuentas personales de Microsoft", una
+  URI de redirección de tipo **Web** `${CONVEX_SITE_URL}/onedrive/callback`, un secreto de
+  cliente (anotar su caducidad) y los permisos delegados de Microsoft Graph `Files.Read.All`,
+  `User.Read` y `offline_access`; `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`.
+
+Las tres sincronizaciones las reparte el mismo cron horario; `NOTION_SYNC_MINUTES` y
+`DRIVE_SYNC_MINUTES` en 0 apagan la periódica (la manual sigue), y `NOTION_DELETE_ARCHIVED` /
+`DRIVE_DELETE_REMOVED` en false conservan el documento cuando la página o el fichero
+desaparecen de la fuente (la fila queda marcada). Los tokens de Google y Microsoft caducan y
+se renuevan solos; si una persona revoca el permiso, su bloque pasa a "Volver a conectar" y
+nada más falla.
+
 ## 2. Cuentas
 
 ### Sembrar administradores

@@ -25,6 +25,7 @@ import {
   type Filtros,
   type Orden,
 } from '../lib/biblioteca';
+import { FUENTES } from '../lib/origenes';
 import type { Documentos } from '../lib/useDocumentos';
 import type { DocumentStatus } from '../types';
 import { BandaCorpus } from './BandaCorpus';
@@ -172,7 +173,7 @@ export function Biblioteca({ open, onClose, documentos, estadoInicial }: Bibliot
             <div className="biblio-chips" role="group" aria-label="Filtrar">
               <button
                 type="button"
-                className={`biblio-chip ${filtros.formato === null && filtros.estado === null && !filtros.soloNotion ? 'es-activo' : ''}`}
+                className={`biblio-chip ${filtros.formato === null && filtros.estado === null && filtros.origen === null ? 'es-activo' : ''}`}
                 onClick={() => setFiltros((f) => ({ ...SIN_FILTROS, texto: f.texto }))}
               >
                 Todos
@@ -200,17 +201,20 @@ export function Biblioteca({ open, onClose, documentos, estadoInicial }: Bibliot
                   {e.etiqueta}
                 </button>
               ))}
-              {(docs ?? []).some((d) => d.origen === 'notion') && (
+              {/* Un chip por fuente sincronizada PRESENTE en el corpus: si nada
+                  vino de OneDrive, no hay chip de OneDrive. */}
+              {FUENTES.filter((fu) => (docs ?? []).some((d) => d.origen === fu.id)).map((fu) => (
                 <button
+                  key={fu.id}
                   type="button"
-                  className={`biblio-chip ${filtros.soloNotion ? 'es-activo' : ''}`}
-                  onClick={() => setFiltros((f) => ({ ...f, soloNotion: !f.soloNotion }))}
-                  aria-pressed={filtros.soloNotion}
+                  className={`biblio-chip ${filtros.origen === fu.id ? 'es-activo' : ''}`}
+                  onClick={() => setFiltros((f) => ({ ...f, origen: f.origen === fu.id ? null : fu.id }))}
+                  aria-pressed={filtros.origen === fu.id}
                 >
-                  <img src="/notion.svg" alt="" width={11} height={11} />
-                  Notion
+                  <img src={fu.icono} alt="" width={11} height={11} />
+                  {fu.nombre}
                 </button>
-              )}
+              ))}
             </div>
 
             <label className="biblio-orden">
@@ -239,7 +243,7 @@ export function Biblioteca({ open, onClose, documentos, estadoInicial }: Bibliot
             </span>
             <p>
               Todavía no tienes ningún documento. Súbelos desde el panel de documentos, o conecta
-              tu Notion para que lleguen solos.
+              tu Notion, tu Google Drive o tu OneDrive para que lleguen solos.
             </p>
           </div>
         ) : visibles.length === 0 ? (

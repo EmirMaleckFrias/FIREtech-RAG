@@ -5,6 +5,7 @@ import '@fontsource-variable/inter';
 import App from './App';
 import { convex } from './lib/convex';
 import { anunciarAviso, avisoDeEmergente, despedirEmergente } from './lib/notionEmergente';
+import { anunciarAvisoNube, avisoDeEmergenteNube } from './lib/nubeEmergente';
 import { observarSistema } from './lib/theme';
 import { iniciarPreferencias } from './lib/preferencias';
 import './styles.css';
@@ -37,6 +38,8 @@ if (!rootElement) {
 // usó el redirigido de página completa), esto no se activa y la aplicación se
 // monta como siempre, leyendo el aviso de la URL.
 const avisoDeVuelta = avisoDeEmergente();
+// Y la vuelta de Google Drive u OneDrive, con su propia marca y su canal.
+const avisoDeVueltaNube = avisoDeVuelta === null ? avisoDeEmergenteNube() : null;
 
 // ConvexAuthProvider sustituye a ConvexProvider: ademas de dar el cliente a
 // useQuery/useMutation, guarda y renueva los tokens de Convex Auth y expone
@@ -54,6 +57,10 @@ function montar() {
 if (avisoDeVuelta !== null) {
   anunciarAviso(avisoDeVuelta);
   despedirEmergente(avisoDeVuelta.tipo === 'conectado');
+  window.setTimeout(montar, 400);
+} else if (avisoDeVueltaNube !== null) {
+  anunciarAvisoNube(avisoDeVueltaNube);
+  despedirEmergente(avisoDeVueltaNube.tipo === 'conectado');
   window.setTimeout(montar, 400);
 } else {
   montar();

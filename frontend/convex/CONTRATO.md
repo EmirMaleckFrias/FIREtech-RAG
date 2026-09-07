@@ -283,7 +283,7 @@ Nombres de las exportaciones que consume el frontend:
   (mutation, solo admin, `{userId, rol?, bloqueado?}`; **403 si es uno mismo**).
   `usuarios.borrar` (mutation, solo admin; **403 si es uno mismo**; borra en
   cascada a mano: sesiones, mensajes, feedback, SU CORPUS con sus fragmentos y ficheros,
-  y su conexión con Notion con sus páginas y corridas).
+  y sus conexiones con Notion, Google Drive y OneDrive con sus páginas, ficheros y corridas).
 - `estadisticas.sistema` (query, solo admin) → `{index: {chunks, files, types, languages},
   activity: {questions_total, questions_7d, active_users_7d, feedback_up, feedback_down},
   config: {model, embedding_model, prompt_version, upload_limit_mb}}`.

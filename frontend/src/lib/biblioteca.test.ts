@@ -146,7 +146,7 @@ describe('listar', () => {
     const f = (p: Partial<Filtros>): Filtros => ({ ...SIN_FILTROS, ...p });
     expect(listar(todos, f({ formato: 'pdf' }), 'nombre').map((d) => d.fileName)).toEqual(['roto.pdf', 'viejo.pdf']);
     expect(listar(todos, f({ estado: 'failed' }), 'nombre').map((d) => d.fileName)).toEqual(['roto.pdf']);
-    expect(listar(todos, f({ soloNotion: true }), 'nombre').map((d) => d.fileName)).toEqual(['foto.png']);
+    expect(listar(todos, f({ origen: 'notion' }), 'nombre').map((d) => d.fileName)).toEqual(['foto.png']);
     // Acumulados: PDF Y fallido.
     expect(listar(todos, f({ formato: 'pdf', estado: 'failed' }), 'nombre').map((d) => d.fileName)).toEqual(['roto.pdf']);
     // Acumulados hasta no dejar nada.
@@ -160,7 +160,7 @@ describe('listar', () => {
     expect(hayFiltros({ ...SIN_FILTROS, texto: '  ' })).toBe(false);
     expect(hayFiltros({ ...SIN_FILTROS, texto: 'x' })).toBe(true);
     expect(hayFiltros({ ...SIN_FILTROS, formato: 'pdf' })).toBe(true);
-    expect(hayFiltros({ ...SIN_FILTROS, soloNotion: true })).toBe(true);
+    expect(hayFiltros({ ...SIN_FILTROS, origen: 'notion' })).toBe(true);
   });
 });
 
@@ -179,7 +179,7 @@ describe('la forma del corpus', () => {
       fragmentos: 60,
       procesando: 1,
       fallidos: 1,
-      deNotion: 1,
+      sincronizados: 1,
     });
   });
 

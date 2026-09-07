@@ -299,9 +299,10 @@ export interface DocumentInfo {
    *  el servidor ya los devolvía y el panel los tiraba. */
   titulo: string | null;
   citation: string | null;
-  /** De dónde salió: subida manual o sincronización con Notion. null en los
-   *  registros anteriores a que existiera el campo. */
-  origen: 'subida' | 'notion' | null;
+  /** De dónde salió: subida manual o una sincronización (Notion, Google
+   *  Drive, OneDrive). null en los registros anteriores a que existiera el
+   *  campo. */
+  origen: OrigenDocumento | null;
   /** Hash del fichero, para que subir una carpeta no repita lo que ya está
    *  con otro nombre. null si el registro no lo trae. */
   sha256: string | null;
@@ -316,6 +317,11 @@ export interface AvisosIngesta {
   recortados: number;
   motivo: string | null;
 }
+
+export type OrigenDocumento = 'subida' | 'notion' | 'google' | 'onedrive';
+
+/** Las nubes de ficheros con las que se puede conectar (convex/nube/). */
+export type ProveedorNube = 'google' | 'onedrive';
 
 /** Una corrida de la sincronización con Notion (notion.admin.estado.ultimas). */
 export interface CorridaNotion {
@@ -383,6 +389,69 @@ export type AvisoNotion =
   | { tipo: 'conectado' }
   | { tipo: 'cancelado' }
   | { tipo: 'error'; motivo: string | null };
+
+/** Una corrida de la sincronización con una nube (nube.admin.estado.ultimas). */
+export interface CorridaNube {
+  empezadoEn: number;
+  terminadoEn: number | null;
+  estado: 'running' | 'ok' | 'error';
+  ficheros: number;
+  nuevos: number;
+  actualizados: number;
+  borrados: number;
+  errores: string[];
+}
+
+/** Progreso de la corrida en curso con una nube, fichero a fichero. */
+export interface ProgresoNube {
+  vivaHasta: number;
+  empezadoEn: number;
+  /** null mientras aún se listan las carpetas. */
+  ficherosTotal: number | null;
+  ficherosProcesados: number;
+  ficheroActual: string | null;
+  nuevos: number;
+  actualizados: number;
+  borrados: number;
+  errores: string[];
+}
+
+/** Una carpeta elegible o elegida de una nube. */
+export interface CarpetaNube {
+  id: string;
+  nombre: string;
+  /** Ruta legible desde la raíz ("Mi unidad / Clínica / Protocolos"). */
+  ruta: string;
+}
+
+/** Estado completo del bloque de una nube (nube.admin.estado). Sin tokens:
+ *  dice con qué cuenta se conectó y qué carpetas sincroniza. */
+export interface EstadoNube {
+  habilitada: boolean;
+  conexion: {
+    cuentaNombre: string;
+    cuentaCorreo: string | null;
+    cuentaImagen: string | null;
+    conectadoEn: number;
+    /** El proveedor dejó de aceptar el permiso: hay que volver a conectar. */
+    necesitaReconexion: boolean;
+  } | null;
+  carpetas: CarpetaNube[];
+  periodicaMinutos: number;
+  borrarRetirados: boolean;
+  ficheros: number;
+  ficherosConError: number;
+  documentos: number;
+  enCurso: ProgresoNube | null;
+  ultimas: CorridaNube[];
+}
+
+/** Con qué volvió la usuaria de la pantalla de una nube
+ *  (`?nube=google&resultado=…` en la URL). */
+export type AvisoNube =
+  | { proveedor: ProveedorNube; tipo: 'conectado' }
+  | { proveedor: ProveedorNube; tipo: 'cancelado' }
+  | { proveedor: ProveedorNube; tipo: 'error'; motivo: string | null };
 
 /** Señal para enfocar una fuente concreta en el panel derecho (clic en una cita). */
 export interface SourceFocus {

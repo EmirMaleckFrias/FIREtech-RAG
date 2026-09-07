@@ -36,6 +36,7 @@ import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { ajustes } from "./lib/config";
+import { origenDocumento } from "./schema";
 import { errorDatos, usuario } from "./usuarios";
 
 // Las imágenes entran por OCR (ingesta/ocr.ts): una foto de un protocolo o un
@@ -223,6 +224,7 @@ export const registrar = mutation({
         storageId: args.storageId,
         origen: "subida",
         notionPageId: undefined,
+        nubeFicheroId: undefined,
       });
       documentId = fallido._id;
     } else {
@@ -244,29 +246,32 @@ export const registrar = mutation({
   },
 });
 
-/** Registra un fichero que trajo una sincronización (hoy, Notion) y arranca
- *  su ingesta. Misma validación que `registrar`, sin usuario: lo llama la
- *  acción `notion.sync.sincronizar`, que corre desde el cron sin identidad.
+/** Registra un fichero que trajo una sincronización (Notion, Google Drive u
+ *  OneDrive) y arranca su ingesta. Misma validación que `registrar`, sin
+ *  usuario: lo llaman las acciones de sincronización, que corren desde el
+ *  cron sin identidad.
  *
  *  Reutilización de fila, más ancha que en `registrar`: además del `failed`,
- *  se reutiliza un documento con el MISMO nombre y el MISMO origen y página,
- *  porque eso es la versión nueva del mismo fichero (la página se editó y el
- *  adjunto o el texto cambió). Reutilizar la fila es lo que hace que la
+ *  se reutiliza un documento con el MISMO nombre y el MISMO origen y elemento
+ *  (la misma página de Notion, el mismo fichero de la nube), porque eso es la
+ *  versión nueva del mismo fichero. Reutilizar la fila es lo que hace que la
  *  ingesta retire los fragmentos de la versión anterior (`borrarChunks` en
  *  modo `antiguos` va por `documentRef`); una fila nueva los dejaría
  *  huérfanos y respondiendo en las búsquedas. Un nombre ocupado por otro
- *  documento (una subida manual, u otra página) sigue siendo `conflicto`, y
- *  la sincronización elige otro nombre. */
+ *  documento (una subida manual, otra página, otro fichero) sigue siendo
+ *  `conflicto`, y la sincronización elige otro nombre. */
 export const registrarDesdeOrigen = internalMutation({
   args: {
     // De quién es el corpus al que entra. Lo pone la sincronización a partir
-    // de quién conectó ese Notion, no hay identidad en el cron.
+    // de quién conectó esa cuenta, no hay identidad en el cron.
     propietario: v.id("users"),
     storageId: v.id("_storage"),
     fileName: v.string(),
     sha256: v.string(),
-    origen: v.union(v.literal("subida"), v.literal("notion")),
+    origen: origenDocumento,
+    // El elemento del que salió: la página (Notion) o el fichero (nubes).
     notionPageId: v.optional(v.string()),
+    nubeFicheroId: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<Id<"documents">> => {
     const { nombre, sha256 } = await validarRegistro(ctx, args);
@@ -277,19 +282,20 @@ export const registrarDesdeOrigen = internalMutation({
         q.eq("propietario", args.propietario).eq("fileName", nombre),
       )
       .collect();
-    const mismaPagina = (d: Doc<"documents">) =>
+    const elemento = args.notionPageId ?? args.nubeFicheroId;
+    const mismoElemento = (d: Doc<"documents">) =>
       d.origen === args.origen &&
-      args.notionPageId !== undefined &&
-      d.notionPageId === args.notionPageId;
-    // Se reutiliza la fila de esta misma página, o una subida manual fallida
-    // (como hace `registrar`). NUNCA la fila fallida de OTRA página de Notion:
-    // esa página sigue teniendo el id en su lista y, al resincronizarse,
-    // borraría o reingiriría lo que ahora sería de esta.
+      elemento !== undefined &&
+      (d.notionPageId ?? d.nubeFicheroId) === elemento;
+    // Se reutiliza la fila de este mismo elemento, o una subida manual fallida
+    // (como hace `registrar`). NUNCA la fila fallida de OTRO elemento
+    // sincronizado: ese elemento sigue teniendo el id en su lista y, al
+    // resincronizarse, borraría o reingiriría lo que ahora sería de este.
     const reutilizable =
-      existentes.find((d) => mismaPagina(d)) ??
-      existentes.find((d) => d.status === "failed" && d.origen !== "notion");
+      existentes.find((d) => mismoElemento(d)) ??
+      existentes.find((d) => d.status === "failed" && !esSincronizado(d));
     const bloquea = existentes.find(
-      (d) => d !== reutilizable && (d.status !== "failed" || d.origen === "notion"),
+      (d) => d !== reutilizable && (d.status !== "failed" || esSincronizado(d)),
     );
     if (bloquea) {
       throw errorDatos("conflicto", `'${nombre}' ya está indexado. Bórralo primero.`);
@@ -310,6 +316,7 @@ export const registrarDesdeOrigen = internalMutation({
         storageId: args.storageId,
         origen: args.origen,
         notionPageId: args.notionPageId,
+        nubeFicheroId: args.nubeFicheroId,
       });
       await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.ingestar, {
         documentId: reutilizable._id,
@@ -327,11 +334,17 @@ export const registrarDesdeOrigen = internalMutation({
       storageId: args.storageId,
       origen: args.origen,
       notionPageId: args.notionPageId,
+      nubeFicheroId: args.nubeFicheroId,
     });
     await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.ingestar, { documentId });
     return documentId;
   },
 });
+
+/** ¿Lo gobierna una sincronización (y no una subida manual)? */
+function esSincronizado(d: Doc<"documents">): boolean {
+  return d.origen !== undefined && d.origen !== "subida";
+}
 
 /** Reintenta la ingesta a partir del fichero guardado.
  *

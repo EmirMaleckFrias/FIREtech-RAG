@@ -33,8 +33,11 @@ import { mensajeDesdeDoc, type MensajeDoc } from './lib/mensajes';
 import { useDocumentos } from './lib/useDocumentos';
 import { leerAvisoNotion, urlSinAvisoNotion } from './lib/notion';
 import { escucharAvisos } from './lib/notionEmergente';
+import { leerAvisoNube, urlSinAvisoNube } from './lib/nube';
+import { escucharAvisosNube } from './lib/nubeEmergente';
 import type {
   AvisoNotion,
+  AvisoNube,
   ChatMessage,
   DocumentStatus,
   EstadoConexion,
@@ -315,14 +318,24 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   const [notionAviso, setNotionAviso] = useState<AvisoNotion | null>(() =>
     typeof window === 'undefined' ? null : leerAvisoNotion(window.location.search),
   );
+  // Y lo mismo al volver de Google Drive u OneDrive (`?nube=google&resultado=…`).
+  const [nubeAviso, setNubeAviso] = useState<AvisoNube | null>(() =>
+    typeof window === 'undefined' ? null : leerAvisoNube(window.location.search),
+  );
   useEffect(() => {
-    if (typeof window === 'undefined' || leerAvisoNotion(window.location.search) === null) return;
-    window.history.replaceState(window.history.state, '', urlSinAvisoNotion(window.location.href));
+    if (typeof window === 'undefined') return;
+    const hayNotion = leerAvisoNotion(window.location.search) !== null;
+    const hayNube = leerAvisoNube(window.location.search) !== null;
+    if (!hayNotion && !hayNube) return;
+    let href = window.location.href;
+    if (hayNotion) href = new URL(urlSinAvisoNotion(href), window.location.origin).href;
+    if (hayNube) href = new URL(urlSinAvisoNube(href), window.location.origin).href;
+    window.history.replaceState(window.history.state, '', urlSinAvisoNube(urlSinAvisoNotion(href)));
   }, []);
 
   // Slide-overs de gestión (siempre overlay, desde la derecha). Comparten
   // sitio y scrim, así que nunca están abiertos los dos a la vez.
-  const [docsOpen, setDocsOpen] = useState(() => notionAviso !== null);
+  const [docsOpen, setDocsOpen] = useState(() => notionAviso !== null || nubeAviso !== null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** La vista de todos los documentos, y con qué estado se pidió abrirla. */
   const [biblioOpen, setBiblioOpen] = useState(false);
@@ -342,6 +355,13 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   useEffect(() => {
     return escucharAvisos((aviso) => {
       setNotionAviso(aviso);
+      setDocsOpen(true);
+      window.focus();
+    });
+  }, []);
+  useEffect(() => {
+    return escucharAvisosNube((aviso) => {
+      setNubeAviso(aviso);
       setDocsOpen(true);
       window.focus();
     });
@@ -698,6 +718,8 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
         onClose={closeDocuments}
         notionAviso={notionAviso}
         onNotionAvisoVisto={() => setNotionAviso(null)}
+        nubeAviso={nubeAviso}
+        onNubeAvisoVisto={() => setNubeAviso(null)}
         documentos={documentos}
         inerte={biblioOpen}
         onVerTodos={(estado) => {

@@ -74,6 +74,19 @@ export const avisosIngesta = v.object({
   motivo: v.optional(v.string()),
 });
 
+/** De dónde salió un documento: subida manual, o una de las sincronizaciones
+ *  (Notion, Google Drive, OneDrive). Compartido con `documentos.ts` y con los
+ *  módulos de sincronización para que un origen nuevo se añada en un sitio. */
+export const origenDocumento = v.union(
+  v.literal("subida"),
+  v.literal("notion"),
+  v.literal("google"),
+  v.literal("onedrive"),
+);
+
+/** Las nubes de ficheros con las que se puede conectar (convex/nube/). */
+export const proveedorNube = v.union(v.literal("google"), v.literal("onedrive"));
+
 export default defineSchema({
   // Tablas de Convex Auth (users, authAccounts, authSessions, authRefreshTokens,
   // authVerificationCodes, authVerifiers, authRateLimits). `users` se extiende
@@ -197,8 +210,12 @@ export default defineSchema({
     // sincronización con Notion. Con `notion`, `notionPageId` es la página de
     // la que se bajó (texto renderizado o adjunto) y quien lo gestiona es
     // `convex/notion/sync.ts`: si la página se archiva, el documento se va.
-    origen: v.optional(v.union(v.literal("subida"), v.literal("notion"))),
+    // Con `google` u `onedrive`, `nubeFicheroId` es el id del fichero en esa
+    // nube y quien lo gestiona es `convex/nube/sync.ts`: si el fichero sale
+    // de la carpeta elegida, el documento se va.
+    origen: v.optional(origenDocumento),
     notionPageId: v.optional(v.string()),
+    nubeFicheroId: v.optional(v.string()),
     // Lo que la ingesta no pudo leer del todo: páginas escaneadas cuyo OCR
     // falló, imágenes omitidas por el tope, fragmentos recortados. Un
     // documento "listo" con avisos se consulta igual, pero la ficha lo dice y
@@ -316,6 +333,95 @@ export default defineSchema({
   })
     .index("porState", ["state"])
     // Para limpiar los caducados y los de una cuenta sin recorrer la tabla.
+    .index("porExpira", ["expiraEn"])
+    .index("porUsuario", ["userId"]),
+
+  // ---------------------------------------------------------------------
+  // Nubes de ficheros: Google Drive y OneDrive (convex/nube/). Mismo modelo
+  // que Notion, generalizado a un `proveedor`: UNA conexión por persona y
+  // proveedor, las carpetas que eligió sincronizar, una fila por fichero
+  // conocido y el histórico de corridas. Todo lleva `propietario` porque
+  // cada persona sincroniza a su propio corpus.
+  // ---------------------------------------------------------------------
+
+  // La conexión OAuth con una nube. A diferencia de Notion, estos tokens
+  // CADUCAN (una hora) y se renuevan con `refreshToken`; `expiraEn` dice
+  // hasta cuándo vale el de acceso. Ninguno de los dos sale al cliente.
+  // `necesitaReconexion` se pone cuando el proveedor rechaza la renovación
+  // (la persona revocó el permiso, cambió la contraseña): la UI ofrece
+  // entonces "Volver a conectar" en vez de fallar cada hora en silencio.
+  nubeConexion: defineTable({
+    proveedor: proveedorNube,
+    accessToken: v.string(),
+    refreshToken: v.optional(v.string()),
+    expiraEn: v.number(),
+    // La cuenta del proveedor con la que se conectó, para enseñar "Conectado
+    // como …" y para conservar las carpetas elegidas si vuelve a conectar la
+    // MISMA cuenta.
+    cuentaId: v.string(),
+    cuentaNombre: v.string(),
+    cuentaCorreo: v.optional(v.string()),
+    cuentaImagen: v.optional(v.string()),
+    conectadoPor: v.id("users"),
+    conectadoEn: v.number(),
+    // Las carpetas que sincroniza, con su ruta legible para la UI. Vacía =
+    // conectada pero sin nada que sincronizar todavía.
+    carpetas: v.array(v.object({ id: v.string(), nombre: v.string(), ruta: v.string() })),
+    necesitaReconexion: v.optional(v.boolean()),
+  }).index("porUsuarioYProveedor", ["conectadoPor", "proveedor"]),
+
+  // Un fichero conocido de una carpeta sincronizada: la memoria que permite
+  // saltar los que no cambiaron (`version` es lo que el proveedor da para
+  // detectar cambios: el md5 o la fecha en Google Drive, el cTag en OneDrive;
+  // se compara por igualdad) y saber qué documento retirar cuando el fichero
+  // desaparece. `documentId` ausente = fichero visto pero sin documento
+  // propio (era un duplicado exacto de algo ya indexado).
+  nubeFicheros: defineTable({
+    propietario: v.id("users"),
+    proveedor: proveedorNube,
+    // La carpeta ELEGIDA bajo la que se vio (no la subcarpeta inmediata):
+    // el cálculo de "qué ha desaparecido" es por carpeta elegida.
+    carpetaId: v.string(),
+    ficheroId: v.string(),
+    // Ruta relativa dentro de la carpeta, para los avisos y el progreso.
+    nombre: v.string(),
+    version: v.string(),
+    documentId: v.optional(v.id("documents")),
+    sincronizadoEn: v.number(),
+    error: v.optional(v.string()),
+  })
+    .index("porPropietarioYFichero", ["propietario", "proveedor", "ficheroId"])
+    .index("porPropietarioYCarpeta", ["propietario", "proveedor", "carpetaId"]),
+
+  // Corridas de la sincronización con una nube, con el mismo progreso en vivo
+  // que las de Notion. Se conservan las últimas 20 por persona y proveedor.
+  nubeSincronizaciones: defineTable({
+    propietario: v.id("users"),
+    proveedor: proveedorNube,
+    empezadoEn: v.number(),
+    terminadoEn: v.optional(v.number()),
+    ficheros: v.number(),
+    nuevos: v.number(),
+    actualizados: v.number(),
+    borrados: v.number(),
+    errores: v.array(v.string()),
+    estado: v.union(v.literal("running"), v.literal("ok"), v.literal("error")),
+    ficherosTotal: v.optional(v.number()),
+    ficherosProcesados: v.optional(v.number()),
+    ficheroActual: v.optional(v.string()),
+  }).index("porPropietarioYProveedor", ["propietario", "proveedor"]),
+
+  // Estados pendientes del OAuth con una nube: uno por clic en "Conectar".
+  // Mismas reglas que los de Notion: se consumen una sola vez y caducan.
+  nubeEstadosOauth: defineTable({
+    state: v.string(),
+    proveedor: proveedorNube,
+    userId: v.id("users"),
+    origen: v.optional(v.string()),
+    creadoEn: v.number(),
+    expiraEn: v.number(),
+  })
+    .index("porState", ["state"])
     .index("porExpira", ["expiraEn"])
     .index("porUsuario", ["userId"]),
 

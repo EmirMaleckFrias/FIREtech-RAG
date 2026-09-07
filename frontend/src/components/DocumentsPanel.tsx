@@ -21,7 +21,8 @@
 // - Focus trap ligero: Tab cicla dentro del panel, Escape cierra (o cancela
 //   la confirmación de borrado si está abierta) y el foco vuelve al botón
 //   que abrió el panel.
-// - Notion es un bloque propio, `NotionBloque`: cada usuaria conecta SU
+// - Notion es un bloque propio, `NotionBloque` (y Google Drive y OneDrive
+//   son `NubeBloque`, en su fichero): cada usuaria conecta SU
 //   espacio con UN botón (OAuth, en una ventana emergente que no abandona la
 //   app), elige la base en un desplegable y ve la sincronización avanzar en
 //   vivo por la suscripción a `notion.admin.estado`. Quien lo usa es una
@@ -73,7 +74,8 @@ import { sha256De, subirFichero } from '../lib/subida';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import { BandaCorpus } from './BandaCorpus';
 import { FichaDocumento } from './FichaDocumento';
-import type { AvisoNotion, BaseNotion, DocumentStatus, EstadoNotion } from '../types';
+import { NubeBloque } from './NubeBloque';
+import type { AvisoNotion, AvisoNube, BaseNotion, DocumentStatus, EstadoNotion } from '../types';
 import {
   IconAlert,
   IconCheck,
@@ -102,6 +104,10 @@ interface DocumentsPanelProps {
    *  URL, leído por App al montar). null si no viene de ahí. */
   notionAviso: AvisoNotion | null;
   onNotionAvisoVisto: () => void;
+  /** Lo mismo para Google Drive y OneDrive (`?nube=…`). Cada bloque recibe
+   *  solo el aviso de su proveedor. */
+  nubeAviso: AvisoNube | null;
+  onNubeAvisoVisto: () => void;
   /** Abre la vista de todos los documentos, opcionalmente ya filtrada por un
    *  estado (al pulsar "3 sin leer" en la banda). */
   onVerTodos: (estado: DocumentStatus | null) => void;
@@ -815,6 +821,8 @@ export function DocumentsPanel({
   onClose,
   notionAviso,
   onNotionAvisoVisto,
+  nubeAviso,
+  onNubeAvisoVisto,
   onVerTodos,
   documentos,
   inerte = false,
@@ -1192,6 +1200,21 @@ export function DocumentsPanel({
             estado={notion}
             aviso={notionAviso}
             onAvisoVisto={onNotionAvisoVisto}
+          />
+
+          {/* Google Drive y OneDrive: el mismo bloque, uno por proveedor.
+              Cada uno se suscribe a su propio estado. Ver NubeBloque. */}
+          <NubeBloque
+            proveedor="google"
+            open={open}
+            aviso={nubeAviso?.proveedor === 'google' ? nubeAviso : null}
+            onAvisoVisto={onNubeAvisoVisto}
+          />
+          <NubeBloque
+            proveedor="onedrive"
+            open={open}
+            aviso={nubeAviso?.proveedor === 'onedrive' ? nubeAviso : null}
+            onAvisoVisto={onNubeAvisoVisto}
           />
 
           {/* zona de subida: archivos sueltos o carpetas enteras */}

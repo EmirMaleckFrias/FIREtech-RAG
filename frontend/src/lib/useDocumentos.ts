@@ -69,7 +69,10 @@ export function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
         : typeof d._creationTime === 'number'
           ? d._creationTime
           : 0,
-    origen: d.origen === 'notion' || d.origen === 'subida' ? d.origen : null,
+    origen:
+      d.origen === 'notion' || d.origen === 'subida' || d.origen === 'google' || d.origen === 'onedrive'
+        ? d.origen
+        : null,
     sha256: typeof d.sha256 === 'string' && d.sha256 !== '' ? d.sha256 : null,
     titulo: typeof d.titulo === 'string' && d.titulo.trim() !== '' ? d.titulo : null,
     citation: typeof d.citation === 'string' && d.citation.trim() !== '' ? d.citation : null,

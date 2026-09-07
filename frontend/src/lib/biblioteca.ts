@@ -16,6 +16,7 @@
 //   tiene y aquí es el que de verdad informa, así que se enseña.
 
 import type { DocumentInfo, DocumentStatus } from '../types';
+import type { OrigenSincronizado } from './origenes';
 
 // ---------------------------------------------------------------------------
 // Formatos
@@ -147,14 +148,15 @@ export interface Filtros {
   formato: FamiliaFormato | null;
   /** null = todos los estados. */
   estado: DocumentStatus | null;
-  /** true = solo los que vinieron de Notion. */
-  soloNotion: boolean;
+  /** Solo los que llegaron por una sincronización concreta (Notion, Google
+   *  Drive, OneDrive); null = de cualquier origen. */
+  origen: OrigenSincronizado | null;
 }
 
-export const SIN_FILTROS: Filtros = { texto: '', formato: null, estado: null, soloNotion: false };
+export const SIN_FILTROS: Filtros = { texto: '', formato: null, estado: null, origen: null };
 
 export function hayFiltros(f: Filtros): boolean {
-  return f.texto.trim() !== '' || f.formato !== null || f.estado !== null || f.soloNotion;
+  return f.texto.trim() !== '' || f.formato !== null || f.estado !== null || f.origen !== null;
 }
 
 /** Compara cadenas con las reglas del español (para que la ñ y las tildes
@@ -170,7 +172,7 @@ export function listar(docs: DocumentInfo[], filtros: Filtros, orden: Orden): Do
   const salida = docs.filter((d) => {
     if (filtros.formato !== null && formatoDe(d.fileName).familia !== filtros.formato) return false;
     if (filtros.estado !== null && d.status !== filtros.estado) return false;
-    if (filtros.soloNotion && d.origen !== 'notion') return false;
+    if (filtros.origen !== null && d.origen !== filtros.origen) return false;
     return casa(d, filtros.texto);
   });
   const cmp: Record<Orden, (a: DocumentInfo, b: DocumentInfo) => number> = {
@@ -193,7 +195,8 @@ export interface Resumen {
   fragmentos: number;
   procesando: number;
   fallidos: number;
-  deNotion: number;
+  /** Los que llegaron por alguna sincronización, no a mano. */
+  sincronizados: number;
 }
 
 export function resumir(docs: DocumentInfo[]): Resumen {
@@ -205,7 +208,7 @@ export function resumir(docs: DocumentInfo[]): Resumen {
     fragmentos: docs.reduce((n, d) => n + (d.status === 'ready' ? d.chunks : 0), 0),
     procesando: docs.filter((d) => d.status === 'processing').length,
     fallidos: docs.filter((d) => d.status === 'failed').length,
-    deNotion: docs.filter((d) => d.origen === 'notion').length,
+    sincronizados: docs.filter((d) => d.origen !== null && d.origen !== 'subida').length,
   };
 }
 

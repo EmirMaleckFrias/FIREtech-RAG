@@ -84,7 +84,8 @@ Campos de `messages` que escribe el agente: `estado`, `plan`, `hops`, `sources`,
 `verificacion`, `metrics`, `error`. Campos de `documents` tras una ingesta correcta: `sha256`,
 `pages`, `chunks`, `status`, `titulo`, `citation`, `doi`, `language`, `documentType`, y
 `avisos` si algo quedó sin leer (sección 14). Además `propietario`, `storageId`, `origen`
-(`subida` | `notion`) y `notionPageId`.
+(`subida` | `notion` | `google` | `onedrive`), `notionPageId` (páginas de Notion) y
+`nubeFicheroId` (ficheros de Google Drive u OneDrive).
 
 Las listas que van al navegador están acotadas: `mensajes.deSesion` devuelve los últimos 200
 mensajes de la conversación, `documentos.listar` hasta 5000 documentos y `sesiones.listar`
@@ -119,6 +120,12 @@ quien llama (`permisos.ts`): sin sesión, `no_autenticado`; con la cuenta bloque
 | `notion.oauth.desconectar` | mutation | usuario | Borra su conexión y sus `state` pendientes; el corpus se conserva. |
 | `notion.admin.estado` | query | usuario | Su conexión (sin token), sus bases, cifras y corridas; `enCurso` lleva `vivaHasta`. |
 | `notion.admin.sincronizarAhora` | mutation | usuario, conectada | Agenda una corrida forzada. `conflicto` si ya hay una en curso. |
+| `nube.oauth.iniciar` | mutation `{proveedor, origen}` | usuario | Crea un `state` ligado a la cuenta y al proveedor (`google` \| `onedrive`) y devuelve la URL de autorización (solo lectura, con refresh token). |
+| `nube.oauth.listarCarpetas` | action `{proveedor}` | usuario, conectada | Las carpetas que puede ver en esa nube, con su ruta; renueva el token si hace falta. |
+| `nube.oauth.elegirCarpetas` | mutation `{proveedor, carpetas: {id, nombre, ruta?}[]}` | usuario, conectada | Reemplaza la selección (hasta 20 carpetas; en Google acepta la URL pegada). |
+| `nube.oauth.desconectar` | mutation `{proveedor}` | usuario | Borra su conexión con ese proveedor y sus `state`; el corpus y el otro proveedor se conservan. |
+| `nube.admin.estado` | query `{proveedor}` | usuario | Su conexión (sin tokens: cuenta, `necesitaReconexion`), sus carpetas, cifras y corridas; `enCurso` lleva `vivaHasta`. |
+| `nube.admin.sincronizarAhora` | mutation `{proveedor}` | usuario, conectada | Agenda una corrida forzada. `conflicto` si ya hay una en curso. |
 | `usuarios.yo` | query | cualquiera | `{_id, email, rol, bloqueado}`, o `null` sin sesión. Bloqueado: `acceso_revocado`. |
 | `usuarios.listar` | query | admin | Cuentas con `creadoEn`, `ultimoAccesoEn`, `sesiones` y `mensajes` (preguntas, no turnos). Solo cifras, nunca texto. |
 | `usuarios.actualizar` | mutation `{userId, rol?, bloqueado?}` | admin, otro | Asciende, degrada, bloquea o desbloquea. Sobre uno mismo: `invalido`. |
@@ -811,3 +818,50 @@ interno `pruebas.ts` (OPERACION.md).
   a mirar); la usuaria los borra a mano si quiere. Retirar corpus por dejar de sincronizar una
   base sería destruir lo que ella eligió tener.
 - Al borrar la cuenta, su conexión, sus páginas y sus corridas se van por lotes.
+
+## 18. Google Drive y OneDrive
+
+- **Mismo modelo que Notion, generalizado a un `proveedor`** (`convex/nube/`): cada persona
+  conecta SU cuenta desde un botón, el consentimiento va en una ventana emergente que vuelve a
+  `/google/callback` o `/onedrive/callback` y avisa a la aplicación por `BroadcastChannel`
+  (canal y marca propios, distintos de los de Notion). El `state` lleva el proveedor: uno de
+  Google no vale en el callback de OneDrive, y se consume igual. Una conexión por persona y
+  proveedor.
+- **Permisos de solo lectura**: `drive.readonly` en Google; `Files.Read.All offline_access
+  User.Read` en Microsoft. La aplicación nunca escribe en la nube de nadie.
+- **Los tokens caducan** (una hora). `tokenVigente` renueva con el refresh token cuando quedan
+  menos de 25 minutos antes de una corrida (2 minutos para llamadas cortas) y guarda el nuevo;
+  Microsoft rota también el refresh token y se sustituye. Un 401 a mitad de corrida renueva
+  UNA vez y repite la petición. Si el proveedor rechaza la renovación (400/401 en el punto de
+  token: permiso revocado), la conexión queda `necesitaReconexion`, la corrida cierra con un
+  motivo en llano, la periódica deja de intentarlo y la UI ofrece "Volver a conectar" (las
+  carpetas elegidas se conservan si es la misma cuenta). Un fallo transitorio (5xx, red) no
+  marca nada.
+- **Carpetas**: hasta 20 por proveedor, con sus subcarpetas (profundidad 12, 2000 ficheros por
+  carpeta; al pasar un tope se avisa y el listado queda INCOMPLETO, así que no se retira nada).
+  Google ofrece "Mi unidad", las unidades compartidas y las carpetas con su ruta; OneDrive la
+  raíz, tres niveles y lo compartido conmigo (ids compuestos `drive:<driveId>:<itemId>` que se
+  resuelven a `/drives/{driveId}/items/{id}`).
+- **Sincronización** (`nube.sync.sincronizar`, por cuenta y proveedor; el cron horario la
+  reparte junto con las de Notion). Todas las carpetas se listan antes de tocar nada. Por
+  fichero se compara `version` (md5 o fecha en Drive, cTag en OneDrive) con `nubeFicheros`; sin
+  cambio y con su documento vivo, ni una petición. Con cambio se descarga (tope 20 MB, sin
+  descargar si el tamaño anunciado ya pasa), se deduplica por sha256 contra todo el corpus y se
+  registra por `documentos.registrarDesdeOrigen` con `origen = proveedor` y `nubeFicheroId`,
+  reutilizando la fila anterior del mismo fichero (y conservando su nombre aunque se renombre
+  en la nube). Los formatos nativos de Google se exportan (Documento → docx, Hoja → xlsx,
+  Presentación y Dibujo → pdf; el resto se omite y se dice); los accesos directos, los
+  cuadernos de OneNote, las extensiones no indexables y los ficheros que pasan del tope se dicen
+  en los avisos de la corrida sin dejar fila. Un fichero que se MUEVE entre dos carpetas
+  elegidas cambia de casa sin tocar su documento. Los que ya no están en una carpeta recorrida
+  entera (y en ninguna otra elegida) se retiran si `DRIVE_DELETE_REMOVED` está activo
+  (`retirado` en la fila si no). Reloj de 20 minutos, `parcial` y reagendado al minuto como en
+  Notion.
+- **Configuración del desarrollador**: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` (cliente OAuth
+  "aplicación web" en Google Cloud con la API de Drive activada) y
+  `MICROSOFT_CLIENT_ID`/`MICROSOFT_CLIENT_SECRET` (registro en Microsoft Entra, cuentas
+  personales y de trabajo, redirect de tipo Web), con las URIs de redirección
+  `${CONVEX_SITE_URL}/google/callback` y `${CONVEX_SITE_URL}/onedrive/callback`.
+  `DRIVE_SYNC_MINUTES` (60) y `DRIVE_DELETE_REMOVED` (true). Sin credenciales, el bloque dice
+  que la conexión aún no está habilitada por el equipo técnico.
+- Al borrar la cuenta, sus conexiones, ficheros y corridas de las nubes se van por lotes.

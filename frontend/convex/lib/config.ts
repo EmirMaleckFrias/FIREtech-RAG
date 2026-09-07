@@ -107,6 +107,22 @@ export interface Ajustes {
   // dice que la conexión "aún no está habilitada por el equipo técnico".
   notionClientId: string;
   notionClientSecret: string;
+  // Aplicaciones OAuth de Google Drive y de OneDrive (convex/nube/). Mismo
+  // modelo que Notion: las registra el desarrollador una sola vez (un cliente
+  // OAuth "aplicación web" en Google Cloud con la API de Drive activada; un
+  // registro de aplicación en Microsoft Entra para cuentas personales y de
+  // trabajo), y cada persona conecta SU cuenta desde la app con un botón. Sin
+  // ellas, el bloque correspondiente dice que la conexión "aún no está
+  // habilitada por el equipo técnico".
+  googleClientId: string;
+  googleClientSecret: string;
+  microsoftClientId: string;
+  microsoftClientSecret: string;
+  // Cadencia de la sincronización periódica con las nubes de ficheros, en
+  // minutos (0 apaga la periódica; la manual sigue), y si un fichero que
+  // desaparece de la carpeta se retira del índice o solo se marca.
+  nubeSyncMinutes: number;
+  nubeBorrarRetirados: boolean;
   // URL pública de las rutas HTTP del despliegue (`*.convex.site`). La pone
   // la plataforma; es la base de la redirect URI que se registra en Notion.
   convexSiteUrl: string;
@@ -216,6 +232,12 @@ export function ajustes(): Ajustes {
     notionBorrarArchivados: booleano("NOTION_DELETE_ARCHIVED", true),
     notionClientId: texto("NOTION_CLIENT_ID"),
     notionClientSecret: texto("NOTION_CLIENT_SECRET"),
+    googleClientId: texto("GOOGLE_CLIENT_ID"),
+    googleClientSecret: texto("GOOGLE_CLIENT_SECRET"),
+    microsoftClientId: texto("MICROSOFT_CLIENT_ID"),
+    microsoftClientSecret: texto("MICROSOFT_CLIENT_SECRET"),
+    nubeSyncMinutes: Math.max(0, numero("DRIVE_SYNC_MINUTES", 60)),
+    nubeBorrarRetirados: booleano("DRIVE_DELETE_REMOVED", true),
     convexSiteUrl: texto("CONVEX_SITE_URL").replace(/\/$/, ""),
     siteUrl: texto("SITE_URL").replace(/\/$/, ""),
   };
