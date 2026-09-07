@@ -258,14 +258,20 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
 
   // Preselección: lo que ya se sincroniza; si no hay nada y Notion solo
   // comparte una base, esa, que es lo que ella iba a marcar de todas formas.
+  //
+  // NO espera a que Notion responda, y eso lo destapó una prueba con un token
+  // que Notion rechaza: con `if (bases === null) return` las casillas de las
+  // bases que YA se sincronizan salían desmarcadas, así que pulsar Guardar las
+  // habría quitado todas. Las bases elegidas se conocen sin preguntarle nada a
+  // Notion (están en la conexión), así que se marcan igual.
   useEffect(() => {
-    if (bases === null) return;
+    if (bases === null && basesError === null) return;
     setSeleccion((actual) => {
       if (actual.length > 0) return actual;
       if (basesElegidas.length > 0) return basesElegidas.map((b) => b.id);
-      return bases.length === 1 ? [bases[0].id] : [];
+      return bases !== null && bases.length === 1 ? [bases[0].id] : [];
     });
-  }, [bases, basesElegidas]);
+  }, [bases, basesError, basesElegidas]);
 
   /** Deja de esperar: cierra la emergente si sigue abierta y retira la marca. */
   const cancelarEspera = useCallback(() => {

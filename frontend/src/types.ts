@@ -21,10 +21,19 @@ export type UserRole = 'admin' | 'lector';
 
 /** Etiqueta visible de cada rol. Única definición: antes estaba duplicada en
  *  SessionSidebar y SettingsPanel, que es la forma habitual de que las dos
- *  copias acaben diciendo cosas distintas. */
+ *  copias acaben diciendo cosas distintas.
+ *
+ *  `lector` se enseña como "Miembro" y no como "Lector" porque desde el paso a
+ *  un corpus por persona ya no lee y nada más: tiene su propio espacio y sube,
+ *  conecta su Notion, reindexa y borra en él. Lo único que NO puede es
+ *  gestionar las cuentas de los demás, que es lo que distingue a un
+ *  administrador. El identificador de la base sigue siendo `lector`: cambiarlo
+ *  sería migrar datos para renombrar una etiqueta. Y "Miembro" en vez de
+ *  "Usuaria" o "Usuario" porque vale para cualquiera sin suponer el género de
+ *  quien entra. */
 export const ROLE_LABEL: Record<UserRole, string> = {
   admin: 'Administrador',
-  lector: 'Lector',
+  lector: 'Miembro',
 };
 
 /** Identidad del usuario en sesión (usuarios.yo). */

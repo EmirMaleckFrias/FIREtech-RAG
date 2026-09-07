@@ -202,7 +202,9 @@ function confirmPrompt(action: RowAction, user: UserAccount): { question: string
   switch (action) {
     case 'demote':
       return {
-        question: '¿Quitarle el rol de administrador? Seguirá entrando como lector.',
+        question:
+          '¿Quitarle el rol de administrador? Seguirá teniendo su propio espacio con sus ' +
+          'documentos; lo que pierde es gestionar cuentas.',
         verb: 'Quitar',
       };
     case 'block':
