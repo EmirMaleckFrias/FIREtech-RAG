@@ -397,7 +397,7 @@ beforeEach(() => {
   });
   redactor = espiarRedactor().mockRejectedValue(new Error("crearCompletion no programado"));
 
-  clasificar = espiarClasificar().mockResolvedValue("documental");
+  clasificar = espiarClasificar().mockResolvedValue({ clase: "documental", consulta: PREGUNTA });
   planificar = espiarPlanificar().mockResolvedValue({ items: [], preguntaEn: "" });
 
   porPunto = {};
@@ -431,7 +431,7 @@ describe("camino no documental", () => {
       { role: "user", content: "hola" },
       { role: "assistant", content: "Hola, ¿qué quieres consultar?" },
     ];
-    clasificar.mockResolvedValue("sobre_el_asistente");
+    clasificar.mockResolvedValue({ clase: "sobre_el_asistente", consulta: PREGUNTA });
     redactor.mockResolvedValue(respuestaTexto("Soy el asistente de la empresa: respondo con los documentos indexados."));
 
     const m = await correrEn(t, ids, { texto: "¿Qué eres?", historial });
@@ -471,7 +471,7 @@ describe("camino no documental", () => {
   test("un saludo con el modelo mudo publica el texto de respaldo, nunca vacío", async () => {
     const t = nuevaBase();
     const ids = await sembrar(t, "hola");
-    clasificar.mockResolvedValue("conversacional");
+    clasificar.mockResolvedValue({ clase: "conversacional", consulta: PREGUNTA });
     redactor.mockResolvedValue(respuestaTexto(null));
 
     const m = await correrEn(t, ids, { texto: "hola" });
@@ -484,7 +484,7 @@ describe("camino no documental", () => {
   test("si el modelo falla en el camino sin documentos, el mensaje acaba en error, no en pensando", async () => {
     const t = nuevaBase();
     const ids = await sembrar(t, "gracias");
-    clasificar.mockResolvedValue("conversacional");
+    clasificar.mockResolvedValue({ clase: "conversacional", consulta: PREGUNTA });
     redactor.mockRejectedValue(new gateway.ErrorGateway(429, "credit_balance_exhausted", false));
 
     const m = await correrEn(t, ids, { texto: "gracias" });
@@ -1378,5 +1378,43 @@ describe("reloj", () => {
     // Quedaba tiempo del presupuesto total (540 - 241 s): la revisión lo recibe.
     expect(revisar.mock.calls[0][6]).toBeGreaterThan(250);
     expect(revisar.mock.calls[0][6]).toBeLessThanOrEqual(300);
+  });
+});
+
+describe("repreguntas: se busca la consulta autónoma, se responde la literal", () => {
+  test("ADVERSARIAL: 'hazme un mapa mental' tras hablar de hipertensión busca hipertensión, no 'mapa mental'", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    const historial = [
+      { role: "user", content: "háblame de la hipertensión arterial" },
+      { role: "assistant", content: "Es una elevación persistente de la PA [a.pdf, pág. 3]." },
+    ];
+    const CONSULTA = "mapa mental de la hipertensión arterial: definición, diagnóstico y tratamiento";
+    clasificar.mockResolvedValue({ clase: "documental", consulta: CONSULTA });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const { ctx } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids, { texto: "hazme un mapa mental o un diagrama visual", historial }));
+
+    // El ancla del plan (lo que se busca) es la consulta reformulada...
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; query: string }>;
+    expect(plan[0]).toMatchObject({ id: "e0", query: CONSULTA });
+    // ...y lo que el redactor recibe como pregunta es el texto literal.
+    const kwargs = stream.mock.calls[0][0] as { messages: Array<{ role: string; content: string }> };
+    const ultimoUsuario = kwargs.messages.filter((m) => m.role === "user").pop();
+    expect(ultimoUsuario?.content).toBe("hazme un mapa mental o un diagrama visual");
+  });
+
+  test("sin historial el ancla es la pregunta literal, pase lo que pase con el clasificador", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    // El clasificador real ya devuelve la literal sin historial; el bucle no
+    // depende de eso: con la clase en caché ni siquiera lo llama.
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const { ctx } = ctxDirecto(t);
+    await handlerDirecto(ctx, argsDe(ids));
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; query: string }>;
+    expect(plan[0].query).toBe(PREGUNTA);
   });
 });

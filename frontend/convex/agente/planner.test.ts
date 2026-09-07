@@ -190,11 +190,11 @@ describe("clasificar", () => {
   test("reconoce las tres clases con el modelo pequeño y el razonamiento ya medido", async () => {
     const tel = new Telemetria();
     espia.mockResolvedValueOnce(respuesta({ clase: "sobre_el_asistente" }));
-    expect(await clasificar("¿qué eres?", [], tel)).toBe("sobre_el_asistente");
+    expect((await clasificar("¿qué eres?", [], tel)).clase).toBe("sobre_el_asistente");
     espia.mockResolvedValueOnce(respuesta({ clase: "conversacional" }));
-    expect(await clasificar("hola", [], tel)).toBe("conversacional");
+    expect((await clasificar("hola", [], tel)).clase).toBe("conversacional");
     espia.mockResolvedValueOnce(respuesta({ clase: "documental" }));
-    expect(await clasificar("¿cuál es el AUC?", [], tel)).toBe("documental");
+    expect((await clasificar("¿cuál es el AUC?", [], tel)).clase).toBe("documental");
 
     const a = ajustes();
     const kwargs = espia.mock.calls[0][0] as Record<string, unknown>;
@@ -213,19 +213,19 @@ describe("clasificar", () => {
 
   test("tolera la forma pero no el contenido: variantes se aceptan, lo desconocido es documental", async () => {
     espia.mockResolvedValueOnce(respuesta({ clase: " Sobre el asistente " }));
-    expect(await clasificar("¿qué sabes hacer?", [])).toBe("sobre_el_asistente");
+    expect((await clasificar("¿qué sabes hacer?", [])).clase).toBe("sobre_el_asistente");
     espia.mockResolvedValueOnce(respuesta({ clase: "otra cosa" }));
-    expect(await clasificar("x", [])).toBe("documental");
+    expect((await clasificar("x", [])).clase).toBe("documental");
     espia.mockResolvedValueOnce(respuesta({}));
-    expect(await clasificar("x", [])).toBe("documental");
+    expect((await clasificar("x", [])).clase).toBe("documental");
     espia.mockResolvedValueOnce(respuesta({ clase: 3 }));
-    expect(await clasificar("x", [])).toBe("documental");
+    expect((await clasificar("x", [])).clase).toBe("documental");
   });
 
   test("ante un fallo cae a documental: buscar de más es más seguro que no buscar", async () => {
     const tel = new Telemetria();
     espia.mockRejectedValueOnce(new Error("gateway 503"));
-    expect(await clasificar("hola", [], tel)).toBe("documental");
+    expect((await clasificar("hola", [], tel)).clase).toBe("documental");
     expect(tel.rondas.map((r) => [r.componente, r.ok])).toEqual([["clasificador", false]]);
   });
 
@@ -239,5 +239,49 @@ describe("clasificar", () => {
     expect(usuario).toContain("Usuario: AUC de p-tau217");
     expect(usuario).toContain("Asistente: 0,94 [a.pdf, pág. 3]");
     expect(usuario.endsWith("Mensaje a clasificar: ¿y en la otra?")).toBe(true);
+  });
+});
+
+describe("clasificar: la consulta autónoma", () => {
+  const historial = [
+    { role: "user", content: "háblame de la hipertensión arterial" },
+    { role: "assistant", content: "La hipertensión es una elevación persistente de la PA [g.pdf, pág. 3]." },
+  ];
+
+  test("con historial, una petición sin palabras del tema se busca con la reformulación del modelo", async () => {
+    const tel = new Telemetria();
+    espia.mockResolvedValueOnce(
+      respuesta({ clase: "documental", consulta: "mapa mental de la hipertensión arterial: definición, diagnóstico y tratamiento" }),
+    );
+    const r = await clasificar("hazme un mapa mental o un diagrama visual", historial, tel);
+    expect(r.clase).toBe("documental");
+    expect(r.consulta).toBe("mapa mental de la hipertensión arterial: definición, diagnóstico y tratamiento");
+    expect(tel.contadores.consultas_reformuladas).toBe(1);
+    expect(tel.rondas[0].nota).toContain("consulta reformulada");
+    // Y el prompt le pide la consulta explícitamente.
+    const kwargs = espia.mock.calls[0][0] as { messages: Array<{ content: string }> };
+    expect(kwargs.messages[0].content).toContain('"consulta"');
+  });
+
+  test("ADVERSARIAL: SIN historial la paráfrasis del modelo se ignora: se busca la pregunta literal", async () => {
+    // Sin historial no hay referencia que resolver, y aceptar una paráfrasis
+    // cambiaría la búsqueda de una pregunta que además se cachea por su texto.
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "otra cosa distinta inventada" }));
+    const r = await clasificar("¿cuál es el AUC de p-tau217?", []);
+    expect(r.consulta).toBe("¿cuál es el AUC de p-tau217?");
+  });
+
+  test("ADVERSARIAL: una consulta vacía, o tan larga que ya no es una consulta, cae al texto literal", async () => {
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "   " }));
+    expect((await clasificar("¿y en la otra cohorte?", historial)).consulta).toBe("¿y en la otra cohorte?");
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "x".repeat(601) }));
+    expect((await clasificar("¿y en la otra cohorte?", historial)).consulta).toBe("¿y en la otra cohorte?");
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental" }));
+    expect((await clasificar("¿y en la otra cohorte?", historial)).consulta).toBe("¿y en la otra cohorte?");
+  });
+
+  test("si el clasificador falla, la consulta es la literal y la clase documental", async () => {
+    espia.mockRejectedValueOnce(new Error("gateway caído"));
+    expect(await clasificar("hazme un diagrama", historial)).toEqual({ clase: "documental", consulta: "hazme un diagrama" });
   });
 });

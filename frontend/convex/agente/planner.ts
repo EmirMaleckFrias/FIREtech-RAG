@@ -101,7 +101,16 @@ investigación que responde SOLO con documentos científicos indexados
   petición de información ("hola", "gracias", "vale", "perfecto").
 Ante la duda entre "documental" y otra clase, elige "documental": buscar de
 más es más seguro que no buscar.
-Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional"}`;
+
+Devuelve además "consulta": el último mensaje reescrito para que se entienda
+SOLO, sin el historial, y sirva para buscar en los documentos. Resuelve lo que
+se refiera a la conversación ("eso", "lo anterior", "hazme un diagrama de lo
+que dijiste", "¿y en la otra cohorte?", "hazme un mapa mental") con el tema y
+los datos concretos del historial, en una o dos frases que lleven las palabras
+clave del tema (la enfermedad, el biomarcador, la población, la cifra). Si el
+mensaje ya se entiende solo, cópialo tal cual. NUNCA añadas un tema que no
+esté en la conversación; si no hay historial, copia el mensaje.
+Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional","consulta":"..."}`;
 
 /** Forma normalizada de una consulta para detectar equivalentes.
  *
@@ -272,7 +281,32 @@ export function conAncla(
   return [ancla, ...renumerar(resto)];
 }
 
-/** Clase de la pregunta, ANTES de buscar. Solo `documental` entra al pipeline.
+/** Lo que el clasificador dice de una pregunta: su clase y la consulta con la
+ *  que buscarla. */
+export interface Clasificacion {
+  clase: Clase;
+  /** La pregunta reescrita para entenderse sin el historial. Es lo que se
+   *  BUSCA (el ancla del plan); lo que se responde sigue siendo el texto
+   *  literal de quien pregunta. Igual al texto literal cuando no hay
+   *  historial o cuando la pregunta ya se entiende sola. */
+  consulta: string;
+}
+
+/** Tope de la consulta reformulada: más largo que esto no es una consulta,
+ *  es el modelo inventando. */
+const MAX_CONSULTA = 600;
+
+/** Clase de la pregunta, ANTES de buscar, y la consulta autónoma con la que
+ *  buscarla. Solo `documental` entra al pipeline.
+ *
+ *  Por qué la reformulación va aquí: medido el 7 sep 2026 en el despliegue,
+ *  "hazme un mapa mental o un diagrama visual" tras una respuesta sobre
+ *  hipertensión se buscaba con ese texto literal, recuperaba un documento de
+ *  Notion sobre diseño web ("Visual Language", "Timeline") y el agente
+ *  contestaba que no encontraba hipertensión en los documentos. El modo
+ *  normal no tiene planificador que resuelva la referencia, y esta es la
+ *  única llamada que va delante de cada pregunta con el historial a la
+ *  vista: pedirle la consulta aquí no añade ninguna llamada.
  *
  *  Modelo pequeño con el esfuerzo de razonamiento del calificador, que es el
  *  valor ya medido con ese mismo modelo. No se usa un valor más bajo "porque
@@ -285,10 +319,11 @@ export async function clasificar(
   pregunta: string,
   historial: { role: string; content: string }[],
   tel?: Telemetria,
-): Promise<Clase> {
+): Promise<Clasificacion> {
   const a = ajustes();
   const modelo = modeloRerankResuelto(a);
   const t0 = Date.now();
+  const literal = pregunta.trim();
   try {
     const r = await gateway.completionJson(
       {
@@ -314,14 +349,25 @@ export async function clasificar(
     const clase: Clase = (CLASES as readonly string[]).includes(cruda)
       ? (cruda as Clase)
       : "documental";
+    // La consulta reformulada solo se acepta con historial (sin él no hay
+    // nada que resolver, y una paráfrasis cambiaría la clave de la caché del
+    // plan), si trae algo y si tiene un tamaño de consulta. Lo demás es el
+    // texto literal, que es lo que se buscaba hasta ahora.
+    const propuesta = textoDe(r.datos?.consulta).replace(/\s+/g, " ").trim();
+    const consulta =
+      historial.length > 0 && propuesta !== "" && propuesta.length <= MAX_CONSULTA ? propuesta : literal;
+    const reformulada = clave(consulta) !== clave(literal);
+    if (reformulada) tel?.incr("consultas_reformuladas");
     tel?.anota("clasificador", r.modelo || modelo, r.usage, {
       ms: Date.now() - t0,
       ok: true,
       finishReason: r.finishReason,
-      nota: `clase=${clase}${cruda === clase ? "" : ` (respuesta: ${cruda || "vacía"})`}`,
+      nota:
+        `clase=${clase}${cruda === clase ? "" : ` (respuesta: ${cruda || "vacía"})`}` +
+        (reformulada ? `; consulta reformulada: ${consulta.slice(0, 120)}` : ""),
     });
     if (r.razonamientoRechazado) tel?.incr("razonamiento_rechazado");
-    return clase;
+    return { clase, consulta };
   } catch (exc) {
     tel?.anota("clasificador", modelo, null, {
       ms: Date.now() - t0,
@@ -331,6 +377,6 @@ export async function clasificar(
     console.warn(
       `Clasificador no disponible (${String(exc).slice(0, 160)}); se trata como documental.`,
     );
-    return "documental";
+    return { clase: "documental", consulta: literal };
   }
 }

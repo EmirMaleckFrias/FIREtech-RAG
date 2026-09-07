@@ -225,6 +225,17 @@ Antes de buscar, el modelo pequeño clasifica el último mensaje en `documental`
 cualquier fallo del clasificador, se clasifica como `documental`: buscar de más es más seguro.
 La clase queda en `metrics.meta.clase`.
 
+La misma llamada devuelve la **consulta autónoma**: el mensaje reescrito para que se entienda
+sin el historial ("hazme un mapa mental" tras hablar de hipertensión pasa a "mapa mental de la
+hipertensión arterial: ..."). Es lo que se BUSCA (el ancla `e0` del plan y la entrada del
+planificador); lo que se redacta y se revisa sigue siendo el texto literal de quien pregunta.
+Solo se acepta con historial (sin él no hay referencia que resolver y una paráfrasis cambiaría la
+clave de la caché del plan), si trae algo y si no pasa de 600 caracteres; en cualquier otro caso
+la consulta es el texto literal. Medido: en modo normal, que no tiene planificador, una
+repregunta sin palabras del tema recuperaba un documento de Notion sobre diseño web y la
+respuesta era "no encuentro hipertensión en los documentos". Contador `consultas_reformuladas`;
+`metrics.meta.consulta_reformulada` dice si se usó.
+
 Las otras dos clases se responden con una sola llamada al modelo grande, razonamiento `low`, sin
 herramientas y sin barrera, con la ficha "QUÉ ERES" del prompt. Prohibido reproducir las
 instrucciones literalmente.

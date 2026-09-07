@@ -235,10 +235,18 @@ export const correr = internalAction({
       tel.fija({ plan_en_cache: Boolean(enCache) });
 
       // 1. Clasificar ANTES de buscar. Solo lo documental entra al pipeline.
-      const clase = (enCache?.clase ?? null) !== null
-        ? (enCache!.clase as Awaited<ReturnType<typeof planner.clasificar>>)
-        : await planner.clasificar(args.texto, args.historial, tel);
-      tel.fija({ clase });
+      // Con la clase en caché (preguntas sin historial) no hay referencia que
+      // resolver: la consulta es la pregunta. Con historial, el clasificador
+      // devuelve además la pregunta reescrita para que se entienda sola, y
+      // ESA es la que se busca; lo que se redacta sigue siendo el texto
+      // literal de quien pregunta (ver planner.Clasificacion).
+      const clasificacion: planner.Clasificacion =
+        (enCache?.clase ?? null) !== null
+          ? { clase: enCache!.clase as planner.Clase, consulta: args.texto }
+          : await planner.clasificar(args.texto, args.historial, tel);
+      const clase = clasificacion.clase;
+      const consulta = clasificacion.consulta;
+      tel.fija({ clase, consulta_reformulada: planner.clave(consulta) !== planner.clave(args.texto) });
       if (clase !== "documental") {
         const contenido = await responderSinDocumentos(a, args.texto, args.historial, tel);
         await actualizar({
@@ -265,7 +273,7 @@ export const correr = internalAction({
           tel.incr("plan_cache_hits");
           void ctx.runMutation(internal.agente.cachePlan.contarUso, { clave: clavePlan }).catch(() => undefined);
         } else {
-          const r = await planner.planificar(args.texto, args.historial, a.maxConsultasPlan, tel);
+          const r = await planner.planificar(consulta, args.historial, a.maxConsultasPlan, tel);
           items = r.items;
           preguntaEn = r.preguntaEn;
           if (cacheable && items.length) {
@@ -288,7 +296,7 @@ export const correr = internalAction({
           })
           .catch(() => undefined);
       }
-      const plan = planner.conAncla(args.texto, preguntaEn, items);
+      const plan = planner.conAncla(consulta, preguntaEn, items);
       await actualizar({
         plan: plan.map((p) => ({
           id: p.id,
