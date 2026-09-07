@@ -1151,6 +1151,11 @@ textarea {
   animation: thanks-toast 2.6s ease both;
 }
 
+.feedback-error {
+  font-size: 11.5px;
+  color: var(--red);
+}
+
 @keyframes thanks-toast {
   0% {
     opacity: 0;
@@ -5230,6 +5235,22 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
 
 .ficha-insignia-error:hover {
   background: color-mix(in srgb, var(--red) 14%, transparent);
+}
+
+/* Listo con avisos: ámbar, no rojo. El documento sirve, pero le falta algo. */
+.ficha-insignia-aviso {
+  border-color: color-mix(in srgb, var(--amber) 35%, transparent);
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+  color: var(--amber);
+  cursor: pointer;
+}
+
+.ficha-insignia-aviso:hover {
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+}
+
+.ficha-aviso-detalle {
+  color: var(--text-2);
 }
 
 /* El nombre del fichero, al final y pequeño: es el dato administrativo, no la

@@ -12,7 +12,7 @@
 //
 // Es una clase porque React solo expone getDerivedStateFromError en clases.
 
-import { Component, type ReactNode } from 'react';
+import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { avisarSiEsFatal, motivoDeSalida } from '../lib/auth';
 import { mensajeDeError } from '../lib/errores';
 import { IconAlert, IconLogout } from './icons';
@@ -39,8 +39,11 @@ export class LimiteErrores extends Component<Props, State> {
     return { conError: true, error, fatal: motivoDeSalida(error) !== null };
   }
 
-  componentDidCatch(error: unknown): void {
-    avisarSiEsFatal(error);
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    // Lo fatal (acceso revocado, sesión caducada) se anuncia y saca de la app.
+    // Lo demás se deja al menos en la consola con el árbol de componentes:
+    // antes un fallo reproducible de una vista se perdía sin rastro alguno.
+    if (!avisarSiEsFatal(error)) console.error('LimiteErrores:', error, info.componentStack);
   }
 
   private reintentar = (): void => {

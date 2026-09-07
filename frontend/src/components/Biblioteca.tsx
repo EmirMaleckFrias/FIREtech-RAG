@@ -40,6 +40,9 @@ interface BibliotecaProps {
   estadoInicial: DocumentStatus | null;
 }
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 const ESTADOS: Array<{ id: DocumentStatus; etiqueta: string }> = [
   { id: 'ready', etiqueta: 'Listos' },
   { id: 'processing', etiqueta: 'Indexándose' },
@@ -74,7 +77,30 @@ export function Biblioteca({ open, onClose, documentos, estadoInicial }: Bibliot
   const total = docs?.length ?? 0;
   const filtrando = hayFiltros(filtros);
 
+  const raizRef = useRef<HTMLElement>(null);
   const alPulsarTecla = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === 'Tab') {
+      // Trampa de Tab: esta vista tapa toda la pantalla, así que el foco no
+      // puede salir a lo que hay debajo (el chat, el panel de documentos),
+      // que es invisible. Sin esto, tras la última ficha el foco desaparecía.
+      const raiz = raizRef.current;
+      if (!raiz) return;
+      const nodos = Array.from(raiz.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+        (n) => !n.hasAttribute('disabled') && n.getAttribute('aria-hidden') !== 'true',
+      );
+      if (nodos.length === 0) return;
+      const primero = nodos[0];
+      const ultimo = nodos[nodos.length - 1];
+      const activo = document.activeElement;
+      if (e.shiftKey && (activo === primero || !raiz.contains(activo))) {
+        e.preventDefault();
+        ultimo.focus();
+      } else if (!e.shiftKey && (activo === ultimo || !raiz.contains(activo))) {
+        e.preventDefault();
+        primero.focus();
+      }
+      return;
+    }
     if (e.key !== 'Escape') return;
     e.stopPropagation();
     // Con filtros puestos, Escape los limpia primero: es lo que se espera al
@@ -98,7 +124,10 @@ export function Biblioteca({ open, onClose, documentos, estadoInicial }: Bibliot
 
   return (
     <section
+      ref={raizRef}
       className={`biblio ${open ? '' : 'biblio-cerrada'}`}
+      role="dialog"
+      aria-modal="true"
       aria-label="Todos tus documentos"
       aria-hidden={!open}
       onKeyDown={alPulsarTecla}

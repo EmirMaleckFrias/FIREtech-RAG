@@ -634,9 +634,40 @@ describe("cita solo con autoría corroborada", () => {
 
     expect(meta(portada, texto).cita).toBe("");
 
-    const conDoi = meta(portada, `${texto}\nhttps://doi.org/10.1002/alz.71599`);
-    expect(conDoi.doi).toBe("10.1002/alz.71599");
-    expect(conDoi.cita).toBe("Silva et al., 2026");
+    // El DOI en la PORTADA (como lo trae un artículo publicado): acredita.
+    const conDoi: Array<[string, number]> = [...portada, ["https://doi.org/10.1002/alz.71599", 9]];
+    const r = meta(conDoi, conDoi.map(([t]) => t).join("\n"));
+    expect(r.doi).toBe("10.1002/alz.71599");
+    expect(r.cita).toBe("Silva et al., 2026");
+  });
+
+  test("ADVERSARIAL: un DOI que solo aparece en la página 2 (una referencia citada) NO corrobora la autoría", () => {
+    // Una guía clínica sin autores, con un rótulo de dos palabras bajo el
+    // título y bibliografía en la página 2. Antes, el DOI de la referencia
+    // hacía de comodín y salía "Outcomes et al., 2018": autor inventado y
+    // año del trabajo citado.
+    const portada: Array<[string, number]> = [
+      ["Guía de manejo de la hipertensión arterial", 16],
+      ["Global Outcomes", 10],
+      ["Documento de consenso, edición 2025.", 10],
+    ];
+    const pagina2 =
+      "Referencias\n" +
+      "1. Whelton PK, Carey RM. 2017 ACC/AHA guideline. J Am Coll Cardiol. 2018;71:e13. " +
+      "https://doi.org/10.1016/j.jacc.2017.11.006";
+    const conRotulo = meta(portada, `${portada.map(([t]) => t).join("\n")}\n${pagina2}`);
+    expect(conRotulo.cita).toBe("");
+    expect(conRotulo.autor).toBe("");
+    // Y ese DOI tampoco se toma como el de la obra.
+    expect(conRotulo.doi).toBe("");
+
+    // Sin encabezado de bibliografía tampoco: el DOI no está en la portada.
+    const sinEncabezado = meta(
+      portada,
+      `${portada.map(([t]) => t).join("\n")}\nVer también: https://doi.org/10.1016/j.jacc.2017.11.006`,
+    );
+    expect(sinEncabezado.cita).toBe("");
+    expect(sinEncabezado.autor).toBe("");
   });
 
   test("una firma Vancouver de UN solo autor corrobora sola: las iniciales no salen por casualidad", () => {

@@ -51,6 +51,12 @@ describe("correoPermitido", () => {
     expect(correoPermitido("cualquiera@atacante.com", ["airobotix.net", "", "  "])).toBe(false);
   });
 
+  test("sin parte local ('@airobotix.net' a secas) no pasa: cliente y servidor dicen lo mismo", () => {
+    expect(correoPermitido("@airobotix.net", ["airobotix.net"])).toBe(false);
+    expect(correoPermitido(" @airobotix.net ", ["airobotix.net"])).toBe(false);
+    expect(correoPermitido("a@airobotix.net", ["airobotix.net"])).toBe(true);
+  });
+
   test("un valor que no es texto se rechaza en vez de reventar", () => {
     expect(correoPermitido(undefined as unknown as string, PERMITIDOS)).toBe(false);
     expect(correoPermitido(null as unknown as string, PERMITIDOS)).toBe(false);

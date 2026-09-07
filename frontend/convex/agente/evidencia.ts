@@ -712,16 +712,30 @@ export function textoDePunto(punto: PuntoEvidencia): string {
       `documentos.`
     );
   }
+  // Una búsqueda a medias (solo léxica porque los embeddings cayeron, o solo
+  // densa) que no encuentra nada NO demuestra que no esté: sin el lado
+  // semántico, "deterioro cognitivo leve" no encuentra "MCI". Antes se le
+  // decía al modelo "el índice no devolvió ningún fragmento", el modelo
+  // redactaba "no lo encuentro en los documentos" y el verificador lo
+  // aprobaba: un falso negativo de recuperación llegaba como hallazgo
+  // verificado. Ahora se dice igual que en el caso `error`.
+  const parcial =
+    punto.recuperacion === "lexica" || punto.recuperacion === "densa"
+      ? ` La búsqueda fue PARCIAL (solo ${punto.recuperacion === "lexica" ? "por palabras, sin la semántica" : "semántica, sin la de palabras"}), ` +
+        `así que esta ausencia no es concluyente: no afirmes que los documentos no lo tratan.`
+      : "";
   if (punto.documentosRevisados.length) {
     const docs = punto.documentosRevisados.join("; ");
     return (
       `${etiqueta}: sin resultados: se revisaron ${punto.nCandidatos} fragmentos ` +
-      `de ${docs} y ninguno aporta evidencia sobre este punto (${idiomas}).`
+      `de ${docs} y ninguno aporta evidencia sobre este punto (${idiomas}).` +
+      parcial
     );
   }
   return (
     `${etiqueta}: sin resultados: el índice no devolvió ningún fragmento ` +
-    `parecido a esta consulta (${idiomas}).`
+    `parecido a esta consulta (${idiomas}).` +
+    parcial
   );
 }
 

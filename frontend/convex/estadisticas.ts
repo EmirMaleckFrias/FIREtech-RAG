@@ -4,6 +4,7 @@
 //
 // Nunca devuelve contenido de conversaciones: las cifras de actividad son
 // agregados, no texto de nadie.
+import { v } from "convex/values";
 import { query } from "./_generated/server";
 import { ajustes } from "./lib/config";
 import { administrador } from "./usuarios";
@@ -17,11 +18,14 @@ function distintos(valores: Array<string | undefined>): string[] {
 }
 
 export const sistema = query({
-  args: {},
-  handler: async (ctx) => {
+  // `ahora` lo manda el cliente (redondeado a unos minutos): una query no
+  // lee el reloj, porque no se vuelve a ejecutar por el paso del tiempo y la
+  // ventana de "activos 7 días" se quedaría congelada en la caché.
+  args: { ahora: v.number() },
+  handler: async (ctx, { ahora }) => {
     await administrador(ctx, "ver las estadísticas");
     const a = ajustes();
-    const desde = Date.now() - SIETE_DIAS_MS;
+    const desde = ahora - SIETE_DIAS_MS;
 
     // Índice: se responde desde `documents`, que es pequeña, en vez de recorrer
     // `chunks`. En Qdrant esto eran facets sobre el payload; aquí cada
@@ -64,7 +68,7 @@ export const sistema = query({
     for (const u of cuentas) {
       const reciente = await ctx.db
         .query("sessions")
-        .withIndex("porUsuario", (q) => q.eq("userId", u._id).gte("creadoEn", desde))
+        .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id).gte("creadoEn", desde))
         .first();
       if (reciente) activos++;
     }

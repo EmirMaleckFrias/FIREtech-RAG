@@ -3,7 +3,7 @@
 // solo puede exportar acciones.
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "../_generated/server";
-import { tipoFragmento } from "../schema";
+import { avisosIngesta, tipoFragmento } from "../schema";
 
 /** El documento a ingerir, o null si lo borraron. */
 export const documento = internalQuery({
@@ -144,12 +144,16 @@ export const marcarListo = internalMutation({
     doi: v.optional(v.string()),
     language: v.optional(v.string()),
     documentType: v.optional(v.string()),
+    avisos: v.optional(avisosIngesta),
   },
-  handler: async (ctx, { documentId, ...campos }) => {
+  handler: async (ctx, { documentId, avisos, ...campos }) => {
     const doc = await ctx.db.get(documentId);
     if (!doc) throw new Error("el documento fue borrado durante la ingesta");
     await ctx.db.patch(documentId, {
       ...campos,
+      // Se escribe siempre (o se borra): un reindexado que ya no tiene nada
+      // que avisar tiene que limpiar el aviso anterior.
+      avisos,
       status: "ready",
       error: undefined,
       ingestadoEn: Date.now(),

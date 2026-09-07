@@ -9,6 +9,7 @@ import {
   recorrer,
   resumenDeTanda,
   sanear,
+  textoDeMotivo,
   type ArchivoConRuta,
   type EntradaFs,
 } from './carpetas';
@@ -113,7 +114,47 @@ describe('desdeDrop y desdeInputDeCarpeta', () => {
     const f = new File(['x'], 'g.pdf');
     Object.defineProperty(f, 'webkitRelativePath', { value: 'Docs/2024/g.pdf' });
     const s = new File(['x'], 'suelto.pdf');
-    expect(con(desdeInputDeCarpeta([f, s]))).toEqual(['Docs/2024|g.pdf', '|suelto.pdf']);
+    expect(con(desdeInputDeCarpeta([f, s]).archivos)).toEqual(['Docs/2024|g.pdf', '|suelto.pdf']);
+  });
+
+  test('ADVERSARIAL: el input de carpeta aplica el MISMO tope que el arrastre y lo dice', () => {
+    // El botón "Elegir una carpeta entera" es el camino destacado, y era el
+    // único sin tope: una carpeta de 3000 ficheros se hasheaba y subía entera.
+    const files = Array.from({ length: MAX_ARCHIVOS_POR_TANDA + 7 }, (_, i) => new File(['x'], `f${i}.pdf`));
+    const r = desdeInputDeCarpeta(files);
+    expect(r.archivos).toHaveLength(MAX_ARCHIVOS_POR_TANDA);
+    expect(r.truncado).toBe(true);
+    expect(desdeInputDeCarpeta(files.slice(0, 3)).truncado).toBe(false);
+  });
+});
+
+describe('ficheros que no se pueden leer del disco', () => {
+  test('ADVERSARIAL: un fichero ilegible no tumba la tanda: se apunta como omitido y los demás siguen', async () => {
+    const roto: EntradaFs = {
+      name: 'nube.pdf',
+      isFile: true,
+      isDirectory: false,
+      file: (_ok, error) => error(new Error('NotFoundError: placeholder de la nube')),
+    };
+    const r = await recorrer(carpeta('Docs', [fichero('a.pdf'), roto, fichero('z.pdf')]));
+    expect(con(r.archivos)).toEqual(['Docs|a.pdf', 'Docs|z.pdf']);
+    expect(r.ilegibles).toEqual([{ nombre: 'nube.pdf', carpeta: 'Docs', motivo: 'ilegible' }]);
+    // Y llegan al resumen de la tanda por `planificar`.
+    const plan = planificar([], [], 100, r.ilegibles);
+    expect(plan.omitidos).toEqual(r.ilegibles);
+    expect(textoDeMotivo('ilegible', 100)).toMatch(/no se pudo leer/);
+  });
+
+  test('una subcarpeta cuyo listado falla se apunta y no rompe el resto', async () => {
+    const rota: EntradaFs = {
+      name: 'privada',
+      isFile: false,
+      isDirectory: true,
+      createReader: () => ({ readEntries: (_ok, error) => error(new Error('permiso denegado')) }),
+    };
+    const r = await recorrer(carpeta('Docs', [fichero('a.pdf'), rota]));
+    expect(con(r.archivos)).toEqual(['Docs|a.pdf']);
+    expect(r.ilegibles.map((i) => i.nombre)).toEqual(['privada']);
   });
 });
 

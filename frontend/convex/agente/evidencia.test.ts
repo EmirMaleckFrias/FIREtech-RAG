@@ -790,3 +790,25 @@ describe("el propietario llega a todas las búsquedas", () => {
   });
 });
 
+
+describe("búsqueda parcial", () => {
+  test("ADVERSARIAL: sin resultados con los embeddings caídos NO se presenta como 'el índice no tiene nada'", async () => {
+    // Si solo respondió el lado léxico, "deterioro cognitivo leve" no
+    // encuentra "MCI": la ausencia no es concluyente y el modelo tiene que
+    // saberlo para no redactar "no está en los documentos".
+    busqueda.recuperacion = "lexica";
+    const p = await punto(item("e1", "q", "dato"), modo(4));
+    expect(p.estado).toBe("sin_resultados");
+    expect(p.recuperacion).toBe("lexica");
+    const texto = evidencia.textoDePunto(p);
+    expect(texto).toMatch(/PARCIAL/);
+    expect(texto).toMatch(/no es concluyente/);
+    expect(texto).toMatch(/no afirmes/);
+  });
+
+  test("con la búsqueda completa (híbrida) y sin resultados no se añade el aviso de parcial", async () => {
+    busqueda.recuperacion = "hibrida";
+    const p = await punto(item("e1", "q", "dato"), modo(4));
+    expect(evidencia.textoDePunto(p)).not.toMatch(/PARCIAL/);
+  });
+});

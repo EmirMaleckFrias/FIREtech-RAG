@@ -110,12 +110,19 @@ export const ingestar = internalAction({
       // páginas sin texto, las imágenes sueltas, los adjuntos de Word) y esto
       // las lee, con caché y en paralelo. Ver ingesta/ocr.ts.
       const { ocr, estadisticas: ocrStats } = crearOcr(ctx, a);
-      const { chunks, pages } = await parsearDocumento(fileName, bytes, {
+      const { chunks, pages, avisos } = await parsearDocumento(fileName, bytes, {
         ocr,
         minTextoPagina: a.ocrMinTextoPagina,
       });
       stats.pages = pages;
       stats.chunks = chunks.length;
+      if (avisos) {
+        stats.avisos = avisos;
+        console.warn(
+          `Ingesta de '${fileName}' con avisos: ${avisos.sinLeer} sin leer, ${avisos.omitidas} omitidas, ` +
+            `${avisos.recortados} recortados${avisos.motivo ? ` (${avisos.motivo})` : ""}.`,
+        );
+      }
       if (ocrStats.imagenes > 0 || ocrStats.omitidasPorTope > 0) {
         stats.ocr = ocrStats;
         console.info(
@@ -182,6 +189,7 @@ export const ingestar = internalAction({
         doi: oNada(primero.doi),
         language: oNada(primero.language),
         documentType: primero.documentType,
+        avisos,
       });
       stats.ms = Date.now() - t0;
       stats.telemetria = tel.resumen();

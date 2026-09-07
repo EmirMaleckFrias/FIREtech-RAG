@@ -222,6 +222,39 @@ export const marcarPagina = internalMutation({
   },
 });
 
+/** Borra TODAS las filas de `notionPaginas` y `notionSincronizaciones` de una
+ *  cuenta, por lotes y reagendándose. La llama `usuarios.borrar`: antes lo
+ *  hacía con un `.collect()` dentro de la propia mutación, y con las bases de
+ *  miles de páginas que la sincronización contempla la cuenta pasaba a ser
+ *  imposible de borrar por el tope de escrituras de una transacción. */
+export const borrarRastroDeUsuario = internalMutation({
+  args: { propietario: v.id("users") },
+  handler: async (ctx, { propietario }): Promise<void> => {
+    const paginas = await ctx.db
+      .query("notionPaginas")
+      .withIndex("porPropietarioYPageId", (q) => q.eq("propietario", propietario))
+      .take(LOTE_PAGINAS);
+    for (const pg of paginas) await ctx.db.delete(pg._id);
+    if (paginas.length === LOTE_PAGINAS) {
+      await ctx.scheduler.runAfter(0, internal.notion.datos.borrarRastroDeUsuario, { propietario });
+      return;
+    }
+    const corridas = await ctx.db
+      .query("notionSincronizaciones")
+      .withIndex("porPropietario", (q) => q.eq("propietario", propietario))
+      .take(LOTE_PAGINAS);
+    for (const c of corridas) await ctx.db.delete(c._id);
+    if (corridas.length === LOTE_PAGINAS) {
+      await ctx.scheduler.runAfter(0, internal.notion.datos.borrarRastroDeUsuario, { propietario });
+    }
+  },
+});
+
+/** Filas de `notionPaginas`/`notionSincronizaciones` por transacción al
+ *  borrar una cuenta: son filas pequeñas, pero una corrida guarda su lista de
+ *  errores y una página sus ids de documentos. */
+export const LOTE_PAGINAS = 500;
+
 export const borrarPagina = internalMutation({
   args: { propietario: v.id("users"), pageId: v.string() },
   handler: async (ctx, { propietario, pageId }) => {

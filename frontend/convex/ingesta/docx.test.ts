@@ -13,7 +13,7 @@ import { OVERLAP_TOKENS, estTokens } from "./chunking";
 import { cabeceraDeTabla, parsearDocx, type FilaTabla } from "./docx";
 import { escribirDocx, type BloqueFalso, type FilaFalsa } from "./docxFalso.test-util";
 import { parsearDocumento } from "./parsear";
-import type { ChunkParseado, Ocr } from "./tipos";
+import { resultadoOcr, type ChunkParseado, type Ocr } from "./tipos";
 
 function fixture(nombre: string): Uint8Array {
   return new Uint8Array(readFileSync(new URL(`./fixtures/${nombre}`, import.meta.url)));
@@ -411,7 +411,7 @@ describe("imágenes incrustadas", () => {
     const pedidas: Array<{ mime: string; indice?: number }> = [];
     const ocr: Ocr = async (img, ctx) => {
       if (img.tipo === "bytes") pedidas.push({ mime: img.mime, indice: ctx.indice });
-      return ctx.indice === 1 ? "| Marcador | Valor |\n| --- | --- |\n| p-tau217 | 0,94 |" : "";
+      return resultadoOcr(ctx.indice === 1 ? "| Marcador | Valor |\n| --- | --- |\n| p-tau217 | 0,94 |" : "");
     };
     const r = await parsearDocx(bytes, "informe.docx", { ocr });
 
@@ -432,5 +432,36 @@ describe("imágenes incrustadas", () => {
     const bytes = await docxConMedios({ "image1.png": new Uint8Array([1]) });
     const r = await parsearDocx(bytes, "informe.docx");
     expect(r.chunks.some((c) => c.section === "Imágenes del documento")).toBe(false);
+  });
+});
+
+describe("tablaEnBloques con una cabecera enorme", () => {
+  test("ADVERSARIAL: una tabla usada como caja de texto no vuelve a perder filas por el recorte", async () => {
+    const { tablaEnBloques } = await import("./docx");
+    const { MAX_CHUNK_CHARS } = await import("./chunking");
+    const fila = (celdas: Array<[string, number]>): FilaTabla => {
+      const reales = [];
+      const cols: string[] = [];
+      let desde = 0;
+      for (const [texto, ancho] of celdas) {
+        reales.push({ texto, desde, ancho });
+        cols.push(texto, ...Array<string>(ancho - 1).fill(""));
+        desde += ancho;
+      }
+      return { celdas: cols, reales };
+    };
+    const parrafo = (n: number) => `Párrafo introductorio número ${n}: ${"texto ".repeat(300)}`;
+    const filas: FilaTabla[] = [
+      // Seis "filas" combinadas a todo el ancho: ~1800 caracteres cada una.
+      ...Array.from({ length: 6 }, (_, i) => fila([[parrafo(i), 4]])),
+      fila([["Variable", 1], ["Control", 1], ["MCI", 1], ["p", 1]]),
+      ...Array.from({ length: 5 }, (_, i) => fila([[`Fila ${i}`, 1], ["74.0", 1], ["71.2", 1], ["0.03", 1]])),
+    ];
+    const bloques = tablaEnBloques(filas);
+    for (const b of bloques) expect(b.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+    const todo = bloques.join("\n");
+    for (let i = 0; i < 5; i++) expect(todo).toContain(`Fila ${i}`);
+    // La fila que da nombre a las columnas acompaña a cada bloque de datos.
+    for (const b of bloques.filter((x) => /Fila \d/.test(x))) expect(b).toContain("Variable | Control");
   });
 });

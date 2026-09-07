@@ -25,7 +25,7 @@ import {
   partirParrafoLargo,
 } from "./chunking";
 import { ROTULO_TABLA } from "./lineas";
-import type { ChunkParseado, Ocr, Parseo } from "./tipos";
+import { SIN_AVISOS, type AvisosIngesta, type ChunkParseado, type Ocr, type Parseo } from "./tipos";
 
 // `preserveOrder` conserva el orden de w:p y w:tbl dentro de w:body, que es lo
 // que importa aquí; el precio es una estructura más verbosa: cada nodo es
@@ -350,9 +350,19 @@ export function cabeceraDeTabla(filas: FilaTabla[]): number {
 export function tablaEnBloques(filas: FilaTabla[]): string[] {
   if (filas.length < 2) return filas.map((f) => filaATexto(f.celdas));
   const corte = cabeceraDeTabla(filas);
-  const cabecera = filas.slice(0, corte).map((f) => filaATexto(f.celdas)).join("\n");
+  // La cabecera no puede comerse el bloque: con una "cabecera" de varias
+  // filas combinadas (una tabla usada como caja de texto) el presupuesto de
+  // filas caía a 1 y cada bloque era cabecera + una fila, muy por encima de
+  // MAX_CHUNK_CHARS, y el recorte volvía a perder filas. Si la cabecera pasa
+  // de la mitad del objetivo, se conserva solo su cola: la última fila es la
+  // que da nombre a las columnas, que es lo que un bloque necesita.
+  const filasCabecera = filas.slice(0, corte).map((f) => filaATexto(f.celdas));
+  while (filasCabecera.length > 1 && estTokens(filasCabecera.join("\n")) > TARGET_TOKENS / 2) {
+    filasCabecera.shift();
+  }
+  const cabecera = filasCabecera.join("\n");
   const cuerpo = filas.slice(corte).map((f) => filaATexto(f.celdas));
-  const presupuesto = Math.max(TARGET_TOKENS - estTokens(cabecera), 1);
+  const presupuesto = Math.max(TARGET_TOKENS - estTokens(cabecera), TARGET_TOKENS / 4);
   const bloques: string[] = [];
   let actual: string[] = [];
   let actualTok = 0;
@@ -476,21 +486,31 @@ export async function parsearDocx(
   // foto de una tabla o un diagrama con texto pegado en el Word es contenido
   // que sin esto no existía para quien pregunta. Cada imagen se cita por su
   // número ("imagen 2"), aparte de párrafos y tablas.
+  const avisos: AvisosIngesta = { ...SIN_AVISOS };
   if (opciones.ocr) {
     const ocr = opciones.ocr;
     const medios = await imagenesDeDocx(zip);
-    const textos = await Promise.all(
+    const resultados = await Promise.all(
       medios.map((m, i) =>
         ocr({ tipo: "bytes", bytes: m.bytes, mime: mimeDeImagen(m.ext) }, { nombre, indice: i + 1 }),
       ),
     );
-    textos.forEach((texto, i) => {
-      if (!texto.trim()) return;
-      const nuevos = chunksDeMarkdown(nombre, texto, i + 1, "Imágenes del documento", "docx");
+    resultados.forEach((r, i) => {
+      // Una imagen que no se pudo leer se cuenta; una omitida por el tope
+      // también. Sin texto legítimo no hay nada que avisar.
+      if (r.estado === "fallo") {
+        avisos.sinLeer += 1;
+        avisos.motivo = avisos.motivo ?? r.motivo;
+      } else if (r.estado === "omitida" && r.motivo?.includes("pasa de")) {
+        avisos.omitidas += 1;
+        avisos.motivo = avisos.motivo ?? r.motivo;
+      }
+      if (!r.texto.trim()) return;
+      const nuevos = chunksDeMarkdown(nombre, r.texto, i + 1, "Imágenes del documento", "docx");
       for (const c of nuevos) c.metadata = { ...(c.metadata ?? {}), imagen: medios[i].nombre };
       chunks.push(...nuevos);
     });
   }
 
-  return { chunks, pages: chunks.length };
+  return { chunks, pages: chunks.length, avisos };
 }

@@ -26,10 +26,20 @@ function numero(nombre: string, porDefecto: number): number {
   return Number.isFinite(n) ? n : porDefecto;
 }
 
+const VERDADEROS = new Set(["1", "true", "si", "sí", "yes", "on"]);
+const FALSOS = new Set(["0", "false", "no", "off"]);
+
+/** Un booleano de entorno. Un valor puesto y no reconocido LANZA: antes
+ *  devolvía `false` en silencio, así que `ENABLE_ANSWER_VERIFICATION=enabled`
+ *  apagaba la verificación de respuestas sin que nada lo dijera. Un valor mal
+ *  puesto tiene que verse al arrancar, no como un fallo raro tres capas más
+ *  abajo, que es lo que promete la cabecera de este fichero. */
 function booleano(nombre: string, porDefecto: boolean): boolean {
   const v = texto(nombre).toLowerCase();
   if (!v) return porDefecto;
-  return v === "1" || v === "true" || v === "si" || v === "sí" || v === "yes";
+  if (VERDADEROS.has(v)) return true;
+  if (FALSOS.has(v)) return false;
+  throw new Error(`${nombre}="${v}" no es un booleano: usa true o false`);
 }
 
 export interface Ajustes {

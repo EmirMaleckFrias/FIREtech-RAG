@@ -62,11 +62,22 @@ export async function parsearImagen(
   ext: string,
   ocr: Ocr,
 ): Promise<Parseo> {
-  const markdown = await ocr({ tipo: "bytes", bytes, mime: mimeDeImagen(ext) }, { nombre });
-  if (!markdown.trim()) {
+  const r = await ocr({ tipo: "bytes", bytes, mime: mimeDeImagen(ext) }, { nombre });
+  // Los dos vacíos no son lo mismo. Si la imagen está en blanco, borrarla es
+  // lo correcto; si el servicio falló, lo correcto es volver a intentarlo, y
+  // el mensaje tiene que decir cuál de los dos es.
+  if (r.estado === "fallo") {
     throw new Error(
-      `'${nombre}' no contiene texto legible: es una imagen sin texto, o el texto no se pudo reconocer.`,
+      `'${nombre}' no se pudo leer: ${r.motivo ?? "el servicio de lectura de imágenes falló"}. ` +
+        "Vuelve a intentarlo en unos minutos con el botón de reintentar.",
     );
+  }
+  if (r.estado === "omitida") {
+    throw new Error(`'${nombre}' no se pudo leer: ${r.motivo ?? "la lectura de imágenes no está disponible"}.`);
+  }
+  const markdown = r.texto;
+  if (!markdown.trim()) {
+    throw new Error(`'${nombre}' no contiene texto legible: es una imagen sin texto.`);
   }
   const titulo = primerEncabezado(markdown);
   const chunks = chunksDeMarkdown(nombre, markdown, 1, titulo, "imagen");

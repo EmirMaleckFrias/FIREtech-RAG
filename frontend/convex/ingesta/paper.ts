@@ -1219,6 +1219,23 @@ export function extraerMetadatos(lineas: LineaFormato[], texto: string): MetaObr
  *  encabezado por formato y la mitad del documento salía con sección
  *  "unimpaired older adults" o "in Patients With Prion Diseases" (medido el
  *  4 sep 2026 con cinco PDF reales). */
+/** El primer DOI de un texto, sin la puntuación de cierre, o "". */
+function doiEn(texto: string): string {
+  const encontrado = DOI.exec(texto);
+  return encontrado ? encontrado[0].replace(/[.,;)]+$/, "") : "";
+}
+
+/** El texto hasta la primera línea que sea un encabezado de bibliografía.
+ *  Lo que va después son trabajos ajenos: sus DOI y sus años no son de esta
+ *  obra. */
+export function antesDeBibliografia(texto: string): string {
+  const lineas = texto.split("\n");
+  for (let i = 0; i < lineas.length; i++) {
+    if (detectarSeccion(lineas[i].trim()) === REFERENCIAS) return lineas.slice(0, i).join("\n");
+  }
+  return texto;
+}
+
 export function extraerMetadatosConBloque(
   lineas: LineaFormato[],
   texto: string,
@@ -1226,27 +1243,35 @@ export function extraerMetadatosConBloque(
   const { titulo, tamano, indices } = extraerTitulo(lineas);
   const { apellido, corroborado } = extraerAutor(lineas, tamano, titulo);
 
-  let doi = "";
-  const encontrado = DOI.exec(texto ?? "");
-  if (encontrado) doi = encontrado[0].replace(/[.,;)]+$/, "");
+  // El DOI de la obra se busca primero en la PORTADA (las líneas de la
+  // primera página); si no está, en la cabecera pero solo hasta donde empiece
+  // la bibliografía. Un DOI que aparece en una referencia citada en la página
+  // 2, o en un "Cómo citar" de otra obra, no es el DOI de este documento.
+  const textoPortada = lineas.map((l) => l.texto).join("\n");
+  const doiPortada = doiEn(textoPortada);
+  const doi = doiPortada || doiEn(antesDeBibliografia(texto ?? ""));
 
   // Un apellido SIN corroborar (sin coautores, sin formato bibliográfico y sin
-  // iniciales) y SIN DOI no se acepta como autoría.
+  // iniciales) y SIN DOI EN LA PORTADA no se acepta como autoría.
   //
   // Medido en producción el 7 sep 2026: de diez guías clínicas en español sin
   // bloque de autores, las diez salieron con una cita inventada ("Pagina et
   // al., 2026" de un pie de página, "Questions et al., 2025", "Global
   // Outcomes et al., 2024"), y el agente atribuía evidencia a autores que no
   // existen. Los cinco artículos de revista del mismo corpus salieron bien y
-  // todos traen DOI.
+  // todos traen DOI en la portada.
+  //
+  // Por qué solo el DOI de la portada: con el DOI de cualquier sitio de las
+  // dos primeras páginas, una guía con bibliografía en la página 2 recuperaba
+  // la cita inventada ("Outcomes et al., 2018", con el año del trabajo
+  // citado), que es justo lo que la guarda existe para impedir.
   //
   // El precio de la guarda es que un artículo de un solo autor y sin DOI
   // pierde su cita y se cita por el nombre del archivo. Es el fallo correcto:
   // en un sistema cuyo trabajo es atribuir evidencia, citar el fichero es
   // honesto y citar a un autor inventado no.
-  const autor = corroborado || doi !== "" ? apellido : "";
+  const autor = corroborado || doiPortada !== "" ? apellido : "";
 
-  const textoPortada = lineas.map((l) => l.texto).join("\n");
   const meta = { titulo, autor, anio: extraerAnio(texto ?? "", doi, textoPortada), doi };
   return { meta, lineasTitulo: new Set(titulo ? indices : []) };
 }

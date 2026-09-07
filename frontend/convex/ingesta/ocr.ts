@@ -38,7 +38,7 @@ import type { ActionCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { Ajustes } from "../lib/config";
 import * as gateway from "../lib/gateway";
-import type { ContextoOcr, ImagenParaOcr, Ocr } from "./tipos";
+import { resultadoOcr, type ContextoOcr, type ImagenParaOcr, type Ocr } from "./tipos";
 
 /** Versión del prompt: va en la clave de caché, así cambiar el prompt
  *  invalida las entradas solas. */
@@ -225,6 +225,7 @@ export interface EstadisticasOcr {
   imagenes: number;
   enCache: number;
   leidas: number;
+  /** Fallos del gateway o del modelo (contenido nulo, corte por longitud). */
   fallidas: number;
   /** Descartadas por pasar del tope por documento. */
   omitidasPorTope: number;
@@ -232,13 +233,25 @@ export interface EstadisticasOcr {
   tokens: { prompt: number; completion: number };
 }
 
+/** El tope del texto que puede devolver una página. Una página densa de tabla
+ *  a dos columnas son ~3000 tokens; 6000 deja margen y, si aun así el modelo
+ *  se corta, la lectura cuenta como fallida y no se cachea. */
+const MAX_TOKENS_RESPUESTA = 6000;
+
 /**
  * Construye la función de OCR para UNA ingesta. Lleva su propio contador para
  * el tope por documento y sus estadísticas para la telemetría.
  *
- * Con `ENABLE_OCR=false` devuelve una función que responde "" a todo: los
- * parsers siguen funcionando (un PDF escaneado fallará como antes, con su
+ * Con `ENABLE_OCR=false` devuelve una función que responde `omitida` a todo:
+ * los parsers siguen funcionando (un PDF escaneado fallará como antes, con su
  * mensaje) y no se hace ninguna llamada.
+ *
+ * Qué se cachea y qué no: solo las lecturas COMPLETAS (`finish_reason: stop`
+ * con contenido), incluido el "SIN TEXTO" legítimo. Un contenido nulo (filtro
+ * de contenido, rechazo) o un corte por longitud es un `fallo`: se devuelve lo
+ * que haya, no se guarda, y el siguiente reindexado vuelve a preguntar. Antes
+ * se cacheaba "" para esos casos y la página quedaba muda para siempre, porque
+ * `guardarOcr` no sobrescribe y la caché no caduca.
  */
 export function crearOcr(
   ctx: ActionCtx,
@@ -254,7 +267,10 @@ export function crearOcr(
     tokens: { prompt: 0, completion: 0 },
   };
   if (!a.ocrHabilitado) {
-    return { ocr: async () => "", estadisticas: est };
+    return {
+      ocr: async () => ({ texto: "", estado: "omitida", motivo: "la lectura de imágenes está desactivada" }),
+      estadisticas: est,
+    };
   }
   const modelo = a.ocrModelo;
 
@@ -265,13 +281,17 @@ export function crearOcr(
       if (est.omitidasPorTope === 1) {
         console.warn(`OCR: '${contexto.nombre}' pasa de ${a.ocrMaxImagenesPorDocumento} imágenes; el resto se omite.`);
       }
-      return "";
+      return {
+        texto: "",
+        estado: "omitida",
+        motivo: `el documento pasa de ${a.ocrMaxImagenesPorDocumento} imágenes; las demás no se leyeron`,
+      };
     }
     const preparada = prepararImagen(imagen);
-    if (preparada === null) return "";
+    if (preparada === null) return { texto: "", estado: "omitida", motivo: "imagen demasiado pequeña" };
     if (preparada.bytes.length > MAX_BYTES_IMAGEN) {
       console.warn(`OCR: ${donde} pesa ${preparada.bytes.length} bytes, más de lo que admite el modelo; se omite.`);
-      return "";
+      return { texto: "", estado: "omitida", motivo: "imagen demasiado pesada para el modelo" };
     }
     est.imagenes += 1;
     const t0 = Date.now();
@@ -282,7 +302,7 @@ export function crearOcr(
       if (cacheados.length > 0) {
         est.enCache += 1;
         est.ms += Date.now() - t0;
-        return cacheados[0].texto;
+        return resultadoOcr(cacheados[0].texto);
       }
     } catch (exc) {
       console.warn(`OCR: caché no disponible (${String(exc).slice(0, 100)}); se lee igual.`);
@@ -302,30 +322,50 @@ export function crearOcr(
               ],
             },
           ],
-          max_completion_tokens: 6000,
+          max_completion_tokens: MAX_TOKENS_RESPUESTA,
+          // Transcribir no es razonar: con el esfuerzo por defecto del modelo,
+          // el razonamiento se comía parte del presupuesto de tokens de la
+          // respuesta y una página densa se cortaba. Es además más rápido, que
+          // es el criterio de este módulo.
+          ...gateway.razonamiento("low"),
         },
         a,
       );
       const uso = gateway.usoDe(datos?.usage);
       est.tokens.prompt += uso.prompt;
       est.tokens.completion += uso.completion;
-      const contenido = datos?.choices?.[0]?.message?.content;
-      const texto = typeof contenido === "string" ? limpiarRespuestaOcr(contenido) : "";
-      est.leidas += 1;
       est.ms += Date.now() - t0;
-      // Se guarda también el vacío: una imagen sin texto no hay que volver a
-      // preguntarla.
+      const choice = datos?.choices?.[0];
+      const razon: string | null = typeof choice?.finish_reason === "string" ? choice.finish_reason : null;
+      const contenido = choice?.message?.content;
+      const texto = typeof contenido === "string" ? limpiarRespuestaOcr(contenido) : "";
+      // Completa = el modelo terminó por sí mismo Y devolvió texto (aunque sea
+      // "SIN TEXTO", que limpiarRespuestaOcr deja en ""). Cualquier otra cosa
+      // es un fallo: no se cuenta como leída ni se cachea.
+      const completa = typeof contenido === "string" && (razon === null || razon === "stop");
+      if (!completa) {
+        est.fallidas += 1;
+        const motivo =
+          razon === "length"
+            ? "el modelo se cortó antes de terminar la página"
+            : `el modelo no devolvió texto (${razon ?? "sin respuesta"})`;
+        console.warn(`OCR: ${donde} no se leyó completa (finish_reason=${razon ?? "?"}); no se cachea.`);
+        return { texto, estado: "fallo", motivo };
+      }
+      est.leidas += 1;
+      // Se guarda también el vacío legítimo: una imagen sin texto no hay que
+      // volver a preguntarla.
       void ctx
         .runMutation(internal.ingesta.escritura.guardarOcr, {
           entradas: [{ clave, texto, modelo }],
         })
         .catch((exc: unknown) => console.warn(`OCR: no se pudo guardar en caché: ${String(exc).slice(0, 100)}`));
-      return texto;
+      return resultadoOcr(texto);
     } catch (exc) {
       est.fallidas += 1;
       est.ms += Date.now() - t0;
       console.warn(`OCR: no se pudo leer ${donde}: ${String(exc).slice(0, 200)}`);
-      return "";
+      return { texto: "", estado: "fallo", motivo: `el servicio de lectura de imágenes falló: ${String(exc).slice(0, 120)}` };
     }
   };
 

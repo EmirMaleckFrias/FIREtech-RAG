@@ -97,6 +97,7 @@ describe('textos', () => {
 
   test('describirProgreso y fraccionProgreso', () => {
     const p: ProgresoNotion = {
+      vivaHasta: Number.MAX_SAFE_INTEGER,
       empezadoEn: AHORA,
       paginasTotal: 20,
       paginasProcesadas: 8,

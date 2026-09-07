@@ -27,7 +27,16 @@ import {
 } from "./chunking";
 import { abreParrafo, esPalabraDeEnlace, unirLineas } from "./lineas";
 import * as paper from "./paper";
-import { META_VACIA, type ChunkParseado, type ImagenParaOcr, type MetaObra, type Ocr } from "./tipos";
+import {
+  META_VACIA,
+  SIN_AVISOS,
+  type AvisosIngesta,
+  type ChunkParseado,
+  type ImagenParaOcr,
+  type MetaObra,
+  type Ocr,
+  type ResultadoOcr,
+} from "./tipos";
 
 /** Una línea física con su formato y su geometría. */
 export interface LineaPdf extends paper.LineaFormato {
@@ -384,60 +393,138 @@ function bordesPorAltura(lineas: LineaPdf[], cuantas: number): Set<number> {
   return borde;
 }
 
-/** Líneas con formato de cada página del PDF, y el número de páginas. */
 /** Opciones de `extraerLineas`. `imagenesSi` decide, con las líneas de texto
  *  ya extraídas de una página, si hay que sacar también sus imágenes (para
  *  hacerles OCR). Sin ella no se toca ninguna imagen: extraerlas cuesta
- *  decodificarlas, y un artículo con figuras no lo necesita. */
+ *  decodificarlas, y un artículo con figuras no lo necesita.
+ *
+ *  `conImagenes` recibe las imágenes de cada página EN CUANTO se extraen, y
+ *  después la página se limpia y los píxeles se sueltan. Antes se devolvían
+ *  todas juntas en un mapa al terminar el documento: un escaneo a 300 ppp
+ *  son ~26 MB de píxeles por página, y con 20 páginas retenidas a la vez la
+ *  acción moría por memoria sin llegar a marcar el documento como fallido.
+ *  Quien recibe las imágenes debe quedarse con algo pequeño (la promesa de
+ *  su lectura, cuyo primer paso las codifica como PNG), no con los píxeles. */
 export interface OpcionesExtraccion {
   imagenesSi?: (lineas: LineaPdf[], numeroPagina: number) => boolean;
+  conImagenes?: (imagenes: ImagenParaOcr[], numeroPagina: number) => void;
+}
+
+/** Desempaqueta una imagen de UN BIT por píxel (bit 1 = blanco, MSB primero,
+ *  filas alineadas a byte) a un byte por píxel. Es el formato de los escaneos
+ *  en blanco y negro (fax, CCITT G4, JBIG2), el más común en documentación
+ *  clínica escaneada. */
+export function desempaquetar1bpp(datos: Uint8Array | Uint8ClampedArray, ancho: number, alto: number): Uint8Array {
+  const bytesPorFila = (ancho + 7) >> 3;
+  const gris = new Uint8Array(ancho * alto);
+  for (let y = 0; y < alto; y++) {
+    const fila = y * bytesPorFila;
+    const salida = y * ancho;
+    for (let x = 0; x < ancho; x++) {
+      gris[salida + x] = (datos[fila + (x >> 3)] >> (7 - (x & 7))) & 1 ? 255 : 0;
+    }
+  }
+  return gris;
+}
+
+/** Píxeles de un objeto de imagen de pdf.js con su `kind`, o null si no se
+ *  puede usar. `kind` 1 es GRAYSCALE_1BPP: UN BIT por píxel, no un byte (el
+ *  código anterior lo asumía de un byte y descartaba todos los escaneos
+ *  bitonales sin decir nada). 2 es RGB de 24 bits y 3 RGBA. Una máscara de
+ *  imagen (`/ImageMask true`, también frecuente en escaneos CCITT) no lleva
+ *  `kind`: son bits donde 0 = tinta, y se leen igual que el 1 bpp. */
+export function pixelesDe(obj: any, esMascara: boolean): ImagenParaOcr | null {
+  if (!obj || !obj.data || !obj.width || !obj.height) return null;
+  const ancho: number = obj.width;
+  const alto: number = obj.height;
+  if (esMascara || obj.kind === 1) {
+    if (obj.data.length < ((ancho + 7) >> 3) * alto) return null;
+    return { tipo: "pixeles", ancho, alto, datos: desempaquetar1bpp(obj.data, ancho, alto), canales: 1 };
+  }
+  const canales = obj.kind === 2 ? 3 : 4;
+  if (obj.data.length < ancho * alto * canales) return null;
+  return { tipo: "pixeles", ancho, alto, datos: obj.data, canales };
 }
 
 /** Las imágenes pintadas en una página, como píxeles ya decodificados por
  *  pdf.js. Es el mismo recorrido que hace `extractImages` de unpdf, pero
  *  conservando ancho, alto y canales, que sin ellos los píxeles no sirven.
  *  Se incluyen las imágenes inline (`paintInlineImageXObject`), que en un
- *  escaneo pequeño son a veces la única. Las diminutas (líneas, viñetas) se
- *  descartan aquí para ni siquiera copiarlas. */
-async function imagenesDePagina(pagina: any, OPS: Record<string, number>): Promise<ImagenParaOcr[]> {
+ *  escaneo pequeño son a veces la única, las máscaras de imagen y las
+ *  variantes `Repeat`. Las diminutas (líneas, viñetas) se descartan aquí para
+ *  ni siquiera copiarlas; el resto de descartes se cuentan, porque una imagen
+ *  que no se pudo usar en una página sin texto es contenido que no llega al
+ *  índice. */
+async function imagenesDePagina(
+  pagina: any,
+  OPS: Record<string, number>,
+): Promise<{ imagenes: ImagenParaOcr[]; descartadas: number }> {
   const lista = await pagina.getOperatorList();
   const salida: ImagenParaOcr[] = [];
+  let descartadas = 0;
+  const resolver = (ref: unknown, contenedor: unknown) => {
+    // Una referencia es el nombre de un objeto de la página; si no, los datos
+    // ya vienen en línea.
+    if (typeof ref === "string") return pagina.objs.has(ref) ? pagina.objs.get(ref) : null;
+    return contenedor;
+  };
   for (let i = 0; i < lista.fnArray.length; i++) {
     const op = lista.fnArray[i];
+    const args = lista.argsArray[i];
     let obj: any = null;
+    let esMascara = false;
     try {
-      if (op === OPS.paintImageXObject) {
-        const clave = lista.argsArray[i][0];
-        obj = pagina.objs.has(clave) ? pagina.objs.get(clave) : null;
+      if (op === OPS.paintImageXObject || op === OPS.paintImageXObjectRepeat) {
+        obj = resolver(args[0], null);
       } else if (op === OPS.paintInlineImageXObject) {
-        obj = lista.argsArray[i][0];
+        obj = args[0];
+      } else if (op === OPS.paintImageMaskXObject || op === OPS.paintImageMaskXObjectRepeat) {
+        const mascara = args[0];
+        obj = mascara ? resolver(mascara.data, mascara) : null;
+        if (obj && obj !== mascara) obj = { ...mascara, data: obj.data ?? obj };
+        esMascara = true;
       } else {
         continue;
       }
     } catch {
+      descartadas += 1;
       continue;
     }
-    if (!obj || !obj.data || !obj.width || !obj.height) continue;
-    if (obj.width < 48 || obj.height < 48) continue;
-    // `kind`: 1 = gris de 1 byte por píxel, 2 = RGB de 24 bits, 3 = RGBA.
-    const canales = obj.kind === 1 ? 1 : obj.kind === 2 ? 3 : 4;
-    if (obj.data.length < obj.width * obj.height * canales) continue;
-    salida.push({ tipo: "pixeles", ancho: obj.width, alto: obj.height, datos: obj.data, canales });
+    if (!obj) {
+      descartadas += 1;
+      continue;
+    }
+    if (!obj.width || !obj.height || obj.width < 48 || obj.height < 48) continue;
+    const pixeles = pixelesDe(obj, esMascara);
+    if (pixeles === null) {
+      descartadas += 1;
+      continue;
+    }
+    salida.push(pixeles);
   }
-  return salida;
+  return { imagenes: salida, descartadas };
 }
 
 export async function extraerLineas(
   bytes: Uint8Array,
   opciones: OpcionesExtraccion = {},
-): Promise<{ paginas: LineaPdf[][]; numPaginas: number; imagenes: Map<number, ImagenParaOcr[]> }> {
+): Promise<{
+  paginas: LineaPdf[][];
+  numPaginas: number;
+  /** Páginas cuyo texto no se pudo extraer (pdf.js lanzó). Siguen contando
+   *  como páginas, y si tampoco dieron imágenes es contenido que falta. */
+  paginasIlegibles: number[];
+  /** Imágenes que se encontraron pero no se pudieron usar, por página. */
+  imagenesDescartadas: number;
+}> {
   // pdf.js TRANSFIERE el ArrayBuffer al (falso) worker y lo deja desconectado:
   // parsear dos veces los mismos bytes daba DataCloneError en la segunda. Se
   // le entrega una copia y el llamador conserva los suyos.
   const documento = await getDocumentProxy(new Uint8Array(bytes));
   try {
     const paginas: LineaPdf[][] = [];
-    const imagenes = new Map<number, ImagenParaOcr[]>();
+    const paginasIlegibles: number[] = [];
+    let imagenesDescartadas = 0;
     let OPS: Record<string, number> | null = null;
     const limiteNegrita = Date.now() + PRESUPUESTO_NEGRITA_MS;
     // Las fuentes son del documento, no de la página: resuelta una vez, vale
@@ -449,6 +536,13 @@ export async function extraerLineas(
       let anchoPagina = 0;
       try {
         pagina = await documento.getPage(n);
+      } catch (exc) {
+        console.warn(`pág. ${n}: no se pudo abrir (${String(exc)}); se omite.`);
+        paginas.push([]);
+        paginasIlegibles.push(n);
+        continue;
+      }
+      try {
         const [x0, , x1] = pagina.view as number[];
         anchoPagina = Math.abs(x1 - x0);
         const contenido = await pagina.getTextContent();
@@ -459,9 +553,12 @@ export async function extraerLineas(
           items.push({ str: it.str, x: e, y: f, ancho: it.width, tamano, fuente: it.fontName });
         }
       } catch (exc) {
-        console.warn(`pág. ${n}: fallo extrayendo texto (${String(exc)}); se omite.`);
-        paginas.push([]);
-        continue;
+        // Sin texto extraíble en esta página, pero la página existe: se sigue
+        // con las imágenes, que es justo la vía por la que una página sin
+        // texto se lee. Antes un `continue` aquí saltaba también el OCR y la
+        // página quedaba en blanco sin que nadie lo supiera.
+        console.warn(`pág. ${n}: fallo extrayendo texto (${String(exc)}); se intenta por sus imágenes.`);
+        paginasIlegibles.push(n);
       }
       const fuentes = new Set(items.map((it) => it.fuente));
       const desconocidas = [...fuentes].filter((f) => !nombresFuente.has(f));
@@ -489,14 +586,24 @@ export async function extraerLineas(
       if (opciones.imagenesSi?.(lineas, n)) {
         try {
           OPS = OPS ?? ((await getResolvedPDFJS()).OPS as unknown as Record<string, number>);
-          const encontradas = await imagenesDePagina(pagina, OPS);
-          if (encontradas.length) imagenes.set(n, encontradas);
+          const { imagenes, descartadas } = await imagenesDePagina(pagina, OPS);
+          imagenesDescartadas += descartadas;
+          if (descartadas) console.warn(`pág. ${n}: ${descartadas} imagen(es) no se pudieron usar.`);
+          if (imagenes.length) opciones.conImagenes?.(imagenes, n);
         } catch (exc) {
           console.warn(`pág. ${n}: no se pudieron extraer las imágenes (${String(exc).slice(0, 120)}).`);
         }
       }
+      // Suelta los objetos de la página (imágenes decodificadas incluidas):
+      // lo que `conImagenes` no haya convertido ya en algo pequeño deja de
+      // estar referenciado desde aquí.
+      try {
+        pagina.cleanup();
+      } catch {
+        // Con una tarea pendiente pdf.js se niega a limpiar; no pasa nada.
+      }
     }
-    return { paginas, numPaginas: documento.numPages, imagenes };
+    return { paginas, numPaginas: documento.numPages, paginasIlegibles, imagenesDescartadas };
   } finally {
     await documento.destroy().catch(() => undefined);
   }
@@ -534,7 +641,13 @@ export async function parsearPdf(
   bytes: Uint8Array,
   nombre: string,
   opciones: { omitirReferencias?: boolean; ocr?: Ocr; minTextoPagina?: number } = {},
-): Promise<{ chunks: ChunkParseado[]; pages: number; descartados: number; paginasOcr: number }> {
+): Promise<{
+  chunks: ChunkParseado[];
+  pages: number;
+  descartados: number;
+  paginasOcr: number;
+  avisos: AvisosIngesta;
+}> {
   const omitirReferencias = opciones.omitirReferencias ?? true;
   const minTexto = opciones.minTextoPagina ?? 40;
   // Primera pasada: texto y formato de cada página. Hace falta el documento
@@ -544,11 +657,27 @@ export async function parsearPdf(
   //
   // Con OCR disponible se piden además las imágenes de las páginas SIN texto
   // propio (un escaneo): las páginas con texto no se tocan, que es lo que
-  // hace que un artículo con figuras no cueste 30 lecturas al modelo.
-  const { paginas, numPaginas, imagenes } = await extraerLineas(
+  // hace que un artículo con figuras no cueste 30 lecturas al modelo. Las
+  // lecturas se LANZAN según aparece cada página (el gateway limita cuántas
+  // van a la vez) y se recogen al final: así los píxeles de una página no
+  // sobreviven a la siguiente, solo su PNG y su promesa.
+  const lecturas = new Map<number, Promise<ResultadoOcr[]>>();
+  const ocr = opciones.ocr;
+  const { paginas, numPaginas, paginasIlegibles, imagenesDescartadas } = await extraerLineas(
     bytes,
-    opciones.ocr ? { imagenesSi: (lineas) => textoDePagina(lineas) < minTexto } : {},
+    ocr
+      ? {
+          imagenesSi: (lineas) => textoDePagina(lineas) < minTexto,
+          conImagenes: (imagenes, n) => {
+            lecturas.set(
+              n,
+              Promise.all(imagenes.map((img, i) => ocr(img, { nombre, pagina: n, indice: i + 1 }))),
+            );
+          },
+        }
+      : {},
   );
+  const avisos: AvisosIngesta = { ...SIN_AVISOS };
 
   const textoCabecera = paginas
     .slice(0, 2)
@@ -682,25 +811,32 @@ export async function parsearPdf(
   });
   cerrarParrafo();
 
-  // Páginas escaneadas: el texto sale del OCR de sus imágenes. Las lecturas
-  // van en paralelo (el gateway limita el vuelo) y cada página queda con su
-  // número, colgada de la sección vigente al llegar a ella. Si el documento
-  // no tenía título (un escaneo puro no tiene bloque de título que leer), se
-  // toma el primer encabezado que el OCR devuelva en la primera página leída.
+  // Páginas escaneadas: el texto sale del OCR de sus imágenes. Cada página
+  // queda con su número, colgada de la sección vigente al llegar a ella. Si
+  // el documento no tenía título (un escaneo puro no tiene bloque de título
+  // que leer), se toma el primer encabezado que el OCR devuelva en la
+  // primera página leída.
+  //
+  // Una página cuya lectura falló o se omitió cuenta en los avisos: es
+  // contenido que la usuaria cree indexado y no lo está. Sin esto, "" por
+  // fallo del gateway y "" por página en blanco eran lo mismo.
   let paginasOcr = 0;
-  if (opciones.ocr && imagenes.size > 0) {
-    const ocr = opciones.ocr;
-    const numeros = [...imagenes.keys()].sort((a, b) => a - b);
-    const textos = await Promise.all(
-      numeros.map(async (n) => {
-        const partes = await Promise.all(
-          (imagenes.get(n) ?? []).map((img, i) => ocr(img, { nombre, pagina: n, indice: i + 1 })),
-        );
-        return partes.filter((t) => t.trim()).join("\n\n");
-      }),
-    );
+  const conImagenes = new Set(lecturas.keys());
+  if (lecturas.size > 0) {
+    const numeros = [...lecturas.keys()].sort((a, b) => a - b);
+    const porPagina = await Promise.all(numeros.map((n) => lecturas.get(n)!));
     numeros.forEach((n, k) => {
-      const texto = textos[k];
+      const resultados = porPagina[k];
+      const texto = resultados.map((r) => r.texto).filter((t) => t.trim()).join("\n\n");
+      const fallos = resultados.filter((r) => r.estado === "fallo");
+      const omitidas = resultados.filter((r) => r.estado === "omitida");
+      if (fallos.length) {
+        avisos.sinLeer += 1;
+        avisos.motivo = avisos.motivo ?? fallos[0].motivo;
+      } else if (omitidas.length && !texto.trim()) {
+        avisos.omitidas += 1;
+        avisos.motivo = avisos.motivo ?? omitidas[0].motivo;
+      }
       if (!texto.trim()) return;
       paginasOcr += 1;
       if (!meta.titulo && n === numeros[0]) {
@@ -710,6 +846,18 @@ export async function parsearPdf(
       const sec = seccionAlFinalDe.get(n) ?? "";
       for (const pieza of partirParrafoLargo(texto)) paras.push([pieza, [n], sec]);
     });
+  }
+  // Páginas que no dieron ni texto ni imágenes legibles: si su texto falló al
+  // extraerse, o si tenían imágenes que no se pudieron usar, faltan.
+  for (const n of paginasIlegibles) {
+    if (!conImagenes.has(n)) {
+      avisos.sinLeer += 1;
+      avisos.motivo = avisos.motivo ?? "una página del PDF no se pudo leer";
+    }
+  }
+  if (imagenesDescartadas > 0) {
+    avisos.sinLeer += imagenesDescartadas;
+    avisos.motivo = avisos.motivo ?? "alguna imagen del PDF tiene un formato que no se pudo leer";
   }
 
   // Se empaqueta por tramos de sección (ver agruparPorSeccion), con el solape
@@ -731,5 +879,5 @@ export async function parsearPdf(
       );
     }
   }
-  return { chunks, pages: numPaginas, descartados, paginasOcr };
+  return { chunks, pages: numPaginas, descartados, paginasOcr, avisos };
 }

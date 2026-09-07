@@ -29,7 +29,13 @@ const TOKEN = "secret_prueba";
 interface PaginaFalsa {
   pagina: PaginaNotion;
   bloques: BloqueNotion[];
+  /** Base a la que pertenece (id sin guiones). Por defecto, DB. */
+  db: string;
 }
+
+/** Una segunda base, para las pruebas con varias. */
+const DB2 = "fedcba9876543210fedcba9876543210";
+const conGuiones = (id: string) => `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
 
 function t(texto: string) {
   return { type: "text", plain_text: texto, href: null };
@@ -75,6 +81,7 @@ class NotionFalso {
     estado?: string;
     adjuntos?: Array<{ name: string; url: string }>;
     bloques?: BloqueNotion[];
+    enBase?: string;
   } = {}) {
     const properties: PaginaNotion["properties"] = {
       Nombre: { type: "title", title: [t(titulo)] },
@@ -94,6 +101,7 @@ class NotionFalso {
         properties,
       },
       bloques: opciones.bloques ?? [],
+      db: opciones.enBase ?? DB,
     });
   }
 
@@ -136,12 +144,12 @@ class NotionFalso {
 
       if (recurso === "databases" && accion === "query") {
         // La API documenta el formato con guiones; el cliente lo manda así.
-        if (id !== "01234567-89ab-cdef-0123-456789abcdef") {
-          return this.json({ code: "object_not_found", message: "db" }, 404);
-        }
+        const conocidas = new Map([[conGuiones(DB), DB], [conGuiones(DB2), DB2]]);
+        const db = conocidas.get(id);
+        if (!db) return this.json({ code: "object_not_found", message: "db" }, 404);
         const cuerpo = init?.body ? (JSON.parse(String(init.body)) as { start_cursor?: string }) : {};
         const desde = Number(cuerpo.start_cursor ?? "0");
-        const todas = [...this.paginas.values()].map((p) => p.pagina);
+        const todas = [...this.paginas.values()].filter((p) => p.db === db).map((p) => p.pagina);
         const trozo = todas.slice(desde, desde + this.tamanoPagina);
         const hayMas = desde + this.tamanoPagina < todas.length;
         return this.json({
@@ -529,16 +537,41 @@ describe("adjuntos", () => {
     expect(notion.llamadas.filter((l) => l === "GET /v1/pages/a1")).toHaveLength(1);
   });
 
-  test("extensiones no soportadas se ignoran sin error, ni siquiera se descargan", async () => {
+  test("extensiones no soportadas no se descargan, y SE DICE en los avisos (antes era un console.log y el adjunto quedaba fuera para siempre sin señal)", async () => {
     const t = await nuevaBase();
     baseInicial();
     notion.pagina("f6", "Con vídeo", { adjuntos: [{ name: "charla.mp4", url: "https://s3.notion.example/charla.mp4" }] });
     notion.fichero("https://s3.notion.example/charla.mp4", new Uint8Array([1, 2, 3]));
     const r = await sincronizar(t);
-    expect(r).toMatchObject({ estado: "ok", errores: [] });
+    if (!("errores" in r)) throw new Error(`esperaba una corrida, fue ${r.estado}`);
+    expect(r.errores).toEqual([expect.stringMatching(/Con vídeo: el adjunto 'charla.mp4' es \.mp4.*no se puede indexar/)]);
     expect((await documentos(t)).map((d) => d.fileName)).not.toContain("charla.mp4");
     expect(notion.llamadas).not.toContain("GET /charla.mp4");
+    // Y la página no queda marcada con error: en la siguiente corrida sigue
+    // intacta y no se vuelve a descargar nada.
+    const paginas = await t.run((ctx) => ctx.db.query("notionPaginas").collect());
+    expect(paginas.find((p) => p.titulo === "Con vídeo")?.error).toBeUndefined();
   });
+
+  test("ADVERSARIAL: un adjunto que pasa del tope se rechaza con un aviso claro y la sincronización sigue con lo demás", async () => {
+    const { MAX_ADJUNTO_BYTES } = await import("./api");
+    const t = await nuevaBase();
+    baseInicial();
+    notion.pagina("g7", "Con escaneo enorme", { adjuntos: [{ name: "escaneo.pdf", url: "https://s3.notion.example/escaneo.pdf" }] });
+    // Sin Content-Length (el simulador no lo pone): se corta contando lo leído.
+    notion.fichero("https://s3.notion.example/escaneo.pdf", new Uint8Array(MAX_ADJUNTO_BYTES + 1024));
+    const r = await sincronizar(t);
+    if (!("errores" in r)) throw new Error(`esperaba una corrida, fue ${r.estado}`);
+    expect(r.errores).toEqual([expect.stringMatching(/escaneo\.pdf.*máximo desde Notion son 20 MB/)]);
+    const [corrida] = await corridas(t);
+    expect(corrida.estado).toBe("error");
+    // Los demás documentos de la base sí entraron.
+    expect((await documentos(t)).length).toBeGreaterThan(0);
+    expect((await documentos(t)).map((d) => d.fileName)).not.toContain("escaneo.pdf");
+    // La página queda marcada con el error y se reintentará, no se cuelga.
+    const paginas = await t.run((ctx) => ctx.db.query("notionPaginas").collect());
+    expect(paginas.find((p) => p.titulo === "Con escaneo enorme")?.error).toMatch(/máximo desde Notion/);
+  }, 30_000);
 
   test("una imagen adjunta SÍ se trae: se indexa por OCR en la ingesta", async () => {
     // Antes las imágenes se ignoraban como formato no soportado. Una foto de
@@ -735,6 +768,113 @@ describe("autoexclusión", () => {
     const todas = await corridas(t);
     expect(todas).toHaveLength(2);
     expect(todas.find((c) => c._id === viva)).toMatchObject({ estado: "error" });
+  });
+});
+
+describe("dos bases a la vez", () => {
+  async function conDosBases(t: T) {
+    await t.run(async (ctx) => {
+      const c = await ctx.db.query("notionConexion").first();
+      await ctx.db.patch(c!._id, { bases: [{ id: DB, titulo: "Protocolos" }, { id: DB2, titulo: "Tareas" }] });
+    });
+  }
+
+  test("ADVERSARIAL: terminar la base A no retira nada de la base B, y archivar en A solo borra lo de A", async () => {
+    const t = await nuevaBase();
+    await conDosBases(t);
+    baseInicial();
+    notion.pagina("t1", "Tarea larga", { bloques: [parrafo(TEXTO_LARGO)], enBase: DB2 });
+    notion.pagina("t2", "Otra tarea", { bloques: [parrafo(`${TEXTO_LARGO} Segunda parte.`)], enBase: DB2 });
+
+    const r1 = conCifras(await sincronizar(t));
+    expect(r1.errores).toEqual([]);
+    // Los .md se nombran con el título en minúsculas y guiones.
+    const nombres1 = (await documentos(t)).map((d) => d.fileName);
+    expect(nombres1).toContain("guia.pdf");
+    expect(nombres1).toContain("notion-tarea-larga.md");
+    expect(nombres1).toContain("notion-otra-tarea.md");
+    const paginas = await t.run((ctx) => ctx.db.query("notionPaginas").collect());
+    expect(paginas.filter((p) => p.databaseId === DB2).map((p) => p.pageId).sort()).toEqual(["t1", "t2"]);
+
+    // Se archiva la guía de A: sus documentos se van; los de B, intactos.
+    notion.paginas.delete("a1");
+    const r2 = conCifras(await sincronizar(t));
+    expect(r2.borrados).toBeGreaterThan(0);
+    const nombres2 = (await documentos(t)).map((d) => d.fileName);
+    expect(nombres2).not.toContain("guia.pdf");
+    expect(nombres2).not.toContain("notion-guia-a-de-p-tau217.md");
+    expect(nombres2).toContain("notion-tarea-larga.md");
+    expect(nombres2).toContain("notion-otra-tarea.md");
+  });
+
+  test("una base que deja de compartirse (404) no borra nada de ninguna base", async () => {
+    const t = await nuevaBase();
+    await conDosBases(t);
+    baseInicial();
+    notion.pagina("t1", "Tarea larga", { bloques: [parrafo(TEXTO_LARGO)], enBase: DB2 });
+    conCifras(await sincronizar(t));
+    const antes = (await documentos(t)).length;
+    expect(antes).toBeGreaterThan(1);
+
+    // La base B desaparece para la integración: Notion responde 404.
+    await t.run(async (ctx) => {
+      const c = await ctx.db.query("notionConexion").first();
+      await ctx.db.patch(c!._id, {
+        bases: [{ id: DB, titulo: "Protocolos" }, { id: "00000000000000000000000000000000", titulo: "Perdida" }],
+      });
+    });
+    const r = await sincronizar(t);
+    expect(r.estado).not.toBe("ok");
+    expect((await documentos(t)).length).toBe(antes);
+  });
+});
+
+describe("corrida parcial", () => {
+  test("ADVERSARIAL: cortada por el reloj tras avanzar se cierra con la verdad y se reagenda en un minuto, sin esperar al cron", async () => {
+    const t = await nuevaBase();
+    baseInicial();
+    // El reloj salta 30 minutos en cuanto se ha leído el cuerpo de la primera
+    // página: esa se termina, y la comprobación de tiempo de la siguiente
+    // corta la corrida con `procesadas > 0`.
+    const real = Date.now;
+    vi.spyOn(Date, "now").mockImplementation(() =>
+      notion.llamadas.some((l) => l.startsWith("GET /v1/blocks/")) ? real() + 30 * 60_000 : real(),
+    );
+    try {
+      const r = await sincronizar(t);
+      if (r.estado !== "parcial") throw new Error(`esperaba parcial, fue ${r.estado}`);
+      expect(r.errores).toContain("sincronización parcial, continuará en unos minutos");
+      const fallosDePagina = r.errores.filter((e: string) => !/^sincronización parcial/.test(e));
+      const [corrida] = await corridas(t);
+      // El aviso de "parcial" no cuenta como fallo: sin errores de página la
+      // corrida es "ok"; con ellos, "error" (antes era "ok" siempre).
+      expect(corrida.estado).toBe(fallosDePagina.length > 0 ? "error" : "ok");
+      // Reagendada con `forzar`, no a la espera del cron.
+      const trabajos = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+      const reanudacion = trabajos.filter((j) => j.name.includes("sincronizar"));
+      expect(reanudacion.length).toBeGreaterThanOrEqual(1);
+      expect(reanudacion[0].args[0]).toMatchObject({ propietario: DUENO, forzar: true });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("ADVERSARIAL: cortada SIN haber avanzado ninguna página no se reagenda (evita un bucle con una base que no progresa)", async () => {
+    const t = await nuevaBase();
+    baseInicial();
+    // Cada lectura del reloj avanza 25 minutos: la primera comprobación del
+    // bucle ya pasa de LIMITE_CORRIDA_MS, antes de procesar ninguna página.
+    const real = Date.now();
+    let llamadas = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => real + (llamadas += 1) * 25 * 60_000);
+    try {
+      const r = await sincronizar(t);
+      if (r.estado !== "parcial") throw new Error(`esperaba parcial, fue ${r.estado}`);
+      const trabajos = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+      expect(trabajos.filter((j) => j.name.includes("sincronizar"))).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
 

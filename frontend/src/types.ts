@@ -296,6 +296,16 @@ export interface DocumentInfo {
   /** Hash del fichero, para que subir una carpeta no repita lo que ya está
    *  con otro nombre. null si el registro no lo trae. */
   sha256: string | null;
+  /** Lo que la ingesta no pudo leer del todo (páginas escaneadas sin leer,
+   *  imágenes omitidas, texto recortado). null = nada que avisar. */
+  avisos: AvisosIngesta | null;
+}
+
+export interface AvisosIngesta {
+  sinLeer: number;
+  omitidas: number;
+  recortados: number;
+  motivo: string | null;
 }
 
 /** Una corrida de la sincronización con Notion (notion.admin.estado.ultimas). */
@@ -313,6 +323,10 @@ export interface CorridaNotion {
 
 /** Progreso de la corrida en curso, que la acción escribe página a página. */
 export interface ProgresoNotion {
+  /** Hasta cuándo se considera viva una corrida que no ha cerrado; pasado
+   *  ese momento el cliente la trata como muerta (el servidor no lee el
+   *  reloj). */
+  vivaHasta: number;
   empezadoEn: number;
   /** null mientras aún se lee la lista de páginas de la base. */
   paginasTotal: number | null;

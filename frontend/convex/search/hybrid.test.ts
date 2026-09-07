@@ -722,3 +722,24 @@ describe("una búsqueda no puede ver el corpus de otra persona", () => {
     });
   });
 });
+
+describe("fragmentos huérfanos", () => {
+  test("ADVERSARIAL: un fragmento cuyo documento ya no existe no se carga, aunque sea del propietario y pase los filtros", async () => {
+    // Un borrado por lotes que muere a medias deja fragmentos sin documento.
+    // La ficha ya no está en la biblioteca, así que el agente no puede seguir
+    // citándolos como si el documento existiera.
+    const t = convexTest(schema);
+    const ids = await sembrar(t, TRES);
+    const docId = await t.run(async (ctx) => (await ctx.db.get(ids[0]))!.documentRef);
+    await t.run(async (ctx) => ctx.db.delete(docId));
+
+    const cargado = await t.query(internal.search.hybrid.cargar, { propietario: DUENO, ids, filtros: {} });
+    expect(cargado).toEqual([]);
+
+    // Y con el documento vivo, los tres.
+    const t2 = convexTest(schema);
+    const ids2 = await sembrar(t2, TRES);
+    const cargado2 = await t2.query(internal.search.hybrid.cargar, { propietario: DUENO, ids: ids2, filtros: {} });
+    expect(cargado2).toHaveLength(3);
+  });
+});

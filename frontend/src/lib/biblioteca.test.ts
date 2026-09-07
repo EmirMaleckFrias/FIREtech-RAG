@@ -32,6 +32,7 @@ function doc(p: Partial<DocumentInfo> = {}): DocumentInfo {
     citation: null,
     origen: 'subida',
     sha256: null,
+    avisos: null,
     ...p,
   } as DocumentInfo;
 }

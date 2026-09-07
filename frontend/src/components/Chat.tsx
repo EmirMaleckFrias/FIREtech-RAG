@@ -15,6 +15,8 @@ interface ChatProps {
   modo: ModoPensamiento;
   onModoChange: (modo: ModoPensamiento) => void;
   onFeedback: (msg: ChatMessage, rating: 1 | -1) => void;
+  /** Mensaje por id de respuesta cuando guardar la valoración falló. */
+  feedbackErrores?: Record<string, string>;
   onCitation: (msgLocalId: string, ref: CitationRef) => void;
   onShowSources: (msgLocalId: string) => void;
 }
@@ -59,6 +61,7 @@ export function Chat({
   onFeedback,
   onCitation,
   onShowSources,
+  feedbackErrores = {},
 }: ChatProps) {
   const [draft, setDraft] = useState('');
   const [modoMenuAbierto, setModoMenuAbierto] = useState(false);
@@ -161,12 +164,24 @@ export function Chat({
     setDraft('');
     requestAnimationFrame(() => {
       const el = textareaRef.current;
-      if (el) {
-        el.style.height = 'auto';
-        el.focus();
-      }
+      if (el) el.style.height = 'auto';
     });
   };
+
+  // El foco vuelve al composer cuando termina la respuesta. Al enviar, el
+  // textarea pasa a `disabled` en el mismo render y el navegador suelta el
+  // foco a `body`; un `focus()` en ese momento no hace nada, y sin esto quien
+  // navega con teclado tenía que tabular desde el principio de la página en
+  // cada turno. Solo si el foco está suelto: si ella se fue a otro sitio
+  // mientras esperaba, no se le roba.
+  const estabaEnCurso = useRef(isStreaming);
+  useEffect(() => {
+    const antes = estabaEnCurso.current;
+    estabaEnCurso.current = isStreaming;
+    if (!antes || isStreaming || loadingMessages) return;
+    const suelto = document.activeElement === null || document.activeElement === document.body;
+    if (suelto) textareaRef.current?.focus();
+  }, [isStreaming, loadingMessages]);
 
   /**
    * Sugerencia del estado vacío: escribe la pregunta en el composer y le da
@@ -256,6 +271,7 @@ export function Chat({
             {messages.map((m) => (
               <MessageItem
                 key={m.localId}
+                feedbackError={m.id !== null ? feedbackErrores[m.id] : undefined}
                 msg={m}
                 isPanelTarget={m.localId === panelTargetId}
                 onFeedback={onFeedback}

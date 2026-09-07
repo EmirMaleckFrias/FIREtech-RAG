@@ -53,7 +53,8 @@ export type MotivoOmision =
   | 'formato'
   | 'demasiado_grande'
   | 'oculto'
-  | 'vacio';
+  | 'vacio'
+  | 'ilegible';
 
 export interface ArchivoOmitido {
   nombre: string;
@@ -159,9 +160,12 @@ export function planificar(
   archivos: Array<ArchivoConRuta & { sha256: string }>,
   existentes: DocumentoExistente[],
   limiteMb: number,
+  /** Omitidos antes de llegar aquí (ficheros que no se pudieron leer del
+   *  disco al recorrer la carpeta), para que salgan en el mismo resumen. */
+  omitidosPrevios: ArchivoOmitido[] = [],
 ): PlanDeSubida {
   const aSubir: ArchivoPlaneado[] = [];
-  const omitidos: ArchivoOmitido[] = [];
+  const omitidos: ArchivoOmitido[] = [...omitidosPrevios];
   const nombresOcupados = new Set(existentes.map((d) => sanear(d.fileName)));
   const hashesVistos = new Set(
     existentes.map((d) => d.sha256).filter((h): h is string => typeof h === 'string' && h !== ''),
@@ -217,6 +221,8 @@ export function textoDeMotivo(motivo: MotivoOmision, limiteMb: number): string {
       return 'archivo oculto del sistema';
     case 'vacio':
       return 'está vacío';
+    case 'ilegible':
+      return 'no se pudo leer del disco (¿está descargado y accesible?)';
   }
 }
 
@@ -238,8 +244,9 @@ export function resumenDeTanda(
     demasiado_grande: ['demasiado grande', 'demasiado grandes'],
     oculto: ['archivo oculto', 'archivos ocultos'],
     vacio: ['vacío', 'vacíos'],
+    ilegible: ['no se pudo leer del disco', 'no se pudieron leer del disco'],
   };
-  for (const motivo of ['ya_estaba', 'formato', 'demasiado_grande', 'vacio', 'oculto'] as const) {
+  for (const motivo of ['ya_estaba', 'formato', 'demasiado_grande', 'vacio', 'oculto', 'ilegible'] as const) {
     const n = porMotivo.get(motivo);
     if (!n) continue;
     partes.push(`${n} ${etiqueta[motivo][n === 1 ? 0 : 1]}`);
@@ -308,36 +315,54 @@ export async function recorrer(
   raiz: EntradaFs,
   carpeta = '',
   acumulado: ArchivoConRuta[] = [],
-): Promise<{ archivos: ArchivoConRuta[]; truncado: boolean }> {
-  if (acumulado.length >= MAX_ARCHIVOS_POR_TANDA) return { archivos: acumulado, truncado: true };
+  ilegibles: ArchivoOmitido[] = [],
+): Promise<{ archivos: ArchivoConRuta[]; truncado: boolean; ilegibles: ArchivoOmitido[] }> {
+  if (acumulado.length >= MAX_ARCHIVOS_POR_TANDA) return { archivos: acumulado, truncado: true, ilegibles };
   if (raiz.isFile) {
-    acumulado.push({ file: await ficheroDe(raiz), carpeta });
-    return { archivos: acumulado, truncado: false };
+    // Un fichero que no se puede leer (un marcador de la nube sin descargar,
+    // un permiso, un fichero movido entre soltar y leer) se APUNTA y se
+    // sigue: antes rechazaba la promesa entera, se perdía toda la tanda y la
+    // zona de arrastre se quedaba como estaba, sin decir nada.
+    try {
+      acumulado.push({ file: await ficheroDe(raiz), carpeta });
+    } catch {
+      ilegibles.push({ nombre: raiz.name, carpeta, motivo: 'ilegible' });
+    }
+    return { archivos: acumulado, truncado: false, ilegibles };
   }
-  if (!raiz.isDirectory || !raiz.createReader) return { archivos: acumulado, truncado: false };
-  const hijos = (await leerTodas(raiz.createReader())).sort((a, b) =>
-    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-  );
+  if (!raiz.isDirectory || !raiz.createReader) return { archivos: acumulado, truncado: false, ilegibles };
+  let hijos: EntradaFs[];
+  try {
+    hijos = (await leerTodas(raiz.createReader())).sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+    );
+  } catch {
+    ilegibles.push({ nombre: raiz.name, carpeta, motivo: 'ilegible' });
+    return { archivos: acumulado, truncado: false, ilegibles };
+  }
   const dentro = carpeta === '' ? raiz.name : `${carpeta}/${raiz.name}`;
   let truncado = false;
   for (const hijo of hijos) {
-    const r = await recorrer(hijo, dentro, acumulado);
+    const r = await recorrer(hijo, dentro, acumulado, ilegibles);
     if (r.truncado) {
       truncado = true;
       break;
     }
   }
-  return { archivos: acumulado, truncado };
+  return { archivos: acumulado, truncado, ilegibles };
 }
 
 /** De un `<input type="file" webkitdirectory>`: cada `File` trae su ruta
- *  relativa en `webkitRelativePath` ("Carpeta/sub/fichero.pdf"). */
-export function desdeInputDeCarpeta(files: ArrayLike<File>): ArchivoConRuta[] {
-  return Array.from(files).map((file) => {
+ *  relativa en `webkitRelativePath` ("Carpeta/sub/fichero.pdf"). El mismo
+ *  tope que al arrastrar: antes este camino (el del botón destacado) no lo
+ *  aplicaba y una carpeta de 3000 ficheros se hasheaba y subía entera. */
+export function desdeInputDeCarpeta(files: ArrayLike<File>): { archivos: ArchivoConRuta[]; truncado: boolean } {
+  const todos = Array.from(files).map((file) => {
     const ruta = (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? '';
     const i = ruta.lastIndexOf('/');
     return { file, carpeta: i > 0 ? ruta.slice(0, i) : '' };
   });
+  return { archivos: todos.slice(0, MAX_ARCHIVOS_POR_TANDA), truncado: todos.length > MAX_ARCHIVOS_POR_TANDA };
 }
 
 /**
@@ -347,7 +372,7 @@ export function desdeInputDeCarpeta(files: ArrayLike<File>): ArchivoConRuta[] {
  */
 export async function desdeDrop(
   dataTransfer: Pick<DataTransfer, 'items' | 'files'>,
-): Promise<{ archivos: ArchivoConRuta[]; truncado: boolean }> {
+): Promise<{ archivos: ArchivoConRuta[]; truncado: boolean; ilegibles: ArchivoOmitido[] }> {
   const entradas: EntradaFs[] = [];
   if (dataTransfer.items) {
     for (const item of Array.from(dataTransfer.items)) {
@@ -362,16 +387,18 @@ export async function desdeDrop(
     return {
       archivos: Array.from(dataTransfer.files ?? []).map((file) => ({ file, carpeta: '' })),
       truncado: false,
+      ilegibles: [],
     };
   }
   const acumulado: ArchivoConRuta[] = [];
+  const ilegibles: ArchivoOmitido[] = [];
   let truncado = false;
   for (const e of entradas) {
-    const r = await recorrer(e, '', acumulado);
+    const r = await recorrer(e, '', acumulado, ilegibles);
     if (r.truncado) {
       truncado = true;
       break;
     }
   }
-  return { archivos: acumulado, truncado };
+  return { archivos: acumulado, truncado, ilegibles };
 }

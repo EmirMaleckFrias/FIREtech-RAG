@@ -331,15 +331,26 @@ export const sincronizar = internalAction({
         }
         if (parcial) break;
       }
-      if (parcial) cifras.errores.push("sincronización parcial, continuará en la siguiente");
+      // Con errores de página la corrida es "error", parcial o no: antes el
+      // aviso de "parcial" se añadía a la misma lista y la condición de abajo
+      // guardaba "ok" para toda corrida parcial, aunque hubieran fallado
+      // veinte páginas.
+      const huboFallos = cifras.errores.length > 0;
+      if (parcial) cifras.errores.push("sincronización parcial, continuará en unos minutos");
       // Y el último avance, para que la barra llegue al final antes de cerrar.
       await avanzar(undefined, true);
 
       await ctx.runMutation(internal.notion.datos.cerrarCorrida, {
         runId,
         ...cifras,
-        estado: cifras.errores.length > 0 && !parcial ? "error" : "ok",
+        estado: huboFallos ? "error" : "ok",
       });
+      // Cortada por el reloj y con trabajo hecho: se reanuda en un minuto en
+      // vez de esperar al cron (hasta 40 minutos con una base grande). Solo si
+      // avanzó, para que una base que no progresa no se reagende en bucle.
+      if (parcial && procesadas > 0) {
+        await ctx.scheduler.runAfter(60_000, internal.notion.sync.sincronizar, { propietario, forzar: true });
+      }
       console.log(
         `notion: ${cifras.paginas} páginas, ${cifras.nuevos} nuevos, ${cifras.actualizados} ` +
           `actualizados, ${cifras.borrados} borrados, ${cifras.errores.length} errores, ` +
@@ -421,10 +432,24 @@ async function procesarPagina(
   for (const adj of adjuntos) {
     const ext = extensionDe(adj.nombre);
     if (!(EXTENSIONES_PERMITIDAS as readonly string[]).includes(ext)) {
-      console.log(`notion: adjunto '${adj.nombre}' de '${titulo}' ignorado (extensión .${ext || "?"})`);
+      // Se DICE en los avisos de la corrida (es lo único que ve la usuaria),
+      // sin marcar la página con error: `intacta` exige que no lo tenga, y
+      // marcarla la haría re-descargarse entera cada hora. Antes era un
+      // `console.log` y el .pptx que ella adjuntó quedaba fuera del corpus
+      // para siempre sin ninguna señal.
+      cifras.errores.push(
+        `${titulo}: el adjunto '${adj.nombre}' es .${ext || "?"}, un formato que no se puede indexar; conviértelo a PDF`,
+      );
       continue;
     }
-    const bytes = await descargarConRefresco(cliente, pagina, adj);
+    let bytes: Uint8Array;
+    try {
+      bytes = await descargarConRefresco(cliente, pagina, adj);
+    } catch (exc) {
+      // Con el nombre del adjunto: "Protocolos: el adjunto 'x.pdf' pesa 30 MB…"
+      // le dice a la usuaria qué fichero es, no solo en qué página está.
+      throw new Error(`el adjunto '${adj.nombre}': ${mensajeDe(exc)}`);
+    }
     if (bytes.length === 0) {
       cifras.errores.push(`${titulo}: el adjunto '${adj.nombre}' está vacío`);
       continue;

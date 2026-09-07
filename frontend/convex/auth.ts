@@ -34,6 +34,9 @@ function normalizarCorreo(valor: unknown): string {
 export function correoPermitido(correo: string, dominios: readonly string[]): boolean {
   const c = normalizarCorreo(correo);
   if (!c) return false;
+  // Con parte local: "@airobotix.net" a secas no es un correo, y el cliente
+  // ya lo rechazaba; las dos reglas tienen que decir lo mismo.
+  if (c.indexOf("@") < 1) return false;
   return dominios.some((crudo) => {
     const d = crudo.trim().toLowerCase().replace(/^@/, "");
     return d !== "" && c.endsWith(`@${d}`);

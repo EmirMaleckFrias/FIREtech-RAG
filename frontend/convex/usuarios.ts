@@ -163,11 +163,11 @@ export const listar = query({
     for (const u of cuentas) {
       const sesiones = await ctx.db
         .query("sessions")
-        .withIndex("porUsuario", (q) => q.eq("userId", u._id))
+        .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id))
         .collect();
       const mensajes = await ctx.db
         .query("messages")
-        .withIndex("porUsuario", (q) => q.eq("userId", u._id))
+        .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id))
         .collect();
       salida.push({
         ...ficha(u),
@@ -259,7 +259,7 @@ export const borrar = mutation({
     // 1. Conversaciones y feedback.
     const sesiones = await ctx.db
       .query("sessions")
-      .withIndex("porUsuario", (q) => q.eq("userId", u._id))
+      .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id))
       .collect();
     for (const s of sesiones) await ctx.db.delete(s._id);
     const votos = await ctx.db
@@ -271,7 +271,7 @@ export const borrar = mutation({
     // 2. Mensajes, por lotes y en segundo plano.
     const algunMensaje = await ctx.db
       .query("messages")
-      .withIndex("porUsuario", (q) => q.eq("userId", u._id))
+      .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id))
       .first();
     if (algunMensaje) {
       await ctx.scheduler.runAfter(0, internal.mensajes.borrarRestantes, {
@@ -298,16 +298,19 @@ export const borrar = mutation({
       .withIndex("porUsuario", (q) => q.eq("conectadoPor", u._id))
       .collect();
     for (const c of conexiones) await ctx.db.delete(c._id);
-    const paginas = await ctx.db
+    // Las páginas y corridas de Notion, por lotes en segundo plano: pueden
+    // ser miles y no caben en esta transacción.
+    const algunaPagina = await ctx.db
       .query("notionPaginas")
       .withIndex("porPropietarioYPageId", (q) => q.eq("propietario", u._id))
-      .collect();
-    for (const pg of paginas) await ctx.db.delete(pg._id);
-    const corridas = await ctx.db
+      .first();
+    const algunaCorrida = await ctx.db
       .query("notionSincronizaciones")
       .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
-      .collect();
-    for (const c of corridas) await ctx.db.delete(c._id);
+      .first();
+    if (algunaPagina || algunaCorrida) {
+      await ctx.scheduler.runAfter(0, internal.notion.datos.borrarRastroDeUsuario, { propietario: u._id });
+    }
 
     // 4. Convex Auth y la cuenta.
     const sesionesAuth = await ctx.db

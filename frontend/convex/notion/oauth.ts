@@ -126,16 +126,6 @@ export const credenciales = internalQuery({
   handler: async (ctx, { propietario }) => await credencialesDe(ctx, propietario),
 });
 
-/** Quiénes tienen hoy una conexión con alguna base elegida, para que el cron
- *  lance una sincronización por persona en vez de una sola global. Interna y
- *  sin tokens: devuelve solo ids de cuenta. */
-export const propietariosConectados = internalQuery({
-  args: {},
-  handler: async (ctx): Promise<Id<"users">[]> => {
-    const todas = await ctx.db.query("notionConexion").collect();
-    return todas.filter((c) => c.bases.length > 0).map((c) => c.conectadoPor);
-  },
-});
 
 /** El token de la conexión de quien llama, para la acción que lista las
  *  bases. Interna, y resuelve la identidad ella misma: la acción pública que
@@ -192,9 +182,14 @@ export const iniciar = mutation({
 
     // Limpieza de estados caducados al crear uno nuevo: así la tabla no
     // acumula clics abandonados y no hace falta un cron para ella.
+    // Por índice y acotado: antes recorría la tabla ENTERA de estados de
+    // todos los usuarios en cada clic de "Conectar".
     const ahora = Date.now();
-    const pendientes = await ctx.db.query("notionEstadosOauth").collect();
-    for (const e of pendientes) if (e.expiraEn <= ahora) await ctx.db.delete(e._id);
+    const caducados = await ctx.db
+      .query("notionEstadosOauth")
+      .withIndex("porExpira", (q) => q.lte("expiraEn", ahora))
+      .take(50);
+    for (const e of caducados) await ctx.db.delete(e._id);
 
     const state = stateAleatorio();
     await ctx.db.insert("notionEstadosOauth", {
@@ -381,7 +376,14 @@ export const callback = httpAction(async (ctx, req) => {
     return volver(destino, { notion: "error", motivo: "respuesta" });
   }
 
-  await ctx.runMutation(internal.notion.oauth.guardarConexion, { ...conexion, userId: consumo.userId });
+  try {
+    await ctx.runMutation(internal.notion.oauth.guardarConexion, { ...conexion, userId: consumo.userId });
+  } catch (exc) {
+    // El único paso que quedaba sin `volver(...)`: si fallaba, la emergente
+    // enseñaba el error crudo de Convex y la app no se enteraba de nada.
+    console.error(`notion oauth: no se pudo guardar la conexión: ${String(exc).slice(0, 200)}`);
+    return volver(destino, { notion: "error", motivo: "guardar" });
+  }
   console.log(`notion oauth: conectado al espacio '${conexion.workspaceName}'`);
   return volver(destino, { notion: "conectado" });
 });
@@ -455,9 +457,11 @@ export const desconectar = mutation({
       .withIndex("porUsuario", (q) => q.eq("conectadoPor", u._id))
       .collect();
     for (const c of suyas) await ctx.db.delete(c._id);
-    for (const e of await ctx.db.query("notionEstadosOauth").collect()) {
-      if (e.userId === u._id) await ctx.db.delete(e._id);
-    }
+    const pendientes = await ctx.db
+      .query("notionEstadosOauth")
+      .withIndex("porUsuario", (q) => q.eq("userId", u._id))
+      .take(100);
+    for (const e of pendientes) await ctx.db.delete(e._id);
     return { ok: true as const };
   },
 });

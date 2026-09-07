@@ -32,8 +32,16 @@ export const ANCLA = 'e0';
  *  - `no_buscado`: habia plan pero ese punto nunca llego a buscarse (turno
  *    cortado a mitad).
  *  - `error_busqueda`: la busqueda fallo (`recuperacion: "error"`), asi que
- *    no se sabe si esta o no en los documentos. */
-export type EstadoFila = EstadoCobertura | 'encontrada' | 'no_buscado' | 'error_busqueda';
+ *    no se sabe si esta o no en los documentos.
+ *  - `busqueda_parcial`: no trajo nada pero solo respondio un lado de la
+ *    busqueda (sin embeddings, o sin lexico): la ausencia no es concluyente y
+ *    no se puede pintar "no esta en los documentos". */
+export type EstadoFila =
+  | EstadoCobertura
+  | 'encontrada'
+  | 'no_buscado'
+  | 'error_busqueda'
+  | 'busqueda_parcial';
 
 export interface FilaCobertura {
   id: string;
@@ -51,6 +59,18 @@ export function trajoEvidencia(h: Hop): boolean {
 /** La busqueda de este hop fallo sin traer nada. */
 function fallo(h: Hop): boolean {
   return h.recuperacion === 'error' && !trajoEvidencia(h);
+}
+
+/** Solo respondio un lado de la busqueda y no trajo nada. */
+export function parcial(h: Hop): boolean {
+  return (h.recuperacion === 'lexica' || h.recuperacion === 'densa') && !trajoEvidencia(h);
+}
+
+/** Un "sin resultados" solo se afirma si la busqueda fue completa. */
+function sinResultadosDe(h: Hop): EstadoFila {
+  if (fallo(h)) return 'error_busqueda';
+  if (parcial(h)) return 'busqueda_parcial';
+  return 'sin_resultados';
 }
 
 /**
@@ -100,9 +120,10 @@ export function hopsPorPunto(hops: Hop[]): Map<string, Hop> {
  *  fallo; sin dictamen, solo se afirma lo que el propio hop sabe. */
 export function estadoDesdeHop(h: Hop): EstadoFila {
   if (h.estado_final) {
-    return h.estado_final === 'sin_resultados' && fallo(h) ? 'error_busqueda' : h.estado_final;
+    return h.estado_final === 'sin_resultados' ? sinResultadosDe(h) : h.estado_final;
   }
   if (fallo(h)) return 'error_busqueda';
+  if (parcial(h)) return 'busqueda_parcial';
   if (h.estado === 'sin_resultados') return 'sin_resultados';
   if (h.usado_en_respuesta === false) return 'evidencia_no_usada';
   if (h.usado_en_respuesta === true) return 'cubierto';
@@ -157,7 +178,7 @@ export function filasCobertura(
       if (c.id === ANCLA) continue;
       const h = porPunto.get(c.id);
       const estado: EstadoFila =
-        c.estado === 'sin_resultados' && h !== undefined && fallo(h) ? 'error_busqueda' : c.estado;
+        c.estado === 'sin_resultados' && h !== undefined ? sinResultadosDe(h) : c.estado;
       porId.set(c.id, {
         id: c.id,
         evidence_needed: c.evidence_needed,

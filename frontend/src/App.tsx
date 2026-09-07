@@ -277,6 +277,8 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   /** Valoraciones dadas en esta pestaña, por id de mensaje. La tabla
    *  `feedback` es aparte y la query de mensajes puede no traerla. */
   const [feedbackLocal, setFeedbackLocal] = useState<Record<string, 1 | -1>>({});
+  /** Mensaje por respuesta cuando guardar la valoración falló. */
+  const [feedbackError, setFeedbackError] = useState<Record<string, string>>({});
 
   const [pendiente, setPendiente] = useState<Pendiente | null>(null);
   // Copia del pendiente para las promesas en vuelo: si el usuario cambió de
@@ -493,16 +495,28 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
       if (msg.id === null || msg.feedback !== null) return;
       const id = msg.id;
       setFeedbackLocal((prev) => ({ ...prev, [id]: rating }));
+      setFeedbackError((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       try {
         await calificar({ messageId: id, rating });
       } catch (err) {
-        // revierte si el servidor lo rechaza
+        // Revierte si el servidor lo rechaza, y lo DICE: antes el pulgar se
+        // encendía y se apagaba solo, sin una palabra.
         setFeedbackLocal((prev) => {
           const next = { ...prev };
           delete next[id];
           return next;
         });
-        avisarSiEsFatal(err);
+        if (!avisarSiEsFatal(err)) {
+          setFeedbackError((prev) => ({
+            ...prev,
+            [id]: mensajeDeError(err, 'No se pudo guardar tu valoración. Vuelve a intentarlo.'),
+          }));
+        }
       }
     },
     [calificar],
@@ -617,6 +631,7 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
             }
           }}
           onFeedback={(m, r) => void handleFeedback(m, r)}
+          feedbackErrores={feedbackError}
           onCitation={handleCitation}
           onShowSources={handleShowSources}
         />
@@ -645,6 +660,7 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
         notionAviso={notionAviso}
         onNotionAvisoVisto={() => setNotionAviso(null)}
         documentos={documentos}
+        inerte={biblioOpen}
         onVerTodos={(estado) => {
           setBiblioEstado(estado);
           setBiblioOpen(true);

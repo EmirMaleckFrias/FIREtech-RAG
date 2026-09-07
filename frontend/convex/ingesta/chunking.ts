@@ -44,6 +44,9 @@ export function chunkBase(
 ): ChunkParseado {
   const chunk: ChunkParseado = {
     text: texto.slice(0, MAX_CHUNK_CHARS),
+    // El recorte se DICE: antes era un `slice` mudo y las filas del final de
+    // una tabla o una celda larga desaparecían sin que nadie lo supiera.
+    ...(texto.length > MAX_CHUNK_CHARS ? { recortado: true } : {}),
     page,
     sourcePages,
     section: opciones.section ?? "",
@@ -102,6 +105,38 @@ export function partirParrafoLargo(para: string): string[] {
   }
   if (cur.length) piezas.push(cur.join(" "));
   return piezas;
+}
+
+/** Parte un texto en trozos de como mucho `max` caracteres, por líneas y, si
+ *  una línea sola no cabe, por palabras. Para lo que no debe recortarse: una
+ *  celda de hoja de cálculo con una nota larga, una fila de tabla enorme. */
+export function partirTexto(texto: string, max = MAX_CHUNK_CHARS): string[] {
+  if (texto.length <= max) return [texto];
+  const trozos: string[] = [];
+  let actual = "";
+  const cerrar = () => {
+    if (actual.trim()) trozos.push(actual);
+    actual = "";
+  };
+  for (const linea of texto.split("\n")) {
+    if (linea.length > max) {
+      cerrar();
+      let palabra = "";
+      for (const w of linea.split(/(\s+)/)) {
+        if (palabra.length + w.length > max) {
+          trozos.push(palabra);
+          palabra = "";
+        }
+        palabra += w;
+      }
+      if (palabra.trim()) trozos.push(palabra);
+      continue;
+    }
+    if (actual.length + linea.length + 1 > max) cerrar();
+    actual += (actual ? "\n" : "") + linea;
+  }
+  cerrar();
+  return trozos;
 }
 
 /** Párrafos por líneas en blanco; los muy largos se subdividen. */

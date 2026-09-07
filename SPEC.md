@@ -42,7 +42,7 @@ indexados.
 | Autenticación | Convex Auth (`@convex-dev/auth`) con proveedor `Password`; Google opcional. |
 | Modelos | AI Gateway de Vercel, por `fetch` sin SDK. `openai/gpt-5.4` (redactor, planificador, corrección), `openai/gpt-5.4-mini` (clasificador, calificador, verificador), `openai/text-embedding-3-large` (3072 dimensiones). |
 | Frontend | React 18 + Vite + TypeScript, PWA. Habla con Convex por WebSocket (`useQuery`, `useMutation`). |
-| Parseo | `unpdf` (pdf.js) para PDF; `jszip` + `fast-xml-parser` para `.docx` y `.xlsx`. Solo `ingesta/pipeline.ts` corre en Node (`"use node"`); el resto, en el runtime por defecto de Convex. |
+| Parseo | `unpdf` (pdf.js) para PDF; `jszip` + `fast-xml-parser` para `.docx` y `.xlsx`; un modelo de visión por el gateway para el OCR (sección 14). Solo `ingesta/pipeline.ts` y `ingesta/ocr.ts` corren en Node (`"use node"`); el resto, en el runtime por defecto de Convex. |
 | Pruebas | vitest + convex-test en entorno `edge-runtime`, sin red. `tsc` para el frontend y para `convex/`. |
 | Hospedaje | Vercel sirve `frontend/dist`; `npx convex deploy --cmd 'npm run build'` despliega funciones y construye. |
 
@@ -52,9 +52,14 @@ Esquema en `frontend/convex/schema.ts`. Decisiones clave, ya tomadas:
 
 - **Los fragmentos viven en la tabla `chunks`**, con su vector en un índice vectorial
   (`porEmbedding`, 3072 dimensiones) y su texto en un índice de búsqueda (`porTexto`, BM25 más
-  proximidad y coincidencias exactas). Los dos índices declaran los mismos siete campos de
-  filtro: `projectId`, `documentId`, `documentVersion`, `documentType`, `language`,
-  `sourceFile`, `chunkType`.
+  proximidad y coincidencias exactas). Los dos índices declaran los mismos ocho campos de
+  filtro, y el primero es la frontera: `propietario`, `projectId`, `documentId`,
+  `documentVersion`, `documentType`, `language`, `sourceFile`, `chunkType`.
+- **Cada documento y cada fragmento tienen `propietario`** (`Id<"users">`), y todos los índices
+  de `documents` empiezan por él. No hay ninguna lectura legítima que cruce corpus; la
+  búsqueda recibe el propietario como argumento aparte de los filtros y `search.hybrid.cargar`
+  lo comprueba en cada fragmento, incondicionalmente, y además descarta los fragmentos cuyo
+  documento ya no existe (huérfanos de un borrado a medias no se citan).
 - **No hay campo `environment`.** Cada despliegue de Convex tiene su base; local y producción
   no comparten nada.
 - **El rol es `admin` | `lector`** y vive en `users`, la tabla de Convex Auth, junto con
@@ -66,12 +71,26 @@ Esquema en `frontend/convex/schema.ts`. Decisiones clave, ya tomadas:
   exige volver a subirlo.
 
 Tablas: `users`, `adminsPreasignados`, `sessions`, `messages`, `feedback`, `documents`,
-`chunks`, `ingestionRuns`, más las de Convex Auth (`authAccounts`, `authSessions`,
-`authRefreshTokens`, `authVerificationCodes`, `authVerifiers`, `authRateLimits`).
+`chunks`, `ingestionRuns`, las de Notion (`notionConexion`, `notionEstadosOauth`,
+`notionPaginas`, `notionSincronizaciones`; sección 17), las cachés de determinismo (`planes`,
+`consultasEmbebidas`, `calificaciones`; sección 8) y `ocrCache` (sección 14), más las de
+Convex Auth (`authAccounts`, `authSessions`, `authRefreshTokens`, `authVerificationCodes`,
+`authVerifiers`, `authRateLimits`).
+
+Nombres de índice: llevan todos sus campos (`porUsuarioYCreacion` = `["userId", "creadoEn"]`,
+`porSesionYCreacion`, `porPropietarioYNombre`...), como pide la guía de Convex.
 
 Campos de `messages` que escribe el agente: `estado`, `plan`, `hops`, `sources`, `content`,
 `verificacion`, `metrics`, `error`. Campos de `documents` tras una ingesta correcta: `sha256`,
-`pages`, `chunks`, `status`, `titulo`, `citation`, `doi`, `language`, `documentType`.
+`pages`, `chunks`, `status`, `titulo`, `citation`, `doi`, `language`, `documentType`, y
+`avisos` si algo quedó sin leer (sección 14). Además `propietario`, `storageId`, `origen`
+(`subida` | `notion`) y `notionPageId`.
+
+Las listas que van al navegador están acotadas: `mensajes.deSesion` devuelve los últimos 200
+mensajes de la conversación, `documentos.listar` hasta 5000 documentos y `sesiones.listar`
+hasta 1000 conversaciones. Ninguna query lee el reloj (`Date.now()`): el instante lo manda el
+cliente como argumento (`estadisticas.sistema`) o la query devuelve la fecha límite y decide
+el cliente (`notion.admin.estado.enCurso.vivaHasta`).
 
 ## 4. Funciones públicas y permisos
 
@@ -84,25 +103,44 @@ quien llama (`permisos.ts`): sin sesión, `no_autenticado`; con la cuenta bloque
 | `sesiones.listar` | query | usuario | `{_id, titulo, creadoEn}[]` propias, la más nueva primero. |
 | `sesiones.crear` | mutation `{titulo}` | usuario | Conversación vacía; título recortado a 60 caracteres, "Nueva conversación" si va vacío. |
 | `sesiones.borrar` | mutation `{sessionId}` | usuario, propia | Borra la sesión ya; sus mensajes y feedback en lotes de 100 (el primero inline, el resto agendado). |
-| `mensajes.deSesion` | query `{sessionId}` | usuario, propia | Mensajes en orden, filas completas. |
+| `mensajes.deSesion` | query `{sessionId}` | usuario, propia | Los últimos 200 mensajes en orden, filas completas. |
 | `mensajes.enviar` | mutation `{sessionId?, texto, modo}` | usuario, propia | Crea la sesión si falta (título = primeros 60 caracteres), guarda la pregunta, crea el mensaje del asistente en `pensando` y agenda `agente.bucle.correr`. Devuelve `{sessionId, messageId}`. Texto vacío o de más de 4000 caracteres: `invalido`. |
 | `mensajes.calificar` | mutation `{messageId, rating: 1 \| -1, comentario?}` | usuario, propia | Un voto por usuario y mensaje; repetir reemplaza. |
-| `documentos.listar` | query | usuario | `{_id, fileName, pages, chunks, status, error, ingestadoEn, titulo, citation}[]` en orden de ingesta. |
-| `documentos.urlDeSubida` | mutation | admin | URL firmada del almacenamiento. |
-| `documentos.registrar` | mutation `{storageId, fileName, sha256}` | admin | Valida nombre, extensión, sha256, tamaño; registra en `processing` y agenda la ingesta. Nombre ya indexado: `conflicto`, salvo que el existente esté en `failed`, cuya fila se reutiliza. |
-| `documentos.reindexar` | mutation `{documentId}` | admin | Vuelve a ingerir desde el fichero guardado. `conflicto` si sigue en `processing` hace menos de 10 minutos, o si no hay fichero. |
-| `documentos.borrar` | mutation `{documentId}` | admin | Borra fila y fichero ya; fragmentos en lotes de 300 (el resto agendado). |
+| `documentos.listar` | query | usuario | Su corpus: `{_id, fileName, pages, chunks, status, error, ingestadoEn, titulo, citation, avisos, sha256, origen, notionPageId}[]` en orden de ingesta. Nunca el de otra persona. |
+| `documentos.limite` | query | usuario | El límite de subida en MB, para anunciarlo. |
+| `documentos.urlDeSubida` | mutation | usuario | URL firmada del almacenamiento. |
+| `documentos.registrar` | mutation `{storageId, fileName, sha256}` | usuario | Valida nombre, extensión, sha256, tamaño; registra en `processing` en el corpus de quien llama y agenda la ingesta. Nombre ya indexado en SU corpus: `conflicto`, salvo que el existente esté en `failed`, cuya fila se reutiliza. |
+| `documentos.reindexar` | mutation `{documentId}` | usuario, propio | Vuelve a ingerir desde el fichero guardado. `conflicto` si sigue en `processing` hace menos de 10 minutos, o si no hay fichero. Ajeno: `no_encontrado`. |
+| `documentos.borrar` | mutation `{documentId}` | usuario, propio | Borra fila y fichero ya; fragmentos en lotes de 100 (el resto agendado). Ajeno: `no_encontrado`. |
+| `notion.oauth.iniciar` | mutation `{origen}` | usuario | Crea un `state` ligado a la cuenta y devuelve la URL de autorización de Notion (integración pública, `owner=user`). |
+| `notion.oauth.listarBases` | action | usuario, conectada | Las bases de datos que la integración ve en SU Notion. |
+| `notion.oauth.elegirBases` | mutation `{bases: {databaseId, titulo}[]}` | usuario, conectada | Reemplaza la selección (hasta 20 bases). |
+| `notion.oauth.desconectar` | mutation | usuario | Borra su conexión y sus `state` pendientes; el corpus se conserva. |
+| `notion.admin.estado` | query | usuario | Su conexión (sin token), sus bases, cifras y corridas; `enCurso` lleva `vivaHasta`. |
+| `notion.admin.sincronizarAhora` | mutation | usuario, conectada | Agenda una corrida forzada. `conflicto` si ya hay una en curso. |
 | `usuarios.yo` | query | cualquiera | `{_id, email, rol, bloqueado}`, o `null` sin sesión. Bloqueado: `acceso_revocado`. |
 | `usuarios.listar` | query | admin | Cuentas con `creadoEn`, `ultimoAccesoEn`, `sesiones` y `mensajes` (preguntas, no turnos). Solo cifras, nunca texto. |
 | `usuarios.actualizar` | mutation `{userId, rol?, bloqueado?}` | admin, otro | Asciende, degrada, bloquea o desbloquea. Sobre uno mismo: `invalido`. |
-| `usuarios.borrar` | mutation `{userId}` | admin, otro | Cascada a mano: sesiones y feedback ya; mensajes por lotes agendados; documentos subidos quedan sin autor; filas de Convex Auth; la cuenta. |
-| `estadisticas.sistema` | query | admin | Ver sección 13. |
+| `usuarios.borrar` | mutation `{userId}` | admin, otro | Cascada a mano: sesiones y feedback ya; mensajes, corpus entero (documentos, fragmentos, ficheros) y rastro de Notion por lotes agendados; filas de Convex Auth; la cuenta. |
+| `estadisticas.sistema` | query `{ahora}` | admin | Ver sección 13. `ahora` lo manda el cliente redondeado. |
 | `semilla.ascenderSiPreasignado` | mutation | usuario | Si el correo propio está en `adminsPreasignados`, pasa a `admin`. Sin argumentos: solo sobre uno mismo. |
 
 Funciones internas (solo `npx convex run` o el planificador de Convex): `semilla.sembrarAdmins`,
-`pruebas.*`, `agente.bucle.correr`, `ingesta.pipeline.ingestar`, `ingesta.escritura.*`,
-`mensajes.actualizarTurno`, `mensajes.borrarRestantes`, `documentos.borrarChunksRestantes`,
-`search.hybrid.lexica`, `search.hybrid.cargar`, `search.inventario.inventario`.
+`pruebas.*`, `agente.bucle.correr`, `agente.cachePlan.*`, `agente.cacheCalificaciones.*`,
+`ingesta.pipeline.ingestar`, `ingesta.escritura.*`, `mensajes.actualizarTurno`,
+`mensajes.borrarRestantes`, `mensajes.marcarColgado`, `documentos.borrarChunksRestantes`,
+`documentos.borrarCorpusDeUsuario`, `notion.sync.sincronizar`, `notion.datos.*`,
+`notion.oauth.guardarConexion`, `crons.repartirSincronizaciones`, `search.hybrid.lexica`,
+`search.hybrid.cargar`, `search.cacheEmbeddings.*`, `search.inventario.inventario`.
+
+### Quién puede entrar
+
+Solo correos de los dominios permitidos (`DOMINIOS_PERMITIDOS`, lista separada por comas; por
+defecto `airobotix.net` y `alzheimerproject.com`), comparados como sufijo exacto tras la `@`
+y en minúsculas: `x@evil-airobotix.net` y `x@airobotix.net.evil.com` no entran. Toda cuenta
+nueva es `lector`, con su espacio completo (corpus, conversaciones, Notion); `admin` solo
+añade gestionar cuentas. El frontend repite la lista para el mensaje de la pantalla de
+entrada, pero la que decide es la del servidor.
 
 ### Errores
 
@@ -157,8 +195,10 @@ no recrea el mensaje si la conversación se borró mientras tanto):
 Una pregunta no documental (saludo, pregunta sobre el asistente) pasa de `pensando` a `listo`
 con `sources: []`, `hops: []`, `plan: []` y sin `verificacion`.
 
-El frontend considera colgado un turno que sigue en un estado no final pasados 630 s desde su
-creación (600 s de acción más margen) y lo pinta como error de tiempo sin tocar la base.
+Un turno que sigue en un estado no final pasados 630 s desde su creación (540 s de presupuesto
+más margen) se cierra desde el servidor: `mensajes.enviar` agenda `mensajes.marcarColgado`,
+que escribe `estado: "error"` con un mensaje de tiempo y no toca un turno ya `listo` ni ya en
+`error`. El frontend, mientras, lo pinta como colgado por reloj sin tocar la base.
 
 ### Historial
 
@@ -207,8 +247,9 @@ Reemplaza a la fusión que hacía Qdrant en el servidor.
 - Las consultas de un punto (original e inglés) se embeben en **una** petición.
 - **Lado denso**: `ctx.vectorSearch` sobre `porEmbedding`, límite
   `min(256, max(20, k * 2))` (`k * 4` si hay filtros residuales). La búsqueda vectorial de
-  Convex solo admite `eq` y `or`, no AND entre campos: se aplica **solo el filtro más
-  selectivo** (`documentId` > `projectId` > `documentType` > `language`) y el resto al cargar.
+  Convex solo admite `eq` y `or`, no AND entre campos: el filtro del índice es `documentId` si
+  se pidió uno, y si no `propietario` (la frontera del corpus, que así deja de ser residual);
+  `projectId`, `documentType` y `language` se aplican siempre al cargar.
 - **Lado léxico**: `withSearchIndex("porTexto")` con **todos** los filtros encadenados (AND),
   límite `min(1024, max(20, k * 2))`. La consulta se reduce a como mucho 16 términos de hasta
   32 caracteres, sin puntuación ni palabras vacías, priorizando los que llevan dígitos o
@@ -221,7 +262,17 @@ Reemplaza a la fusión que hacía Qdrant en el servidor.
 - `recuperacion` por consulta: `hibrida` (los dos lados), `densa` (falló el léxico o la
   consulta no dejó términos), `lexica` (fallaron los embeddings o la vectorial), `error`
   (fallaron los dos o la carga). **`error` no es "no está en los documentos"** y nunca se
-  lanza: el llamador lo distingue.
+  lanza: el llamador lo distingue. **Y una búsqueda parcial (`lexica` o `densa`) sin
+  resultados tampoco lo es**: al modelo se le dice que la ausencia no es concluyente y que no
+  afirme que los documentos no lo tratan, y el frontend lo pinta como "búsqueda incompleta",
+  nunca como "no está en los documentos".
+- **Cachés de determinismo.** El plan de una pregunta sin historial se guarda en `planes`
+  (clave: versión del prompt, modelo y pregunta normalizada; caduca a los 30 días), los
+  vectores de las consultas en `consultasEmbebidas` y los veredictos del calificador en
+  `calificaciones` (clave: modelo, consulta, evidencia necesaria y fragmento; solo se guardan
+  los de una calificación que sí se aplicó). Son lo que hace que la misma pregunta recupere la
+  misma evidencia. Se leen con `.first()`, nunca `.unique()`: dos filas con la misma clave son
+  inofensivas. Contadores: `embeddings_en_cache`, `calificaciones_en_cache`.
 - Un filtro con un valor que no existe devuelve cero. En las búsquedas extra del modelo, si
   con filtros no sale nada, el bucle repite sin filtros y avisa al modelo de que esos valores
   no existen.
@@ -311,7 +362,12 @@ mencionar el plan, los ids `e0..eN`, las herramientas o los "resultados de búsq
 `[<fuente>, <localizador>]`, montada por `lib/citas.ts`:
 
 - **fuente**: `citation` del documento (referencia corta, "Allegri et al., 2023") si se pudo
-  extraer; si no, el nombre del archivo. Nunca el título.
+  extraer; si no, el nombre del archivo. Nunca el título. La cita solo se emite si la autoría
+  está **corroborada**: hay coautores, la línea tiene formato bibliográfico o iniciales, o el
+  DOI de la obra aparece en la portada (la primera página). Un DOI de una referencia citada en
+  la página 2 no corrobora nada. El precio es que un artículo de un solo autor sin DOI se cita
+  por el nombre del fichero; el beneficio es que nunca se inventa un autor ("Pagina et al.,
+  2026" era un pie de página).
 - **localizador**, según lo que exista de verdad en el formato: `pág. N` (PDF con página),
   `tabla N` (tabla de Word), `fila N` (fila de hoja de cálculo o CSV), `sección: X` (si hay
   encabezado), `fragmento N` (último recurso).
@@ -548,16 +604,20 @@ upload_limit_mb}}`. `index` sale de `documents` en `ready`; `activity` recorre `
    fragmentos.
 2. `parsearDocumento` decide por extensión, sanea, detecta el idioma sobre los primeros 40
    fragmentos (`es`, `en`, `pt`, `fr`, o vacío si no está claro) y aplica los topes: sin texto
-   extraíble, error; más de 4000 fragmentos, error pidiendo dividir.
+   legible, error (distinguiendo "imagen sin texto" de "el servicio de lectura falló, vuelve a
+   intentarlo"); más de 4000 fragmentos, error pidiendo dividir.
 3. Se embebe en lotes de 96 y cada lote se escribe en mutaciones de como mucho 32 fragmentos
    (un fragmento lleva 3072 números y los argumentos de una mutación desde Node tienen un tope
    de 5 MiB).
 4. Solo después de escribir la versión nueva se retira la anterior. Un fallo de embeddings no
    deja al documento sin versión consultable.
 5. Éxito: `ready` con `pages`, `chunks`, `titulo`, `citation`, `doi`, `language`,
-   `documentType`, y la corrida en `ingestionRuns` como `completed` con `stats`. Fallo:
-   `failed` con el mensaje (500 caracteres), sin fragmentos a medias de la versión nueva, y la
-   corrida `failed`.
+   `documentType` y, si algo quedó sin leer, `avisos` (`{sinLeer, omitidas, recortados,
+   motivo}`: páginas o imágenes cuyo OCR falló, imágenes omitidas por el tope, fragmentos
+   recortados); la corrida en `ingestionRuns` como `completed` con `stats`. Un documento con
+   avisos se consulta igual, pero la ficha lo dice en ámbar, enseña el motivo y ofrece
+   reintentar. Fallo: `failed` con el mensaje (500 caracteres), sin fragmentos a medias de la
+   versión nueva, y la corrida `failed`.
 
 Parseo por formato (los comentarios de cada módulo documentan los fallos medidos que motivaron
 cada regla):
@@ -583,11 +643,34 @@ cada regla):
   valor", `chunk_type` `table`, `page` = número de fila.
 - **TXT y MD** (`ingesta/texto.ts`): párrafos por líneas en blanco empaquetados con solape;
   `page` = índice de fragmento. Codificaciones probadas: utf-8, windows-1252, iso-8859-1.
+- **Imágenes** (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`; `ingesta/imagen.ts`): se leen por
+  OCR y el Markdown resultante se trocea como un texto, con el primer encabezado como título.
 - **`.doc`** se rechaza con un mensaje que dice cómo convertirlo.
 
+**OCR** (`ingesta/ocr.ts`, `ENABLE_OCR`, `OCR_MODEL` por defecto `openai/gpt-5.4-mini`,
+razonamiento `low`): los parsers no leen imágenes, se las entregan a una función `Ocr`
+inyectada que devuelve `{texto, estado}` con `estado` en `ok` | `sin_texto` | `fallo` |
+`omitida`. Se lee solo lo que no tiene texto: las páginas de un PDF con menos de
+`OCR_MIN_TEXTO_PAGINA` (40) caracteres propios, las imágenes de un Word y las imágenes sueltas.
+Las imágenes de una página se entregan al OCR según se extraen y la página se limpia después:
+los píxeles de un escaneo (26 MB por página a 300 ppp) nunca conviven en memoria. Se admiten
+RGB, RGBA, gris de 8 bits, bitonal de un bit por píxel (fax, CCITT) y máscaras de imagen. Una
+página cuyo texto pdf.js no puede extraer entra igual por sus imágenes. Los píxeles se reducen
+por factor entero hasta 2200 px de lado y se codifican como PNG. Tope `OCR_MAX_IMAGENES` (300)
+por documento. Caché en `ocrCache` por sha256 de los bytes enviados, modelo y versión del
+prompt: **compartida entre cuentas a propósito** (la clave es el contenido de la imagen, no
+quién la subió, y el mismo escaneo no se paga dos veces) y sin caducidad. **Solo se cachean
+las lecturas completas** (`finish_reason: stop` con contenido, incluido el "SIN TEXTO"
+legítimo); un contenido nulo, un rechazo o un corte por longitud es `fallo`: no se guarda, y
+reindexar vuelve a preguntar.
+
 Troceo (`ingesta/chunking.ts`): objetivo 400 tokens, solape 60, párrafos de más de 500 tokens
-partidos por oraciones, texto por fragmento recortado a 8000 caracteres. Cada fragmento
-repite los metadatos de la obra para que una cita no necesite ir a buscar nada más.
+partidos por oraciones, texto por fragmento recortado a 8000 caracteres **y el recorte se
+cuenta** en `avisos.recortados`. Lo que puede evitarse se evita: una celda de hoja de cálculo
+larga sale en varios fragmentos de la misma fila, y la cabecera de una tabla de Word que pase
+de la mitad del objetivo se reduce a su cola para que el bloque no degenere en "cabecera más
+una fila". Cada fragmento repite los metadatos de la obra para que una cita no necesite ir a
+buscar nada más.
 
 Inventario (`search/inventario.ts`): archivos, tipos e idiomas con su número de fragmentos,
 desde `documents` en `ready`. Conteo exacto, cero LLM.
@@ -604,8 +687,15 @@ desde `documents` en `ready`. Conteo exacto, cero LLM.
 - Tabla de cobertura al terminar, en lenguaje claro y sin ids internos.
 - Informe de atribución plegable, cerrado por defecto salvo que haya algo grave.
 - Lista de conversaciones, crear, continuar, borrar. Feedback por mensaje.
-- Documentos: listado para todos; subida con progreso real (XMLHttpRequest), reindexar y
-  borrar solo para administradores; el límite anunciado sale de `estadisticas.sistema`.
+- Documentos: el corpus propio, en un panel y en una vista de todos con búsqueda, filtros y
+  orden; subida de archivos y de carpetas enteras (arrastre o botón, con el mismo tope de 500
+  por tanda en ambos caminos, dedupe por sha256 excluyendo los `failed`, y cada omisión o
+  fichero ilegible dicho en el resumen); progreso real (XMLHttpRequest); reindexar y borrar lo
+  propio; el límite anunciado sale de `documentos.limite`. Un documento listo con avisos lleva
+  su insignia ámbar. La vista de todos es un diálogo modal con trampa de Tab y deja inerte el
+  panel de debajo.
+- El foco vuelve al cuadro de texto al terminar cada respuesta si estaba suelto. Un fallo al
+  guardar una valoración se dice al lado de los pulgares.
 - Ajustes (slide-over, bottom sheet en móvil): Usuarios y Sistema (admin), Mi cuenta (todos;
   sin cambio de contraseña en esta versión).
 - Errores por código (`ConvexError`), nunca por comparación de cadenas. `acceso_revocado` y
@@ -626,3 +716,31 @@ Estado: el evaluador (`backend/evaluar.py`, `backend/app/evaluation.py`, plantil
 cita y de abstención que usa son los mismos que `lib/citas.ts`, a propósito, para que el port
 mida lo mismo que mide producción. Mientras tanto, la forma de estresar el sistema es el arnés
 interno `pruebas.ts` (OPERACION.md).
+
+## 17. Notion
+
+- **Integración pública de Notion (OAuth, `owner=user`)**: cada persona conecta SU Notion desde
+  un botón; la pantalla de consentimiento va en una ventana emergente que vuelve a
+  `/notion/callback` (HTTP en Convex) y avisa a la aplicación por `BroadcastChannel`. El
+  `state` se crea ligado a la cuenta, se consume en la misma transacción antes de hablar con
+  Notion, y los caducados se limpian por índice al crear uno nuevo. Ningún paso del callback
+  termina en un error crudo: todos vuelven con `?notion=error&motivo=...`. El token nunca sale
+  al navegador.
+- **Varias bases por persona** (hasta 20). `elegirBases` reemplaza la selección entera.
+- **Sincronización** (`notion.sync.sincronizar`, por cuenta): un cron horario
+  (`crons.repartirSincronizaciones`) agenda una corrida por conexión con bases; "Sincronizar
+  ahora" la fuerza. Cada base se lista entera antes de tocar nada; una página cuyo
+  `last_edited_time` no cambió y cuyos documentos siguen vivos está intacta y no se descarga.
+  El texto de la página se renderiza a Markdown (`notion-<titulo>.md`, solo si supera 200
+  caracteres útiles) y sus adjuntos con formato admitido se bajan (tope 20 MB por adjunto,
+  con timeout; el formato no admitido o el exceso de tamaño se dicen en los avisos de la
+  corrida, sin marcar la página con error). Las páginas de una base que ya no están en ella
+  (archivadas, excluidas por una propiedad `Excluir`, borradas) se retiran **solo si la base
+  se recorrió entera**; una corrida cortada por el reloj (20 minutos) no retira nada, cierra
+  como `parcial` y se reagenda al minuto si avanzó. Una corrida con errores de página cierra
+  como `error`, parcial o no. Una corrida `running` sin cerrar se da por muerta a los 31
+  minutos.
+- **Base deseleccionada**: sus páginas y documentos se CONSERVAN (no se retiran ni se vuelven
+  a mirar); la usuaria los borra a mano si quiere. Retirar corpus por dejar de sincronizar una
+  base sería destruir lo que ella eligió tener.
+- Al borrar la cuenta, su conexión, sus páginas y sus corridas se van por lotes.

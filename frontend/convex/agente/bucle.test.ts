@@ -525,6 +525,13 @@ describe("camino documental, modo normal", () => {
 
     await handlerDirecto(ctx, argsDe(ids, { historial }));
 
+    // ADVERSARIAL: el plan se ejecuta con el userId de QUIEN PREGUNTA. Los
+    // mocks ignoran el argumento, así que sin esto pasar cualquier otro id
+    // (el de un administrador, el propietario de un documento) compilaba y no
+    // rompía ningún test.
+    expect(ejecutarPlan).toHaveBeenCalled();
+    expect(ejecutarPlan.mock.calls[0][1]).toBe(ids.userId);
+
     // La secuencia de estados del contrato, y el borrador NUNCA antes de listo.
     const estados = escrituras.map((c) => c.estado).filter(Boolean);
     expect(estados).toEqual(["buscando", "redactando", "revisando", "listo"]);

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { filasCobertura } from '../lib/cobertura';
+import { filasCobertura, parcial } from '../lib/cobertura';
 import { Markdown, type CitationRef } from '../lib/markdown';
 import { etiquetaFase, hopEnCurso, hopFallido, puntosDelPlan } from '../lib/mensajes';
 import type { ChatMessage, Hop } from '../types';
@@ -19,6 +19,8 @@ interface MessageItemProps {
   msg: ChatMessage;
   isPanelTarget: boolean;
   onFeedback: (msg: ChatMessage, rating: 1 | -1) => void;
+  /** Guardar la valoración falló: se dice al lado de los pulgares. */
+  feedbackError?: string;
   onCitation: (msgLocalId: string, ref: CitationRef) => void;
   onShowSources: (msgLocalId: string) => void;
 }
@@ -32,6 +34,7 @@ interface MessageItemProps {
 function detalleHop(h: Hop, enCurso: boolean): string | null {
   if (hopEnCurso(h, enCurso)) return 'buscando';
   if (hopFallido(h, enCurso)) return 'no se pudo comprobar';
+  if (parcial(h)) return 'busqueda incompleta, sin resultados';
   if (h.estado === 'sin_resultados') return 'sin resultados';
   if (typeof h.resultados !== 'number') return null;
   if (h.resultados === 0) return h.estado === 'cubierto' ? null : 'sin resultados';
@@ -44,6 +47,7 @@ export function MessageItem({
   onFeedback,
   onCitation,
   onShowSources,
+  feedbackError,
 }: MessageItemProps) {
   // Expansión manual del razonamiento una vez colapsado (turno cerrado).
   const [hopsOpen, setHopsOpen] = useState(false);
@@ -216,6 +220,11 @@ export function MessageItem({
                   <IconThumbDown size={15} filled={msg.feedback === -1} />
                 </button>
                 {msg.feedback !== null && <span className="feedback-thanks">Gracias</span>}
+                {feedbackError !== undefined && msg.feedback === null && (
+                  <span className="feedback-error" role="status">
+                    {feedbackError}
+                  </span>
+                )}
               </div>
             )}
           </div>

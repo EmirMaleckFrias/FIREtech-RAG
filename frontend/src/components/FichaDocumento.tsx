@@ -48,6 +48,16 @@ interface FichaDocumentoProps {
   errorDeFila?: string;
 }
 
+/** El aviso de un documento listo con partes sin leer, en llano y en una
+ *  frase: "3 páginas sin leer", "texto recortado en 2 fragmentos". */
+export function textoDeAvisos(a: NonNullable<DocumentInfo['avisos']>): string {
+  const partes: string[] = [];
+  if (a.sinLeer > 0) partes.push(`${cifra(a.sinLeer)} ${a.sinLeer === 1 ? 'página o imagen sin leer' : 'páginas o imágenes sin leer'}`);
+  if (a.omitidas > 0) partes.push(`${cifra(a.omitidas)} ${a.omitidas === 1 ? 'imagen no leída por el tope' : 'imágenes no leídas por el tope'}`);
+  if (a.recortados > 0) partes.push(`texto recortado en ${cifra(a.recortados)} ${a.recortados === 1 ? 'fragmento' : 'fragmentos'}`);
+  return partes.join(' · ');
+}
+
 /** Fecha completa para el `title`: la ficha enseña "hoy", el navegador el
  *  detalle si alguien se para encima. */
 function fechaLarga(ms: number): string | undefined {
@@ -120,6 +130,22 @@ export function FichaDocumento({
                     {cifra(doc.pages)} {doc.pages === 1 ? 'pág.' : 'págs.'}
                   </span>
                 )}
+                {/* Listo, pero no del todo: lo que la ingesta no pudo leer se
+                    dice aquí, con el motivo al desplegar, y el botón de
+                    reintentar al lado. Antes un escaneo con 39 de 40 páginas
+                    sin leer se veía igual que uno perfecto. */}
+                {doc.avisos !== null && (
+                  <button
+                    type="button"
+                    className="ficha-insignia ficha-insignia-aviso"
+                    onClick={onAlternarError}
+                    aria-expanded={errorAbierto}
+                    title={doc.avisos.motivo ?? 'Parte del documento no se pudo leer'}
+                  >
+                    <IconAlert size={11} />
+                    {textoDeAvisos(doc.avisos)}
+                  </button>
+                )}
               </>
             ) : doc.status === 'processing' ? (
               <span className="ficha-insignia ficha-insignia-proceso" role="status">
@@ -172,13 +198,13 @@ export function FichaDocumento({
             <>
               {/* Reintentar va antes de la papelera a propósito: ante un error
                   es la acción esperada, y borrar la de último recurso. */}
-              {doc.status === 'failed' && (
+              {(doc.status === 'failed' || (listo && doc.avisos !== null)) && (
                 <button
                   type="button"
                   className="doc-action-btn ficha-accion"
                   disabled={reindexando}
                   onClick={onReindexar}
-                  title="Volver a intentar la indexación"
+                  title={doc.status === 'failed' ? 'Volver a intentar la indexación' : 'Volver a leer lo que quedó sin leer'}
                   aria-label={`Volver a intentar la indexación de ${doc.fileName}`}
                 >
                   {reindexando ? <IconSpinner size={14} /> : <IconRefresh size={14} />}
@@ -206,6 +232,12 @@ export function FichaDocumento({
 
       {errorAbierto && doc.error !== null && (
         <p className="ficha-error-detalle">{doc.error}</p>
+      )}
+      {errorAbierto && listo && doc.avisos !== null && (
+        <p className="ficha-error-detalle ficha-aviso-detalle">
+          {doc.avisos.motivo ?? 'Parte del documento no se pudo leer.'} Lo que sí se leyó se puede
+          consultar; con el botón de reintentar se vuelve a leer lo que faltó.
+        </p>
       )}
       {errorDeFila !== undefined && (
         <p className="ficha-error-detalle" role="alert">

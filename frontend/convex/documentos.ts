@@ -56,15 +56,20 @@ export const EXTENSIONES_PERMITIDAS = [
 // la regla sigue haciendo falta; nada legítimo sigue vivo pasados 10 minutos.
 export const MINUTOS_PROCESSING_RANCIO = 10;
 
-// Fragmentos que borra una mutación de una vez. Un fragmento lleva su
-// embedding de 3072 float64, que son 24 KB por sí solos, más el texto (hasta
-// unos pocos KB en una tabla): unos 30 KB en el peor caso. Una transacción de
-// Convex puede leer 16 MiB, y borrar por índice exige leer cada documento que
-// se borra, así que un documento de 1000 páginas con miles de fragmentos no
-// cabe en una sola mutación: fallaría entera y el documento no se podría
-// borrar nunca. 300 fragmentos son unos 9 MB en el peor caso y dejan margen;
-// el resto se borra en lotes sucesivos agendados.
-export const LOTE_CHUNKS = 300;
+// Fragmentos que borra una mutación de una vez. Borrar por índice exige LEER
+// cada fragmento entero, con su embedding de 3072 float64, y una transacción
+// de Convex puede leer 16 MiB. Medido con `convex-test` y los límites de
+// transacción activados (documentos.test.ts): Convex contabiliza un fragmento
+// a ~56 KB (no a los ~30 KB que estimaba este comentario), así que 300
+// fragmentos pasaban del tope y `borrar` fallaba SIEMPRE para un documento de
+// 300 o más fragmentos (unas 60 páginas); peor, `borrarCorpusDeUsuario`
+// fallaba sin reagendarse y eliminar una cuenta dejaba su corpus entero sin
+// dueño. 100 son ~5,6 MB: el mismo lote que usa la ingesta (LOTE_BORRADO).
+export const LOTE_CHUNKS = 100;
+
+/** Tope de documentos que devuelve `listar`. Las filas son pequeñas (sin
+ *  fragmentos ni vectores), así que 5000 son unos pocos MB. */
+export const MAX_DOCUMENTOS_LISTADOS = 5000;
 
 // ---------------------------------------------------------------------------
 // Ayudantes puros (exportados para probarlos sin base)
@@ -108,10 +113,14 @@ export const listar = query({
   args: {},
   handler: async (ctx) => {
     const u = await usuario(ctx);
+    // Acotado, como pide la guía de Convex: es la lista entera del corpus de
+    // una persona (la vista de todos busca y filtra sobre ella), y un corpus
+    // de más de MAX_DOCUMENTOS_LISTADOS filas es señal de paginar, no de
+    // reventar la consulta.
     const docs = await ctx.db
       .query("documents")
       .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
-      .collect();
+      .take(MAX_DOCUMENTOS_LISTADOS);
     docs.sort((a, b) => a.ingestadoEn - b.ingestadoEn);
     return docs.map((d) => ({
       _id: d._id,
@@ -123,6 +132,8 @@ export const listar = query({
       ingestadoEn: d.ingestadoEn,
       titulo: d.titulo ?? null,
       citation: d.citation ?? null,
+      // Lo que quedó sin leer: la ficha lo enseña junto al recuento.
+      avisos: d.avisos ?? null,
       // Para que la subida de carpetas no repita un fichero que ya está con
       // otro nombre: el navegador calcula el hash antes de subir y lo compara
       // con esto. Es el hash del fichero, no un secreto.

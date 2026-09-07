@@ -86,3 +86,25 @@ describe('hops extra que rellenan un punto', () => {
     expect(coberturaDesdeHops([suelto, plan('e0', { resultados: 5, estado: 'cubierto' })])).toEqual([]);
   });
 });
+
+describe('busqueda parcial no es ausencia', () => {
+  it('ADVERSARIAL: un hop solo lexico sin fragmentos NO se pinta "no esta en los documentos"', () => {
+    expect(estadoDesdeHop(plan('e1', { recuperacion: 'lexica' }))).toBe('busqueda_parcial');
+    expect(estadoDesdeHop(plan('e1', { recuperacion: 'densa' }))).toBe('busqueda_parcial');
+    // Con dictamen sin_resultados del verificador, igual: el verificador no
+    // sabe que faltaba medio motor.
+    expect(estadoDesdeHop(plan('e1', { recuperacion: 'lexica', estado_final: 'sin_resultados' }))).toBe(
+      'busqueda_parcial',
+    );
+  });
+
+  it('un hop parcial que SI trajo fragmentos es evidencia normal', () => {
+    expect(estadoDesdeHop(plan('e1', { recuperacion: 'lexica', resultados: 3, estado: 'cubierto' }))).toBe(
+      'encontrada',
+    );
+  });
+
+  it('la busqueda completa y vacia sigue siendo sin_resultados', () => {
+    expect(estadoDesdeHop(plan('e1', { recuperacion: 'hibrida' }))).toBe('sin_resultados');
+  });
+});

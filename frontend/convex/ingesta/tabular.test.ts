@@ -205,3 +205,22 @@ describe("texto plano y saneo general", () => {
     await expect(parsearDocumento("enorme.csv", utf8(filas))).rejects.toThrow("el máximo permitido es 4000");
   });
 });
+
+describe("celdas larguísimas", () => {
+  test("ADVERSARIAL: una nota de 20 000 caracteres en una celda sale entera, en varios fragmentos de la misma fila", async () => {
+    const { parsearCsvDocumento } = await import("./tabular");
+    const { MAX_CHUNK_CHARS } = await import("./chunking");
+    const nota = Array.from({ length: 3000 }, (_, i) => `frase${i}`).join(" ");
+    const csv = `id;nota\n1;${nota}\n2;corta`;
+    const r = parsearCsvDocumento(new TextEncoder().encode(csv), "notas.csv");
+    const fila1 = r.chunks.filter((c) => c.page === 2);
+    expect(fila1.length).toBeGreaterThan(1);
+    for (const c of fila1) {
+      expect(c.text.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+      expect(c.recortado).toBeUndefined();
+      expect(c.metadata).toMatchObject({ source_row: 2, table_parts: fila1.length });
+    }
+    // La última frase no se perdió.
+    expect(fila1.map((c) => c.text).join(" ")).toContain("frase2999");
+  });
+});

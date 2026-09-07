@@ -35,6 +35,9 @@ export interface ChunkParseado {
   /** Claves en snake_case como en el payload de Qdrant (`source_row`,
    *  `table_part`, `table_parts`). */
   metadata?: Record<string, unknown>;
+  /** El texto pasaba de MAX_CHUNK_CHARS y se recortó. No se escribe en la
+   *  base: se cuenta en los avisos del documento. */
+  recortado?: boolean;
 }
 
 /** Resultado de parsear un documento: los fragmentos y el "número de páginas"
@@ -43,6 +46,8 @@ export interface ChunkParseado {
 export interface Parseo {
   chunks: ChunkParseado[];
   pages: number;
+  /** Lo que quedó sin leer o recortado. Ausente = nada que avisar. */
+  avisos?: AvisosIngesta;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,8 +80,56 @@ export interface ContextoOcr {
   indice?: number;
 }
 
-/** Texto reconocido en Markdown, o "" si no había nada legible. Nunca lanza
- *  por una imagen concreta: un fallo en una página no puede tirar la ingesta
- *  de las otras 59. */
-export type Ocr = (imagen: ImagenParaOcr, contexto: ContextoOcr) => Promise<string>;
+/** Qué pasó al leer una imagen. Es la distinción que hace que un fallo del
+ *  modelo no se confunda con "no había nada escrito":
+ *
+ *  - `ok`: hay texto, y la lectura terminó (el modelo no se cortó a medias).
+ *  - `sin_texto`: el modelo miró la imagen y respondió que no hay texto. Es un
+ *    resultado legítimo, y se cachea.
+ *  - `fallo`: el gateway falló, el modelo se cortó por longitud o devolvió un
+ *    contenido vacío o rechazado. `texto` lleva lo que haya (puede ser una
+ *    transcripción parcial), NUNCA se cachea, y reindexar vuelve a intentarlo.
+ *  - `omitida`: no se intentó (tope de imágenes por documento, imagen
+ *    demasiado pesada o demasiado pequeña, OCR desactivado). */
+export type EstadoOcr = "ok" | "sin_texto" | "fallo" | "omitida";
 
+export interface ResultadoOcr {
+  /** Markdown reconocido, o "". */
+  texto: string;
+  estado: EstadoOcr;
+  /** Por qué falló o se omitió, en llano, para el aviso del documento. */
+  motivo?: string;
+}
+
+/** Un resultado a partir de un texto: `ok` si trae algo, `sin_texto` si no.
+ *  Es lo que devuelven los OCR falsos de las pruebas. */
+export function resultadoOcr(texto: string): ResultadoOcr {
+  return { texto, estado: texto.trim() ? "ok" : "sin_texto" };
+}
+
+/** Lee una imagen. Nunca lanza por una imagen concreta: un fallo en una
+ *  página no puede tirar la ingesta de las otras 59; lo dice en `estado`. */
+export type Ocr = (imagen: ImagenParaOcr, contexto: ContextoOcr) => Promise<ResultadoOcr>;
+
+/** Lo que la ingesta no pudo hacer del todo y la usuaria tiene que saber. Un
+ *  documento con avisos sigue siendo "listo" (lo que se leyó se puede
+ *  consultar), pero la ficha lo dice y ofrece volver a intentarlo. Antes esto
+ *  moría en `console.warn` y en `ingestionRuns`, que nadie lee. */
+export interface AvisosIngesta {
+  /** Páginas (PDF) o imágenes (Word, imagen suelta) cuyo texto no se pudo
+   *  leer por un fallo del modelo o del gateway: reindexar lo reintenta. */
+  sinLeer: number;
+  /** Imágenes que no se intentaron por pasar del tope por documento. */
+  omitidas: number;
+  /** Fragmentos cuyo texto se recortó al tope de caracteres: parte de una
+   *  tabla o de una celda muy larga no está en el índice. */
+  recortados: number;
+  /** Primer motivo de fallo, para enseñarlo. */
+  motivo?: string;
+}
+
+export const SIN_AVISOS: AvisosIngesta = { sinLeer: 0, omitidas: 0, recortados: 0 };
+
+export function hayAvisos(a: AvisosIngesta): boolean {
+  return a.sinLeer > 0 || a.omitidas > 0 || a.recortados > 0;
+}

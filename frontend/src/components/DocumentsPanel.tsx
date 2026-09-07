@@ -109,6 +109,9 @@ interface DocumentsPanelProps {
    *  que no haya dos suscripciones ni dos copias de "borrar". Ver
    *  lib/useDocumentos.ts. */
   documentos: Documentos;
+  /** Hay otra capa encima (la vista de todos): el panel sigue abierto debajo
+   *  pero no recibe foco ni lo ven los lectores de pantalla. */
+  inerte?: boolean;
 }
 
 /** Lo que el frontend lee de un registro de `documents`. Tipo estructural,
@@ -212,7 +215,9 @@ function NotionBloque({ open, mostrarPasos, estado, aviso, onAvisoVisto }: Notio
   /** Las bases que se están sincronizando. Varias a propósito: sus guías
    *  pueden estar en una y sus protocolos en otra. */
   const basesElegidas = estado?.bases ?? [];
-  const enCurso = estado?.enCurso ?? null;
+  // Viva solo hasta `vivaHasta`: una corrida que murió sin cerrarse no puede
+  // dejar el panel en "sincronizando" para siempre.
+  const enCurso = estado?.enCurso && estado.enCurso.vivaHasta > Date.now() ? estado.enCurso : null;
   const ultima = estado?.ultimas[0] ?? null;
   const mostrarSelector = conexion !== null && (basesElegidas.length === 0 || eligiendo);
 
@@ -265,14 +270,23 @@ function NotionBloque({ open, mostrarPasos, estado, aviso, onAvisoVisto }: Notio
   // bases que YA se sincronizan salían desmarcadas, así que pulsar Guardar las
   // habría quitado todas. Las bases elegidas se conocen sin preguntarle nada a
   // Notion (están en la conexión), así que se marcan igual.
+  //
+  // Y depende de la LISTA de ids, no de la identidad del array: `estado` se
+  // re-emite cada pocas páginas durante una sincronización y traía un array
+  // nuevo con las mismas bases; el efecto volvía a correr y, si ella acababa
+  // de desmarcarlo todo para cambiar de base, se lo volvía a marcar solo.
+  const claveElegidas = basesElegidas.map((b) => b.id).join(',');
+  const elegidasRef = useRef(basesElegidas);
+  elegidasRef.current = basesElegidas;
   useEffect(() => {
     if (bases === null && basesError === null) return;
+    const elegidas = elegidasRef.current;
     setSeleccion((actual) => {
       if (actual.length > 0) return actual;
-      if (basesElegidas.length > 0) return basesElegidas.map((b) => b.id);
+      if (elegidas.length > 0) return elegidas.map((b) => b.id);
       return bases !== null && bases.length === 1 ? [bases[0].id] : [];
     });
-  }, [bases, basesError, basesElegidas]);
+  }, [bases, basesError, claveElegidas]);
 
   /** Deja de esperar: cierra la emergente si sigue abierta y retira la marca. */
   const cancelarEspera = useCallback(() => {
@@ -803,9 +817,10 @@ export function DocumentsPanel({
   onNotionAvisoVisto,
   onVerTodos,
   documentos,
+  inerte = false,
 }: DocumentsPanelProps) {
-  // Suscripción permanente: barata, y así el panel abre con la lista ya
-  // puesta y ve pasar a "listo" un documento subido con el panel cerrado.
+  // La lista llega por `documentos` (App la suscribe mientras el panel o la
+  // vista de todos están abiertos, y la pone en `skip` si no).
 
   // El límite de subida lo anuncia el despliegue. Solo lo necesita quien
   // sube, y solo con el panel abierto: es un agregado sobre varias tablas y
@@ -855,6 +870,13 @@ export function DocumentsPanel({
   // Bottom sheet en móvil: swipe-down sobre el asa cierra el panel.
   useSheetDrag(panelRef, grabberRef, onClose);
 
+  // `inert` no existe como prop en React 18: se pone como atributo. Con la
+  // vista de todos encima, sin esto Tab salía de ella y aterrizaba en los
+  // botones de este panel, invisibles bajo la capa opaca.
+  useEffect(() => {
+    panelRef.current?.toggleAttribute('inert', inerte);
+  }, [inerte]);
+
   // Limpieza al desmontar: la subida en vuelo. El destello de "listo" y sus
   // temporizadores los lleva ahora useDocumentos, que es quien ve las
   // entregas de la suscripción.
@@ -887,9 +909,17 @@ export function DocumentsPanel({
   // registrado se queda (está arriba y en proceso, no tiene sentido fingir
   // que no).
   const startUpload = useCallback(
-    async (archivos: ArchivoConRuta[], truncada = false) => {
+    async (archivos: ArchivoConRuta[], truncada = false, omitidosPrevios: ArchivoOmitido[] = []) => {
       if (uploadAbortRef.current !== null) return; // ya hay una tanda en curso
-      if (archivos.length === 0) return;
+      if (archivos.length === 0 && omitidosPrevios.length === 0) return;
+      // Sin la lista de documentos todavía (los primeros cientos de ms tras
+      // abrir el panel) no hay contra qué deduplicar ni evitar choques de
+      // nombre: se pide volver a soltarlos, en vez de subir un duplicado o
+      // recibir un "ya está indexado" del servidor.
+      if (docs === null) {
+        setUploadError('Un momento: todavía estoy cargando tu lista de documentos. Vuelve a soltarlos.');
+        return;
+      }
       setUploadError(null);
       setOmitidosAbiertos(false);
 
@@ -920,10 +950,14 @@ export function DocumentsPanel({
         if (cancelado()) throw new DOMException('Subida cancelada', 'AbortError');
 
         // 2) El plan, contra lo que ya hay en el corpus.
+        // Un documento en `failed` no cuenta como "ya está": el servidor
+        // reutiliza su fila al volver a subirlo, y decirle "ya estaba en tus
+        // documentos" de algo que no se pudo indexar era falso.
         const plan = planificar(
           conHash,
-          (docs ?? []).map((d) => ({ fileName: d.fileName, sha256: d.sha256 })),
+          docs.filter((d) => d.status !== 'failed').map((d) => ({ fileName: d.fileName, sha256: d.sha256 })),
           limitMb,
+          omitidosPrevios,
         );
         setCola((c) =>
           c === null
@@ -1056,7 +1090,21 @@ export function DocumentsPanel({
     // tiene. Se lee AQUÍ, dentro del evento: el `dataTransfer` deja de ser
     // legible en cuanto el manejador termina.
     const dt = e.dataTransfer;
-    void desdeDrop(dt).then(({ archivos, truncado }) => startUpload(archivos, truncado));
+    desdeDrop(dt)
+      .then(({ archivos, truncado, ilegibles }) => {
+        // Soltar un enlace, texto o una imagen de otra pestaña no trae
+        // ficheros: se dice, en vez de que "no pase nada".
+        if (archivos.length === 0 && ilegibles.length === 0) {
+          setUploadError('Ahí no había archivos. Prueba con los botones de abajo o arrastra ficheros del disco.');
+          return;
+        }
+        return startUpload(archivos, truncado, ilegibles);
+      })
+      .catch((err: unknown) => {
+        setUploadError(
+          mensajeDeError(err, 'No pude leer lo que soltaste. Prueba a elegir los archivos con el botón.'),
+        );
+      });
   };
 
   const handleFilePicked = (e: ChangeEvent<HTMLInputElement>) => {
@@ -1066,9 +1114,11 @@ export function DocumentsPanel({
   };
 
   const handleFolderPicked = (e: ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files ? desdeInputDeCarpeta(e.target.files) : [];
+    const { archivos, truncado } = e.target.files
+      ? desdeInputDeCarpeta(e.target.files)
+      : { archivos: [], truncado: false };
     e.target.value = '';
-    if (files.length > 0) void startUpload(files);
+    if (archivos.length > 0) void startUpload(archivos, truncado);
   };
 
   // --- focus trap ligero + Escape ---

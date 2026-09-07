@@ -11,7 +11,7 @@
 // aquí es poco: hojas en orden, cadenas compartidas, celdas y fechas.
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import { MAX_CHUNKS, chunkBase } from "./chunking";
+import { MAX_CHUNKS, chunkBase, partirTexto } from "./chunking";
 import { decodificarBytes } from "./texto";
 import type { ChunkParseado, Parseo } from "./tipos";
 
@@ -61,7 +61,15 @@ export function filasAChunks(filas: Fila[], nombre: string, etiquetaHoja?: strin
     if (etiquetaHoja) lineas.unshift(`Hoja: ${etiquetaHoja}, fila ${numeroFila}`);
     const texto = lineas.join("\n").trim();
     if (!texto) continue;
-    chunks.push(chunkBase(nombre, texto, numeroFila, [numeroFila], "table", { sourceRow: numeroFila }));
+    // Una celda con una nota clínica de 20 000 caracteres (Excel admite
+    // 32 767) no se recorta: la fila sale en varios fragmentos que citan la
+    // misma fila.
+    const partes = partirTexto(texto);
+    partes.forEach((parte, j) => {
+      const chunk = chunkBase(nombre, parte, numeroFila, [numeroFila], "table", { sourceRow: numeroFila });
+      if (partes.length > 1) chunk.metadata = { ...chunk.metadata, table_part: j + 1, table_parts: partes.length };
+      chunks.push(chunk);
+    });
   }
   return chunks;
 }

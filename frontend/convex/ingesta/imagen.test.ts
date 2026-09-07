@@ -3,7 +3,7 @@
 import { describe, expect, test } from "vitest";
 import { chunksDeMarkdown, mimeDeImagen, parsearImagen, primerEncabezado } from "./imagen";
 import { parsearDocumento } from "./parsear";
-import type { Ocr } from "./tipos";
+import { resultadoOcr, type Ocr } from "./tipos";
 
 const MD =
   "# Protocolo de p-tau217 en plasma\n\n" +
@@ -15,7 +15,7 @@ const MD =
   "se informan en picogramos por mililitro y se interpretan junto con la clínica del paciente, " +
   "porque un valor aislado no basta para establecer el diagnóstico de la enfermedad.";
 
-const ocrFalso = (texto: string): Ocr => async () => texto;
+const ocrFalso = (texto: string): Ocr => async () => resultadoOcr(texto);
 
 describe("primerEncabezado", () => {
   test("toma el primer # y le quita el formato", () => {
@@ -45,7 +45,7 @@ describe("parsearImagen", () => {
     let pedido: { mime: string; nombre: string } | null = null;
     const ocr: Ocr = async (img, ctx) => {
       if (img.tipo === "bytes") pedido = { mime: img.mime, nombre: ctx.nombre };
-      return MD;
+      return resultadoOcr(MD);
     };
     const r = await parsearImagen(new Uint8Array([1, 2, 3]), "foto.JPG", ".jpg", ocr);
     expect(pedido).toEqual({ mime: "image/jpeg", nombre: "foto.JPG" });

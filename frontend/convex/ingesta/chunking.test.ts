@@ -131,3 +131,27 @@ describe("agrupar por sección y prefijo de contexto", () => {
     expect(tipoDeDocumento("sin_extension")).toBe("unknown");
   });
 });
+
+describe("recortes: se cuentan y se evitan", () => {
+  test("chunkBase marca `recortado` cuando el texto pasa de MAX_CHUNK_CHARS, y no si cabe", async () => {
+    const { chunkBase, MAX_CHUNK_CHARS } = await import("./chunking");
+    const largo = chunkBase("a.txt", "x".repeat(MAX_CHUNK_CHARS + 1), 1, [1], "text");
+    expect(largo.recortado).toBe(true);
+    expect(largo.text.length).toBe(MAX_CHUNK_CHARS);
+    const justo = chunkBase("a.txt", "x".repeat(MAX_CHUNK_CHARS), 1, [1], "text");
+    expect(justo.recortado).toBeUndefined();
+  });
+
+  test("partirTexto no pierde ni un carácter de una celda de 20 000 letras", async () => {
+    const { partirTexto, MAX_CHUNK_CHARS } = await import("./chunking");
+    const palabras = Array.from({ length: 4000 }, (_, i) => `palabra${i}`).join(" ");
+    const texto = `Campo: ${palabras}\nOtro: valor`;
+    expect(texto.length).toBeGreaterThan(20_000);
+    const partes = partirTexto(texto);
+    expect(partes.length).toBeGreaterThan(2);
+    for (const p of partes) expect(p.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+    // Ni una palabra se pierde ni cambia de orden; solo se parte por espacios
+    // o saltos de línea.
+    expect(partes.join(" ").split(/\s+/).filter(Boolean)).toEqual(texto.split(/\s+/).filter(Boolean));
+  });
+});

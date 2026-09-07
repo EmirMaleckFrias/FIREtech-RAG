@@ -16,12 +16,16 @@ import { internalMutation, internalQuery } from "../_generated/server";
 const CADUCIDAD_MS = 30 * 24 * 3600 * 1000;
 
 export function normalizarPregunta(texto: string): string {
+  // El recorte de espacios va ANTES de quitar los signos finales: con "…?  "
+  // el `$` no llegaba al signo y dos preguntas iguales daban claves distintas.
   return texto
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .toLowerCase()
-    .replace(/[¿?¡!.,;:]+$/g, "")
     .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[¿?¡!.,;:]+$/g, "")
+    .replace(/^[¿¡]+/g, "")
     .trim();
 }
 
@@ -30,14 +34,15 @@ export function claveDe(pregunta: string, modelo: string, version: string): stri
 }
 
 export const leer = internalQuery({
-  args: { clave: v.string() },
+  // `ahora` viene de la acción: una query no lee el reloj (ver la guía).
+  args: { clave: v.string(), ahora: v.number() },
   handler: async (ctx, args) => {
     const fila = await ctx.db
       .query("planes")
       .withIndex("porClave", (q) => q.eq("clave", args.clave))
       .first();
     if (!fila) return null;
-    if (Date.now() - fila.creadoEn > CADUCIDAD_MS) return null;
+    if (args.ahora - fila.creadoEn > CADUCIDAD_MS) return null;
     return { items: fila.items as unknown[], preguntaEn: fila.preguntaEn, clase: fila.clase ?? null };
   },
 });

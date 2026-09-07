@@ -77,16 +77,26 @@ export function historialDe(
 // ---------------------------------------------------------------------------
 // Lectura y envío
 // ---------------------------------------------------------------------------
-/** Mensajes de una conversación propia, del más antiguo al más nuevo. */
+/** Cuántos mensajes de una conversación se cargan: los últimos. Una fila de
+ *  `messages` en modo extendido pesa 40-60 KB (fuentes, hops, informe), y una
+ *  transacción lee 16 MiB como mucho: con `.collect()` una conversación de
+ *  ~300 mensajes dejaba de poder abrirse. 200 son 100 turnos, ~12 MB en el
+ *  peor caso. */
+export const MAX_MENSAJES_CARGADOS = 200;
+
+/** Mensajes de una conversación propia, del más antiguo al más nuevo (los
+ *  últimos MAX_MENSAJES_CARGADOS). */
 export const deSesion = query({
   args: { sessionId: v.id("sessions") },
   handler: async (ctx, { sessionId }) => {
     const u = await usuario(ctx);
     await sesionDe(ctx, sessionId, u._id);
-    return await ctx.db
+    const ultimos = await ctx.db
       .query("messages")
-      .withIndex("porSesion", (q) => q.eq("sessionId", sessionId))
-      .collect();
+      .withIndex("porSesionYCreacion", (q) => q.eq("sessionId", sessionId))
+      .order("desc")
+      .take(MAX_MENSAJES_CARGADOS);
+    return ultimos.reverse();
   },
 });
 
@@ -130,7 +140,7 @@ export const enviar = mutation({
     // Historial previo, ANTES de guardar el mensaje actual.
     const recientes = await ctx.db
       .query("messages")
-      .withIndex("porSesion", (q) => q.eq("sessionId", sessionId!))
+      .withIndex("porSesionYCreacion", (q) => q.eq("sessionId", sessionId!))
       .order("desc")
       .take(VENTANA_HISTORIAL);
     const historial = historialDe(recientes.reverse());
@@ -142,7 +152,7 @@ export const enviar = mutation({
       content: texto,
       creadoEn: ahora,
     });
-    // +1 ms: los dos se insertan en el mismo instante y el índice `porSesion`
+    // +1 ms: los dos se insertan en el mismo instante y el índice `porSesionYCreacion`
     // ordena por `creadoEn`; sin esto la respuesta podría listarse antes que
     // la pregunta.
     const messageId = await ctx.db.insert("messages", {
@@ -272,14 +282,14 @@ async function loteDeMensajes(
     const sessionId = filtro.sessionId;
     return await ctx.db
       .query("messages")
-      .withIndex("porSesion", (q) => q.eq("sessionId", sessionId))
+      .withIndex("porSesionYCreacion", (q) => q.eq("sessionId", sessionId))
       .take(LOTE_MENSAJES);
   }
   if (filtro.userId !== undefined) {
     const userId = filtro.userId;
     return await ctx.db
       .query("messages")
-      .withIndex("porUsuario", (q) => q.eq("userId", userId))
+      .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", userId))
       .take(LOTE_MENSAJES);
   }
   throw new Error("loteDeMensajes: hace falta sessionId o userId");

@@ -323,3 +323,79 @@ describe("ingestar", () => {
     expect(chunks.find((c) => c.text.includes("Amyloid beta 42"))?.section).toBe("Abstract");
   });
 });
+
+describe("ingestar: aislamiento y avisos", () => {
+  test("cada fragmento escrito lleva el propietario del documento (la frontera del corpus)", async () => {
+    const t = convexTest(schema, modules);
+    const documentId = await documentoConFichero(t, "propios.csv", csvGrande(30));
+    embedFalso();
+    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    const chunks = await t.run((ctx) =>
+      ctx.db.query("chunks").withIndex("porDocumento", (q) => q.eq("documentRef", documentId)).collect(),
+    );
+    expect(chunks.length).toBe(30);
+    expect(chunks.every((c) => c.propietario === doc?.propietario)).toBe(true);
+    // Y tras reindexar, igual.
+    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    const otraVez = await t.run((ctx) =>
+      ctx.db.query("chunks").withIndex("porDocumento", (q) => q.eq("documentRef", documentId)).collect(),
+    );
+    expect(otraVez.length).toBe(30);
+    expect(otraVez.every((c) => c.propietario === doc?.propietario)).toBe(true);
+  });
+
+  test("ADVERSARIAL: un Word con una imagen cuyo OCR se corta queda LISTO con aviso, sin fila envenenada en la caché", async () => {
+    const { escribirDocx } = await import("./docxFalso.test-util");
+    const JSZip = (await import("jszip")).default;
+    const base = await escribirDocx([{ tipo: "p", texto: "Párrafo normal del documento con texto suficiente." }]);
+    const zip = await JSZip.loadAsync(base);
+    zip.file("word/media/image1.png", new Uint8Array(4096).fill(7));
+    const docx = new Uint8Array(await zip.generateAsync({ type: "uint8array" }));
+
+    const t = convexTest(schema, modules);
+    const documentId = await documentoConFichero(t, "informe.docx", docx);
+    embedFalso();
+    vi.stubEnv("ENABLE_OCR", "true");
+    vi.spyOn(gateway, "crearCompletion").mockResolvedValue({
+      datos: { choices: [{ message: { content: "| Dosis |" }, finish_reason: "length" }], usage: {} },
+      razonamientoRechazado: false,
+    });
+    try {
+      await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("ready");
+    expect(doc?.avisos).toMatchObject({ sinLeer: 1, omitidas: 0, recortados: 0 });
+    expect(doc?.avisos?.motivo).toMatch(/se cortó/);
+    expect(await t.run((ctx) => ctx.db.query("ocrCache").collect())).toEqual([]);
+    const runs = await t.run((ctx) => ctx.db.query("ingestionRuns").collect());
+    expect((runs[0].stats as { avisos?: unknown }).avisos).toMatchObject({ sinLeer: 1 });
+  });
+
+  test("una guía sin autores ni DOI queda SIN cita: se cita por el nombre del fichero, no por un autor inventado", async () => {
+    const t = convexTest(schema, modules);
+    const pdf = escribirPdf([[
+      ["Guia de manejo de la hipertension arterial en atencion primaria", 17],
+      ["Global Outcomes", 11],
+      ["Documento de consenso, edicion 2025.", 9],
+      ["Introduccion", 12],
+      ["La hipertension arterial es el principal factor de riesgo cardiovascular modificable", 10],
+      ["y su control reduce la incidencia de ictus y de insuficiencia cardiaca en la poblacion.", 10],
+    ]]);
+    const documentId = await documentoConFichero(t, "guia-hta.pdf", pdf);
+    embedFalso();
+    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("ready");
+    expect(doc?.citation).toBeUndefined();
+    const chunks = await t.run((ctx) =>
+      ctx.db.query("chunks").withIndex("porDocumento", (q) => q.eq("documentRef", documentId)).collect(),
+    );
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.every((c) => c.citation === undefined)).toBe(true);
+    expect(chunks.every((c) => c.sourceFile === "guia-hta.pdf")).toBe(true);
+  });
+});

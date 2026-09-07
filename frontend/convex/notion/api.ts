@@ -300,13 +300,56 @@ export class ClienteNotion {
 
   /** Bytes de un adjunto. Las URL de `file` van firmadas y no necesitan la
    *  cabecera de autorización (y mandarla a S3 haría fallar la firma); las
-   *  `external` son públicas o no se pueden bajar. */
+   *  `external` son públicas o no se pueden bajar.
+   *
+   *  Acotado en tamaño y en tiempo. La sincronización corre en el runtime de
+   *  Convex, con 64 MiB de memoria, y aquí el fichero se tiene entero (y
+   *  luego copiado en un Blob); un adjunto de 30 MB mataba la acción antes de
+   *  llegar a ningún `catch`, así que la página nunca quedaba marcada con el
+   *  error, cada corrida volvía a morir en la misma página y las posteriores
+   *  no se sincronizaban nunca. Ahora se rechaza ANTES de tener los bytes: por
+   *  `Content-Length` si viene, y contando lo leído si no. */
   async descargar(url: string): Promise<Uint8Array> {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_DESCARGA_MS) });
     if (res.status === 403 || res.status === 400) throw new UrlCaducada(url, res.status);
     if (!res.ok) throw new ErrorNotion(`no se pudo descargar el adjunto (${res.status})`, res.status);
-    return new Uint8Array(await res.arrayBuffer());
+    const anunciado = Number(res.headers.get("content-length") ?? "");
+    if (Number.isFinite(anunciado) && anunciado > MAX_ADJUNTO_BYTES) {
+      throw new ErrorNotion(demasiadoGrande(anunciado), 413);
+    }
+    if (!res.body) return new Uint8Array(await res.arrayBuffer());
+    const trozos: Uint8Array[] = [];
+    let total = 0;
+    const lector = res.body.getReader();
+    for (;;) {
+      const { done, value } = await lector.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_ADJUNTO_BYTES) {
+        await lector.cancel().catch(() => undefined);
+        throw new ErrorNotion(demasiadoGrande(total), 413);
+      }
+      trozos.push(value);
+    }
+    const salida = new Uint8Array(total);
+    let o = 0;
+    for (const t of trozos) {
+      salida.set(t, o);
+      o += t.byteLength;
+    }
+    return salida;
   }
+}
+
+/** Tope de un adjunto de Notion. Muy por debajo del límite de subida manual
+ *  (100 MB): este camino corre sin Node, con 64 MiB, y tiene el fichero
+ *  entero en memoria más una copia. */
+export const MAX_ADJUNTO_BYTES = 20 * 1024 * 1024;
+const TIMEOUT_DESCARGA_MS = 60_000;
+
+function demasiadoGrande(bytes: number): string {
+  const mb = Math.round(bytes / (1024 * 1024));
+  return `el adjunto pesa ${mb || "más de 20"} MB y el máximo desde Notion son ${MAX_ADJUNTO_BYTES / (1024 * 1024)} MB; súbelo a mano desde el panel`;
 }
 
 // ---------------------------------------------------------------------------

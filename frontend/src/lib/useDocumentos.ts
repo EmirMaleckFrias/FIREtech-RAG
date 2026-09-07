@@ -18,7 +18,7 @@ import type { Id } from '../../convex/_generated/dataModel';
 import { avisarSiEsFatal } from './auth';
 import { maxFragmentos } from './biblioteca';
 import { mensajeDeError } from './errores';
-import type { DocumentInfo, DocumentStatus } from '../types';
+import type { AvisosIngesta, DocumentInfo, DocumentStatus } from '../types';
 
 /** Cuánto dura el destello verde de un documento que acaba de quedar listo. */
 export const DESTELLO_MS = 1_800;
@@ -38,6 +38,19 @@ interface DocumentoDoc {
   sha256?: string | null;
   titulo?: string | null;
   citation?: string | null;
+  avisos?: { sinLeer?: number; omitidas?: number; recortados?: number; motivo?: string | null } | null;
+}
+
+function normalizeAvisos(a: DocumentoDoc['avisos']): AvisosIngesta | null {
+  if (!a || typeof a !== 'object') return null;
+  const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? Math.floor(x) : 0);
+  const avisos = {
+    sinLeer: n(a.sinLeer),
+    omitidas: n(a.omitidas),
+    recortados: n(a.recortados),
+    motivo: typeof a.motivo === 'string' && a.motivo.trim() !== '' ? a.motivo : null,
+  };
+  return avisos.sinLeer + avisos.omitidas + avisos.recortados > 0 ? avisos : null;
 }
 
 export function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
@@ -60,6 +73,7 @@ export function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
     sha256: typeof d.sha256 === 'string' && d.sha256 !== '' ? d.sha256 : null,
     titulo: typeof d.titulo === 'string' && d.titulo.trim() !== '' ? d.titulo : null,
     citation: typeof d.citation === 'string' && d.citation.trim() !== '' ? d.citation : null,
+    avisos: normalizeAvisos(d.avisos),
   };
 }
 

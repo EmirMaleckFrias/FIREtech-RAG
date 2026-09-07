@@ -66,6 +66,14 @@ export const rol = v.union(v.literal("admin"), v.literal("lector"));
  *  tablas cuando se reparte la evidencia entre documentos. */
 export const tipoFragmento = v.union(v.literal("text"), v.literal("table"));
 
+/** Avisos de una ingesta, ver `ingesta/tipos.ts` (`AvisosIngesta`). */
+export const avisosIngesta = v.object({
+  sinLeer: v.number(),
+  omitidas: v.number(),
+  recortados: v.number(),
+  motivo: v.optional(v.string()),
+});
+
 export default defineSchema({
   // Tablas de Convex Auth (users, authAccounts, authSessions, authRefreshTokens,
   // authVerificationCodes, authVerifiers, authRateLimits). `users` se extiende
@@ -103,7 +111,7 @@ export default defineSchema({
     titulo: v.string(),
     userId: v.id("users"),
     creadoEn: v.number(),
-  }).index("porUsuario", ["userId", "creadoEn"]),
+  }).index("porUsuarioYCreacion", ["userId", "creadoEn"]),
 
   messages: defineTable({
     sessionId: v.id("sessions"),
@@ -137,8 +145,8 @@ export default defineSchema({
     error: v.optional(v.string()),
     creadoEn: v.number(),
   })
-    .index("porSesion", ["sessionId", "creadoEn"])
-    .index("porUsuario", ["userId", "creadoEn"]),
+    .index("porSesionYCreacion", ["sessionId", "creadoEn"])
+    .index("porUsuarioYCreacion", ["userId", "creadoEn"]),
 
   feedback: defineTable({
     messageId: v.id("messages"),
@@ -186,6 +194,12 @@ export default defineSchema({
     // `convex/notion/sync.ts`: si la página se archiva, el documento se va.
     origen: v.optional(v.union(v.literal("subida"), v.literal("notion"))),
     notionPageId: v.optional(v.string()),
+    // Lo que la ingesta no pudo leer del todo: páginas escaneadas cuyo OCR
+    // falló, imágenes omitidas por el tope, fragmentos recortados. Un
+    // documento "listo" con avisos se consulta igual, pero la ficha lo dice y
+    // ofrece reintentar. Antes esto solo quedaba en `ingestionRuns`, que no
+    // lee nadie, y un escaneo con 39 de 40 páginas sin leer se veía perfecto.
+    avisos: v.optional(avisosIngesta),
   })
     // El nombre de archivo identifica el documento DENTRO DEL CORPUS DE UNA
     // PERSONA, no del despliegue: dos usuarias pueden tener cada una su
@@ -294,7 +308,11 @@ export default defineSchema({
     origen: v.optional(v.string()),
     creadoEn: v.number(),
     expiraEn: v.number(),
-  }).index("porState", ["state"]),
+  })
+    .index("porState", ["state"])
+    // Para limpiar los caducados y los de una cuenta sin recorrer la tabla.
+    .index("porExpira", ["expiraEn"])
+    .index("porUsuario", ["userId"]),
 
   // Los fragmentos indexados: lo que era la colección de Qdrant.
   chunks: defineTable({

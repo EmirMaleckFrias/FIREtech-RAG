@@ -79,10 +79,16 @@ export const estado = query({
       .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
       .collect();
 
+    // Una corrida `running` se devuelve con su fecha de caducidad y es el
+    // cliente quien decide si sigue viva: una query no lee el reloj (no se
+    // vuelve a ejecutar porque pase el tiempo), así que antes el panel podía
+    // seguir diciendo "sincronizando" pasados los 31 minutos hasta que algo
+    // escribiera en la tabla.
     const primera = corridas[0];
     const enCurso =
-      primera && primera.estado === "running" && Date.now() - primera.empezadoEn < CORRIDA_VIVA_MS
+      primera && primera.estado === "running"
         ? {
+            vivaHasta: primera.empezadoEn + CORRIDA_VIVA_MS,
             empezadoEn: primera.empezadoEn,
             paginasTotal: primera.paginasTotal ?? null,
             paginasProcesadas: primera.paginasProcesadas ?? 0,

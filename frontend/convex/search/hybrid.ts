@@ -226,6 +226,19 @@ export const cargar = internalQuery({
   handler: async (ctx, args): Promise<Fragmento[]> => {
     const activos = filtrosActivos(args.filtros);
     const filas = await Promise.all(args.ids.map((id) => ctx.db.get(id)));
+    // Un fragmento cuyo documento ya no existe es un huérfano (un borrado
+    // por lotes que murió a medias): no se cita. La ficha desapareció de la
+    // biblioteca, así que el agente no puede seguir respondiendo con él como
+    // si estuviera. Una consulta por documento, no por fragmento.
+    const documentosVivos = new Map<string, boolean>();
+    const existe = async (id: Id<"documents">) => {
+      const clave = String(id);
+      const previo = documentosVivos.get(clave);
+      if (previo !== undefined) return previo;
+      const vivo = (await ctx.db.get(id)) !== null;
+      documentosVivos.set(clave, vivo);
+      return vivo;
+    };
     const out: Fragmento[] = [];
     for (const fila of filas) {
       if (fila === null) continue;
@@ -234,6 +247,7 @@ export const cargar = internalQuery({
       // sitio donde el aislamiento entre corpus se sostiene de verdad.
       if (fila.propietario !== args.propietario) continue;
       if (!pasaFiltros(fila, activos)) continue;
+      if (!(await existe(fila.documentRef))) continue;
       out.push(aFragmento(fila));
     }
     return out;

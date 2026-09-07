@@ -9,6 +9,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { LOTE_CHUNKS } from "./documentos";
 import type { Doc } from "./_generated/dataModel";
 import { ajustes } from "./lib/config";
 
@@ -54,7 +55,7 @@ export const prepararPregunta = internalMutation({
     // `mensajes.enviar`.
     const previos = await ctx.db
       .query("messages")
-      .withIndex("porSesion", (q) => q.eq("sessionId", sessionId))
+      .withIndex("porSesionYCreacion", (q) => q.eq("sessionId", sessionId))
       .order("asc")
       .collect();
     const historial = previos
@@ -265,26 +266,35 @@ export const reindexarTodo = internalMutation({
  *  documentos sintéticos con cifras inventadas antes de que el índice lo use
  *  una médica. */
 export const borrarDocumentoDePrueba = internalMutation({
-  args: { fileName: v.string(), correo: v.optional(v.string()) },
+  args: { fileName: v.optional(v.string()), correo: v.optional(v.string()), documentId: v.optional(v.id("documents")) },
   handler: async (ctx, args) => {
-    // Sin correo: el primero con ese nombre, de quien sea. Se usa para
-    // limpiar restos desde la CLI, donde no hay identidad.
-    const todos = await ctx.db.query("documents").collect();
-    const dueno = args.correo
-      ? await ctx.db.query("users").withIndex("email", (q) => q.eq("email", args.correo!)).first()
-      : null;
-    const doc =
-      todos.find(
-        (d) => d.fileName === args.fileName && (dueno === null || d.propietario === dueno._id),
-      ) ?? null;
+    // El documento se resuelve UNA vez (por nombre y, si se da, por dueña) y
+    // las vueltas siguientes van por id. Antes la reagenda volvía a buscar
+    // por nombre y sin correo, y con dos cuentas que tenían un fichero del
+    // mismo nombre la segunda vuelta borraba el de la otra cuenta.
+    let doc = args.documentId ? await ctx.db.get(args.documentId) : null;
+    if (!doc && args.fileName) {
+      const dueno = args.correo
+        ? await ctx.db.query("users").withIndex("email", (q) => q.eq("email", args.correo!)).first()
+        : null;
+      if (args.correo && !dueno) return { estado: "no_existe" };
+      doc = dueno
+        ? await ctx.db
+            .query("documents")
+            .withIndex("porPropietarioYNombre", (q) => q.eq("propietario", dueno._id).eq("fileName", args.fileName!))
+            .first()
+        : // Sin correo: el primero con ese nombre, de quien sea. Solo para
+          // limpiar restos desde la CLI, donde no hay identidad.
+          (await ctx.db.query("documents").collect()).find((d) => d.fileName === args.fileName) ?? null;
+    }
     if (!doc) return { estado: "no_existe" };
     const lote = await ctx.db
       .query("chunks")
       .withIndex("porDocumento", (q) => q.eq("documentRef", doc._id))
-      .take(200);
+      .take(LOTE_CHUNKS);
     for (const c of lote) await ctx.db.delete(c._id);
-    if (lote.length === 200) {
-      await ctx.scheduler.runAfter(0, internal.pruebas.borrarDocumentoDePrueba, { fileName: args.fileName });
+    if (lote.length === LOTE_CHUNKS) {
+      await ctx.scheduler.runAfter(0, internal.pruebas.borrarDocumentoDePrueba, { documentId: doc._id });
       return { estado: "borrando", borrados: lote.length };
     }
     if (doc.storageId) {
@@ -314,7 +324,7 @@ export const borrarUsuarioDePrueba = internalMutation({
     if (!usuario) return { estado: "no_existe" };
     const sesiones = await ctx.db
       .query("sessions")
-      .withIndex("porUsuario", (q) => q.eq("userId", usuario._id))
+      .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", usuario._id))
       .collect();
     for (const s of sesiones) await ctx.db.delete(s._id);
     const votos = await ctx.db

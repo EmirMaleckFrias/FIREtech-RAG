@@ -245,7 +245,7 @@ describe("sesiones", () => {
       () => bloqueado.como.query(api.usuarios.yo, {}),
       // Aunque sea admin: el bloqueo va antes que el rol.
       () => bloqueado.como.query(api.usuarios.listar, {}),
-      () => bloqueado.como.query(api.estadisticas.sistema, {}),
+      () => bloqueado.como.query(api.estadisticas.sistema, { ahora: Date.now() }),
       () => bloqueado.como.mutation(api.semilla.ascenderSiPreasignado, {}),
     ];
     for (const llamada of llamadas) {
@@ -544,6 +544,7 @@ describe("documentos", () => {
       sha256: "a".repeat(64),
       // Origen del fichero (subida o notion) y su página, desde la
       // sincronización con Notion; null en los registros anteriores.
+      avisos: null,
       origen: null,
       notionPageId: null,
     });
@@ -865,8 +866,8 @@ describe("usuarios", () => {
 
     expect(await t.run(async (ctx) => ctx.db.get(ana.id))).toBeNull();
     const deAna = await t.run(async (ctx) => ({
-      sesiones: (await ctx.db.query("sessions").withIndex("porUsuario", (q) => q.eq("userId", ana.id)).collect()).length,
-      mensajes: (await ctx.db.query("messages").withIndex("porUsuario", (q) => q.eq("userId", ana.id)).collect()).length,
+      sesiones: (await ctx.db.query("sessions").withIndex("porUsuarioYCreacion", (q) => q.eq("userId", ana.id)).collect()).length,
+      mensajes: (await ctx.db.query("messages").withIndex("porUsuarioYCreacion", (q) => q.eq("userId", ana.id)).collect()).length,
       feedback: (await ctx.db.query("feedback").withIndex("porUsuarioYMensaje", (q) => q.eq("userId", ana.id)).collect()).length,
       cuentasAuth: (await ctx.db.query("authAccounts").withIndex("userIdAndProvider", (q) => q.eq("userId", ana.id)).collect()).length,
       sesionesAuth: (await ctx.db.query("authSessions").withIndex("userId", (q) => q.eq("userId", ana.id)).collect()).length,
@@ -979,8 +980,8 @@ describe("estadisticas.sistema", () => {
       await ctx.db.insert("feedback", { messageId: viejaPregunta, userId: admin.id, rating: -1, creadoEn: ahora });
     });
 
-    expect(await codigoDe(ana.como.query(api.estadisticas.sistema, {}))).toBe("solo_admin");
-    const stats = await admin.como.query(api.estadisticas.sistema, {});
+    expect(await codigoDe(ana.como.query(api.estadisticas.sistema, { ahora: Date.now() }))).toBe("solo_admin");
+    const stats = await admin.como.query(api.estadisticas.sistema, { ahora: Date.now() });
     expect(stats).toEqual({
       index: { chunks: 22, files: 3, types: ["docx", "pdf"], languages: ["en", "es"] },
       activity: { questions_total: 3, questions_7d: 2, active_users_7d: 1, feedback_up: 2, feedback_down: 1 },
@@ -1028,4 +1029,195 @@ describe("semilla", () => {
     expect(await yaAdmin.como.mutation(api.semilla.ascenderSiPreasignado, {})).toEqual({ rol: "admin", cambiado: false });
     expect(await codigoDe(t.mutation(api.semilla.ascenderSiPreasignado, {}))).toBe("no_autenticado");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Borrado con los límites reales: el lote tiene que caber
+// ---------------------------------------------------------------------------
+describe("documentos.borrar con fragmentos de tamaño real", () => {
+  /** Un embedding como el que devuelve text-embedding-3-large: 3072 números
+   *  con nueve cifras, que Convex contabiliza a ~56 KB por fragmento. El del
+   *  test de arriba (i / 3072) es mucho más corto en JSON y ocultaba que 300
+   *  fragmentos no cabían en una transacción. */
+  const embeddingReal = Array.from({ length: 3072 }, (_, i) => Math.sin(i * 0.731) * 0.0123456789);
+
+  async function sembrarGordo(t: Base, propietario: Id<"users">, n: number, fileName = "gordo.pdf") {
+    const storageId = await guardarFichero(t);
+    const doc = await nuevoDocumento(t, { fileName, propietario, chunks: n, storageId });
+    for (let desde = 0; desde < n; desde += 50) {
+      await t.run(async (ctx) => {
+        for (let i = desde; i < Math.min(n, desde + 50); i++) {
+          await ctx.db.insert("chunks", {
+            text: `fragmento ${i} `.repeat(40), embedding: embeddingReal, sourceFile: fileName, page: i, chunkType: "text", documentRef: doc, propietario,
+          });
+        }
+      });
+    }
+    return { doc, storageId };
+  }
+
+  test("ADVERSARIAL: un documento de 400 fragmentos reales se borra (antes fallaba siempre desde 300)", async () => {
+    const t = nuevaBase({ limites: true });
+    const ana = await alta(t, "ana@airobotix.net");
+    const { doc, storageId } = await sembrarGordo(t, ana.id, 400);
+
+    expect(await codigoDe(ana.como.mutation(api.documentos.borrar, { documentId: doc }))).toBe("ok");
+    expect(await t.run(async (ctx) => ctx.db.get(doc))).toBeNull();
+    expect(await t.run(async (ctx) => ctx.db.system.get(storageId))).toBeNull();
+    await ejecutarAgendadas(t);
+    expect(await contarChunksDe(t, doc)).toBe(0);
+    const trabajos = (await agendadas(t)).filter((j) => j.name.includes("borrarChunksRestantes"));
+    expect(trabajos.every((j) => j.state.kind === "success")).toBe(true);
+  }, 90_000);
+
+  test("ADVERSARIAL: borrar una cuenta con un documento de 350 fragmentos reales no deja corpus sin dueño", async () => {
+    const t = nuevaBase({ limites: true });
+    const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
+    const ana = await alta(t, "ana@airobotix.net");
+    const { doc } = await sembrarGordo(t, ana.id, 350);
+    await nuevoDocumento(t, { fileName: "pequeno.pdf", propietario: ana.id });
+
+    await admin.como.mutation(api.usuarios.borrar, { userId: ana.id });
+    await ejecutarAgendadas(t);
+
+    expect(await t.run(async (ctx) => ctx.db.get(ana.id))).toBeNull();
+    expect(await contarChunksDe(t, doc)).toBe(0);
+    const documentos = await t.run(async (ctx) =>
+      ctx.db.query("documents").withIndex("porPropietario", (q) => q.eq("propietario", ana.id)).collect(),
+    );
+    expect(documentos).toEqual([]);
+    const fallidos = (await agendadas(t)).filter((j) => j.state.kind === "failed");
+    expect(fallidos).toEqual([]);
+  }, 90_000);
+});
+
+// ---------------------------------------------------------------------------
+// El arnés de pruebas no puede borrar el documento de otra cuenta
+// ---------------------------------------------------------------------------
+describe("pruebas.borrarDocumentoDePrueba", () => {
+  test("ADVERSARIAL: con dos cuentas que tienen 'guia.pdf', la reagenda sigue con el documento de la cuenta pedida", async () => {
+    const t = nuevaBase();
+    const ana = await alta(t, "ana@airobotix.net");
+    const beto = await alta(t, "beto@airobotix.net");
+    const deAna = await nuevoDocumento(t, { fileName: "guia.pdf", propietario: ana.id, chunks: 12 });
+    const deBeto = await nuevoDocumento(t, { fileName: "guia.pdf", propietario: beto.id, chunks: 250 });
+    const embedding = [0.1, 0.2];
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 12; i++) {
+        await ctx.db.insert("chunks", { text: `ana ${i}`, embedding, sourceFile: "guia.pdf", page: i, chunkType: "text", documentRef: deAna, propietario: ana.id });
+      }
+      for (let i = 0; i < 250; i++) {
+        await ctx.db.insert("chunks", { text: `beto ${i}`, embedding, sourceFile: "guia.pdf", page: i, chunkType: "text", documentRef: deBeto, propietario: beto.id });
+      }
+    });
+
+    const primera = await t.mutation(internal.pruebas.borrarDocumentoDePrueba, {
+      fileName: "guia.pdf",
+      correo: "beto@airobotix.net",
+    });
+    expect(primera).toMatchObject({ estado: "borrando" });
+    await ejecutarAgendadas(t);
+
+    // El de Beto se fue entero; el de Ana ni se tocó.
+    expect(await t.run(async (ctx) => ctx.db.get(deBeto))).toBeNull();
+    expect(await contarChunksDe(t, deBeto)).toBe(0);
+    expect(await t.run(async (ctx) => ctx.db.get(deAna))).not.toBeNull();
+    expect(await contarChunksDe(t, deAna)).toBe(12);
+  });
+
+  test("con un correo que no existe no borra nada de nadie", async () => {
+    const t = nuevaBase();
+    const ana = await alta(t, "ana@airobotix.net");
+    const deAna = await nuevoDocumento(t, { fileName: "guia.pdf", propietario: ana.id });
+    expect(
+      await t.mutation(internal.pruebas.borrarDocumentoDePrueba, { fileName: "guia.pdf", correo: "nadie@airobotix.net" }),
+    ).toEqual({ estado: "no_existe" });
+    expect(await t.run(async (ctx) => ctx.db.get(deAna))).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// El perro guardián del turno no pisa una respuesta publicada
+// ---------------------------------------------------------------------------
+describe("mensajes.marcarColgado", () => {
+  async function turno(t: Base, estado: "redactando" | "listo" | "error") {
+    const ana = await alta(t, `ana-${estado}@airobotix.net`);
+    const sesion = await nuevaSesion(t, ana.id);
+    const id = await t.run((ctx) =>
+      ctx.db.insert("messages", {
+        sessionId: sesion,
+        userId: ana.id,
+        role: "assistant",
+        content: estado === "listo" ? "Respuesta publicada." : "",
+        estado,
+        creadoEn: Date.now(),
+        ...(estado === "error" ? { error: "fallo previo" } : {}),
+      }),
+    );
+    return id;
+  }
+
+  test("cierra con un error honesto un turno que sigue redactando", async () => {
+    const t = nuevaBase();
+    const id = await turno(t, "redactando");
+    expect(await t.mutation(internal.mensajes.marcarColgado, { messageId: id })).toBe(true);
+    const m = await t.run((ctx) => ctx.db.get(id));
+    expect(m?.estado).toBe("error");
+    expect(m?.error).toMatch(/./);
+  });
+
+  test("ADVERSARIAL: no toca un turno ya listo ni uno ya en error", async () => {
+    const t = nuevaBase();
+    const listo = await turno(t, "listo");
+    const enError = await turno(t, "error");
+    expect(await t.mutation(internal.mensajes.marcarColgado, { messageId: listo })).toBe(false);
+    expect(await t.mutation(internal.mensajes.marcarColgado, { messageId: enError })).toBe(false);
+    const a = await t.run((ctx) => ctx.db.get(listo));
+    expect(a).toMatchObject({ estado: "listo", content: "Respuesta publicada." });
+    const b = await t.run((ctx) => ctx.db.get(enError));
+    expect(b).toMatchObject({ estado: "error", error: "fallo previo" });
+  });
+
+  test("enviar agenda el perro guardián con el margen sobre el presupuesto", async () => {
+    const t = nuevaBase();
+    const ana = await alta(t, "ana@airobotix.net");
+    const sesion = await nuevaSesion(t, ana.id);
+    await ana.como.mutation(api.mensajes.enviar, { sessionId: sesion, texto: "¿Qué dice la guía?", modo: "normal" });
+    const trabajos = (await agendadas(t)).filter((j) => j.name.includes("marcarColgado"));
+    expect(trabajos).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Borrar una cuenta con miles de páginas de Notion
+// ---------------------------------------------------------------------------
+describe("usuarios.borrar con mucho rastro de Notion", () => {
+  test("ADVERSARIAL: 1500 filas de notionPaginas se borran por lotes con los límites reales", async () => {
+    const t = nuevaBase({ limites: true });
+    const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
+    const ana = await alta(t, "ana@airobotix.net");
+    for (let desde = 0; desde < 1500; desde += 250) {
+      await t.run(async (ctx) => {
+        for (let i = desde; i < desde + 250; i++) {
+          await ctx.db.insert("notionPaginas", {
+            propietario: ana.id,
+            databaseId: "db1",
+            pageId: `p${i}`,
+            titulo: `Página ${i}`,
+            lastEdited: "2026-09-01T00:00:00.000Z",
+            documentIds: [],
+            sincronizadoEn: 1,
+          });
+        }
+      });
+    }
+    await admin.como.mutation(api.usuarios.borrar, { userId: ana.id });
+    await ejecutarAgendadas(t);
+    const restantes = await t.run((ctx) =>
+      ctx.db.query("notionPaginas").withIndex("porPropietarioYPageId", (q) => q.eq("propietario", ana.id)).collect(),
+    );
+    expect(restantes).toEqual([]);
+    expect(await t.run((ctx) => ctx.db.get(ana.id))).toBeNull();
+    expect((await agendadas(t)).filter((j) => j.state.kind === "failed")).toEqual([]);
+  }, 60_000);
 });

@@ -12,6 +12,8 @@ import { mutation, query } from "./_generated/server";
 import { LONGITUD_TITULO, borrarMensajesDeSesion } from "./mensajes";
 import { sesionDe, usuario } from "./usuarios";
 
+export const MAX_SESIONES_LISTADAS = 1000;
+
 /** Conversaciones del usuario y de nadie más, la más nueva primero. */
 export const listar = query({
   args: {},
@@ -19,9 +21,10 @@ export const listar = query({
     const u = await usuario(ctx);
     const filas = await ctx.db
       .query("sessions")
-      .withIndex("porUsuario", (q) => q.eq("userId", u._id))
+      .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id))
       .order("desc")
-      .collect();
+      // Las últimas MAX_SESIONES_LISTADAS: acotado, como pide la guía.
+      .take(MAX_SESIONES_LISTADAS);
     return filas.map((s) => ({ _id: s._id, titulo: s.titulo, creadoEn: s.creadoEn }));
   },
 });

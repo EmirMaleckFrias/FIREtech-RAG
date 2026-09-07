@@ -21,7 +21,7 @@
 
 import type { ReactNode } from 'react';
 import type { EstadoFila, FilaCobertura } from '../lib/cobertura';
-import { ANCLA, hopsPorPunto, trajoEvidencia } from '../lib/cobertura';
+import { ANCLA, hopsPorPunto, trajoEvidencia, parcial } from '../lib/cobertura';
 import { hopEnCurso } from '../lib/mensajes';
 import type { Hop, PlanItem } from '../types';
 import {
@@ -65,6 +65,11 @@ const ESTILO: Record<EstadoFila, { etiqueta: string; clase: string; icono: React
     clase: 'cob-aviso',
     icono: <IconAlert size={13} />,
   },
+  busqueda_parcial: {
+    etiqueta: 'Busqueda incompleta, sin resultados: no es concluyente',
+    clase: 'cob-aviso',
+    icono: <IconAlert size={13} />,
+  },
   encontrada: {
     etiqueta: 'Evidencia encontrada, uso sin comprobar',
     clase: 'cob-neutro',
@@ -99,7 +104,7 @@ interface PlanEnVivoProps {
   enCurso: boolean;
 }
 
-type EstadoVivo = 'pendiente' | 'buscando' | 'encontrado' | 'sin_resultados' | 'error';
+type EstadoVivo = 'pendiente' | 'buscando' | 'encontrado' | 'sin_resultados' | 'parcial' | 'error';
 
 /** Estado en vivo de un punto a partir del hop que lo representa.
  *
@@ -112,6 +117,7 @@ function estadoVivo(h: Hop | undefined, buscandoAhora: boolean): EstadoVivo {
   if (!h) return 'pendiente';
   if (trajoEvidencia(h)) return 'encontrado';
   if (h.recuperacion === 'error') return 'error';
+  if (parcial(h) && (h.estado === 'sin_resultados' || typeof h.resultados === 'number')) return 'parcial';
   if (h.estado === 'sin_resultados' || typeof h.resultados === 'number') return 'sin_resultados';
   return 'buscando';
 }
@@ -142,6 +148,7 @@ export function PlanEnVivo({ plan, hops, enCurso }: PlanEnVivoProps) {
                   {estado === 'pendiente' && <IconCircle size={12} />}
                   {estado === 'encontrado' && <IconCheck size={12} />}
                   {estado === 'sin_resultados' && <IconMinusCircle size={12} />}
+                  {estado === 'parcial' && <IconAlert size={12} />}
                   {estado === 'error' && <IconAlert size={12} />}
                 </span>
                 <span className="plan-text">
@@ -158,6 +165,7 @@ export function PlanEnVivo({ plan, hops, enCurso }: PlanEnVivoProps) {
                         .filter(Boolean)
                         .join(' · ')}
                     {estado === 'sin_resultados' && 'sin resultados'}
+                    {estado === 'parcial' && 'busqueda incompleta, sin resultados'}
                     {estado === 'error' && 'no se pudo comprobar'}
                   </span>
                 </span>
@@ -203,6 +211,7 @@ export function CoberturaPregunta({ filas }: CoberturaPreguntaProps) {
             f.estado !== 'sin_resultados' &&
             f.estado !== 'no_buscado' &&
             f.estado !== 'error_busqueda' &&
+            f.estado !== 'busqueda_parcial' &&
             f.n_fragmentos > 0
               ? fragmentos(f.n_fragmentos)
               : '',

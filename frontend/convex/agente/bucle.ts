@@ -217,7 +217,7 @@ export const correr = internalAction({
       let enCache: { items: unknown[]; preguntaEn: string; clase: string | null } | null = null;
       if (cacheable) {
         try {
-          enCache = await ctx.runQuery(internal.agente.cachePlan.leer, { clave: clavePlan });
+          enCache = await ctx.runQuery(internal.agente.cachePlan.leer, { clave: clavePlan, ahora: Date.now() });
         } catch (exc) {
           console.warn("caché del plan no disponible", exc);
         }
@@ -772,5 +772,15 @@ async function responderSinDocumentos(
     nota: "sin documentos",
   });
   const contenido = String(choice?.message?.content ?? "").trim();
-  return contenido || "Soy el asistente de investigación de la empresa: respondo con los documentos indexados y cito de dónde sale cada dato. ¿Qué quieres consultar?";
+  if (contenido) return contenido;
+  // Vacío porque el modelo terminó sin decir nada (un saludo sin más): se
+  // presenta. Vacío por un corte de longitud, un filtro o un rechazo: se dice
+  // la verdad, no un saludo, para que la usuaria no crea que no se entendió
+  // su pregunta y la reformule en vano.
+  const razon: string | null = typeof choice?.finish_reason === "string" ? choice.finish_reason : null;
+  if (razon === null || razon === "stop") {
+    return "Soy el asistente de investigación de la empresa: respondo con los documentos indexados y cito de dónde sale cada dato. ¿Qué quieres consultar?";
+  }
+  console.warn(`respuesta sin documentos vacía (finish_reason=${razon})`);
+  return "No he podido completar la respuesta esta vez. Vuelve a intentarlo o reformula la pregunta.";
 }

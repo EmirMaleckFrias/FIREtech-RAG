@@ -594,6 +594,20 @@ describe("elegirBases y desconectar", () => {
     expect((await conexiones(t))[0].bases).toEqual([]);
   });
 
+  test("iniciar limpia los states caducados (por índice) y respeta los vivos de otras cuentas", async () => {
+    const t = nuevaBase();
+    const { como: admin } = await alta(t, "admin@airobotix.net", "admin");
+    const { id: otraId } = await alta(t, "otra@airobotix.net", "lector");
+    await t.run(async (ctx) => {
+      await ctx.db.insert("notionEstadosOauth", { state: "viejo", userId: otraId, creadoEn: 1, expiraEn: Date.now() - 1000 });
+      await ctx.db.insert("notionEstadosOauth", { state: "vivo", userId: otraId, creadoEn: 1, expiraEn: Date.now() + 600_000 });
+    });
+    await iniciarComo(admin);
+    const states = (await estados(t)).map((e) => e.state).sort();
+    expect(states).not.toContain("viejo");
+    expect(states).toContain("vivo");
+  });
+
   test("desconectar borra la conexión y los states pendientes, y conserva el corpus", async () => {
     const t = nuevaBase();
     const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");

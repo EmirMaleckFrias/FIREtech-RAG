@@ -1,13 +1,13 @@
 // Punto de entrada del parseo: `parse_generic` de generic.py. Decide por
 // extensión, sanea, detecta el idioma del documento entero y aplica los topes.
-import { MAX_CHUNKS } from "./chunking";
+import { MAX_CHUNKS, MAX_CHUNK_CHARS } from "./chunking";
 import { parsearDocx } from "./docx";
 import { EXTENSIONES_IMAGEN, parsearImagen } from "./imagen";
 import { detectarIdioma } from "./idioma";
 import { parsearPdf } from "./pdf";
 import { parsearCsvDocumento, parsearXlsx } from "./tabular";
 import { parsearTexto } from "./texto";
-import type { Ocr, Parseo } from "./tipos";
+import { SIN_AVISOS, hayAvisos, type AvisosIngesta, type Ocr, type Parseo } from "./tipos";
 
 export const EXTENSIONES_SOPORTADAS = new Set([".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ...EXTENSIONES_IMAGEN]);
 
@@ -42,10 +42,10 @@ export async function parsearDocumento(
   const ext = extensionDe(nombre);
   let resultado: Parseo;
   if (ext === ".pdf") {
-    const { chunks, pages, descartados, paginasOcr } = await parsearPdf(bytes, nombre, opciones);
+    const { chunks, pages, descartados, paginasOcr, avisos } = await parsearPdf(bytes, nombre, opciones);
     if (descartados) console.info(`${nombre}: ${descartados} líneas de bibliografía descartadas.`);
     if (paginasOcr) console.info(`${nombre}: ${paginasOcr} páginas leídas por OCR.`);
-    resultado = { chunks, pages };
+    resultado = { chunks, pages, avisos };
   } else if (ext === ".docx") {
     resultado = await parsearDocx(bytes, nombre, { ocr: opciones.ocr });
   } else if (EXTENSIONES_IMAGEN.has(ext)) {
@@ -77,7 +77,21 @@ export async function parsearDocumento(
   const idioma = detectarIdioma(chunks.slice(0, 40).map((c) => c.text).join("\n"));
   for (const chunk of chunks) chunk.language = idioma;
 
+  const avisos: AvisosIngesta = { ...SIN_AVISOS, ...(resultado.avisos ?? {}) };
+  avisos.recortados = chunks.filter((c) => c.recortado).length;
+  if (avisos.recortados) {
+    console.warn(`${nombre}: ${avisos.recortados} fragmento(s) recortados a ${MAX_CHUNK_CHARS} caracteres.`);
+  }
+
   if (!chunks.length) {
+    // Un documento sin nada legible cuyas páginas FALLARON al leerse no es
+    // "un escaneo en blanco": es un fallo, y reintentar puede arreglarlo.
+    if (avisos.sinLeer > 0) {
+      throw new Error(
+        `'${nombre}' no se pudo leer: ${avisos.motivo ?? "sus páginas no se pudieron reconocer"}. ` +
+          "Vuelve a intentarlo en unos minutos con el botón de reintentar.",
+      );
+    }
     throw new Error(
       opciones.ocr
         ? `'${nombre}' no contiene texto legible: ni texto propio ni texto reconocible en sus imágenes.`
@@ -90,5 +104,5 @@ export async function parsearDocumento(
         "Divide el documento en archivos más pequeños.",
     );
   }
-  return { chunks, pages: resultado.pages };
+  return { chunks, pages: resultado.pages, ...(hayAvisos(avisos) ? { avisos } : {}) };
 }

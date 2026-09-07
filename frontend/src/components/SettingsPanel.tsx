@@ -232,7 +232,10 @@ interface UsersTabProps {
 }
 
 function UsersTab({ open, currentUserId }: UsersTabProps) {
-  const listaQuery = useQuery(api.usuarios.listar);
+  // En `skip` con el panel cerrado: el componente sigue montado (para que
+  // reabrir no parpadee) y conserva el último valor pintado, pero no mantiene
+  // abierta de por vida una suscripción a toda la tabla de usuarios.
+  const listaQuery = useQuery(api.usuarios.listar, open ? {} : 'skip');
   const actualizar = useMutation(api.usuarios.actualizar);
   const borrar = useMutation(api.usuarios.borrar);
 
@@ -754,8 +757,17 @@ function StatTile({ value, label }: { value: string; label: string }) {
   );
 }
 
+/** El "ahora" que se manda a la query, redondeado a cinco minutos: el
+ *  servidor no lee el reloj (la guía de Convex), y un argumento que cambiase
+ *  en cada render abriría una suscripción nueva cada vez. */
+function ahoraRedondeado(): number {
+  const paso = 5 * 60_000;
+  return Math.floor(Date.now() / paso) * paso;
+}
+
 function SystemTab() {
-  const statsQuery = useQuery(api.estadisticas.sistema);
+  const [ahora] = useState(ahoraRedondeado);
+  const statsQuery = useQuery(api.estadisticas.sistema, { ahora });
   const stats = useMemo(
     () => (statsQuery === undefined ? null : normalizeStats(statsQuery)),
     [statsQuery],
