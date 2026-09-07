@@ -20,7 +20,7 @@ import { esAccesoRevocado, esNoAutenticado, mensajeDeError } from './errores';
  *  correos distintos. Si algún día se configuran por variable de entorno en el
  *  despliegue, esta lista se queda corta y el servidor seguirá siendo el que
  *  decide: el cliente solo se adelanta a los casos evidentes. */
-export const ALLOWED_DOMAINS = ['airobotix.net', 'alzheimer.com'] as const;
+export const ALLOWED_DOMAINS = ['airobotix.net', 'alzheimerproject.com'] as const;
 
 /** El primero, para el `placeholder` del formulario. */
 export const ALLOWED_DOMAIN = ALLOWED_DOMAINS[0];

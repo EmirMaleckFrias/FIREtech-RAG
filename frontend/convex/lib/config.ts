@@ -154,7 +154,7 @@ export function ajustes(): Ajustes {
     // Se acepta el nombre nuevo en plural y, por compatibilidad, el viejo
     // DOMINIO_PERMITIDO en singular, que es el que puede estar puesto en un
     // despliegue anterior. Los espacios y las arrobas sobrantes se recortan
-    // ("@alzheimer.com" y "alzheimer.com" valen igual), y un valor repetido o
+    // ("@alzheimerproject.com" y "alzheimerproject.com" valen igual), y un valor repetido o
     // vacío se descarta: un dominio vacío en la lista dejaría pasar cualquier
     // correo.
     dominiosPermitidos: (() => {
@@ -164,7 +164,7 @@ export function ajustes(): Ajustes {
         .map((d) => d.trim().toLowerCase().replace(/^@/, ""))
         .filter((d) => d !== "");
       const unicos = Array.from(new Set(lista));
-      return unicos.length > 0 ? unicos : ["airobotix.net", "alzheimer.com"];
+      return unicos.length > 0 ? unicos : ["airobotix.net", "alzheimerproject.com"];
     })(),
     // 100 MB. La subida va por URL firmada de Convex, que NO limita el tamaño
     // del fichero (documentado el 4 sep 2026: "the file size is not limited");

@@ -9,18 +9,20 @@ describe('isAllowedEmail', () => {
     expect(isAllowedEmail('ana@airobotix.net')).toBe(true);
     expect(isAllowedEmail('  Ana.Perez@AIROBOTIX.NET ')).toBe(true);
     // El segundo dominio, el del equipo clínico.
-    expect(isAllowedEmail('maria@alzheimer.com')).toBe(true);
-    expect(isAllowedEmail(' Maria@ALZHEIMER.COM ')).toBe(true);
+    expect(isAllowedEmail('maria@alzheimerproject.com')).toBe(true);
+    expect(isAllowedEmail(' Maria@ALZHEIMERPROJECT.COM ')).toBe(true);
   });
 
   it('rechaza dominios que contienen o extienden el permitido', () => {
     expect(isAllowedEmail('ana@airobotix.net.atacante.com')).toBe(false);
     // Y las mismas trampas con el dominio nuevo: añadir uno no relaja la
     // regla del sufijo.
-    expect(isAllowedEmail('maria@alzheimer.com.atacante.com')).toBe(false);
-    expect(isAllowedEmail('maria@sub.alzheimer.com')).toBe(false);
-    expect(isAllowedEmail('maria@noalzheimer.com')).toBe(false);
-    expect(isAllowedEmail('maria@alzheimer.com.mx')).toBe(false);
+    expect(isAllowedEmail('maria@alzheimerproject.com.atacante.com')).toBe(false);
+    expect(isAllowedEmail('maria@sub.alzheimerproject.com')).toBe(false);
+    expect(isAllowedEmail('maria@noalzheimerproject.com')).toBe(false);
+    expect(isAllowedEmail('maria@alzheimerproject.com.mx')).toBe(false);
+    // El dominio viejo ya no vale.
+    expect(isAllowedEmail('maria@alzheimer.com')).toBe(false);
     expect(isAllowedEmail('ana@sub.airobotix.net')).toBe(false);
     expect(isAllowedEmail('ana@notairobotix.net')).toBe(false);
     expect(isAllowedEmail('airobotix.net')).toBe(false);

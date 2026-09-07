@@ -9,29 +9,31 @@
 import { describe, expect, test } from "vitest";
 import { correoPermitido } from "./auth";
 
-const PERMITIDOS = ["airobotix.net", "alzheimer.com"];
+const PERMITIDOS = ["airobotix.net", "alzheimerproject.com"];
 
 describe("correoPermitido", () => {
   test("acepta cualquiera de los dominios permitidos, sin importar mayúsculas ni espacios", () => {
     expect(correoPermitido("ana@airobotix.net", PERMITIDOS)).toBe(true);
-    expect(correoPermitido("maria@alzheimer.com", PERMITIDOS)).toBe(true);
-    expect(correoPermitido("  Maria.Lopez@ALZHEIMER.COM  ", PERMITIDOS)).toBe(true);
+    expect(correoPermitido("maria@alzheimerproject.com", PERMITIDOS)).toBe(true);
+    expect(correoPermitido("  Maria.Lopez@ALZHEIMERPROJECT.COM  ", PERMITIDOS)).toBe(true);
     // Y en la lista también se tolera el dominio escrito con arroba o con
     // espacios, que es como se pega en una variable de entorno.
-    expect(correoPermitido("maria@alzheimer.com", [" @alzheimer.com "])).toBe(true);
+    expect(correoPermitido("maria@alzheimerproject.com", [" @alzheimerproject.com "])).toBe(true);
   });
 
   test("un dominio parecido no cuela: la comprobación es del sufijo @dominio", () => {
     for (const correo of [
-      "maria@alzheimer.com.atacante.com",
-      "maria@sub.alzheimer.com",
-      "maria@noalzheimer.com",
-      "maria@alzheimer.com.mx",
-      "maria@alzheimer.co",
+      "maria@alzheimerproject.com.atacante.com",
+      "maria@sub.alzheimerproject.com",
+      "maria@noalzheimerproject.com",
+      "maria@alzheimerproject.com.mx",
+      "maria@alzheimerproject.co",
+      // Y el dominio viejo, que ya no vale.
+      "maria@alzheimer.com",
       "ana@airobotix.net.atacante.com",
       "ana@notairobotix.net",
       // El dominio dentro del nombre, antes de la arroba.
-      "alzheimer.com@atacante.com",
+      "alzheimerproject.com@atacante.com",
       "ana@airobotix.net@otro.com",
     ]) {
       expect(correoPermitido(correo, PERMITIDOS)).toBe(false);
@@ -41,7 +43,7 @@ describe("correoPermitido", () => {
   test("sin correo, sin lista, o con un dominio vacío dentro de la lista: no pasa nadie", () => {
     expect(correoPermitido("", PERMITIDOS)).toBe(false);
     expect(correoPermitido("   ", PERMITIDOS)).toBe(false);
-    expect(correoPermitido("maria@alzheimer.com", [])).toBe(false);
+    expect(correoPermitido("maria@alzheimerproject.com", [])).toBe(false);
     // El caso peligroso: un dominio vacío en la lista (una coma de más en la
     // variable de entorno) NO puede convertirse en "cualquier correo vale",
     // porque todo correo acaba en "@" + "".
