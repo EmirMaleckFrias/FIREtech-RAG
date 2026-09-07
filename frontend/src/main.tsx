@@ -6,12 +6,15 @@ import App from './App';
 import { convex } from './lib/convex';
 import { anunciarAviso, avisoDeEmergente, despedirEmergente } from './lib/notionEmergente';
 import { observarSistema } from './lib/theme';
+import { iniciarPreferencias } from './lib/preferencias';
 import './styles.css';
+import './settings.css';
 
 // El tema ya lo aplico el script inline de index.html (antes de pintar).
 // Esto solo engancha los cambios de tema del SISTEMA, para que la opcion
 // 'sistema' siga al SO en vivo sin recargar.
 observarSistema();
+iniciarPreferencias();
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

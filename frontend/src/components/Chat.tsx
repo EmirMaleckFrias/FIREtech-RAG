@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { CitationRef } from '../lib/markdown';
+import { debeEnviar, usePreferencias } from '../lib/preferencias';
 import type { ChatMessage, ModoPensamiento } from '../types';
 import { IconArrowUp, IconCheck, IconChevronDown, IconSpinner } from './icons';
 import { MessageItem } from './MessageItem';
@@ -64,6 +65,7 @@ export function Chat({
   feedbackErrores = {},
 }: ChatProps) {
   const [draft, setDraft] = useState('');
+  const preferencias = usePreferencias();
   const [modoMenuAbierto, setModoMenuAbierto] = useState(false);
   const modoActual = MODOS.find((m) => m.valor === modo) ?? MODOS[0];
   const modoRef = useRef<HTMLDivElement>(null);
@@ -105,14 +107,15 @@ export function Chat({
     if (!stickToBottomRef.current) return;
 
     const listGrew = prevCount > 0 && messages.length > prevCount;
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const reduceMotion = preferencias.reducirMovimiento ||
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (listGrew && !reduceMotion) {
       smoothUntilRef.current = Date.now() + 700;
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     } else {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, preferencias.reducirMovimiento]);
 
   // Teclado virtual: con interactive-widget=resizes-content + 100dvh el
   // layout se encoge solo en Chrome Android; en iOS Safari el layout no
@@ -209,8 +212,7 @@ export function Chat({
     // Enter durante una composición IME (japonés, chino, coreano...) solo
     // confirma el texto compuesto: no debe enviar. Algunos navegadores
     // reportan la tecla como "Process" mientras dura la composición.
-    if (e.nativeEvent.isComposing || e.key === 'Process') return;
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (debeEnviar(e.nativeEvent, preferencias.enterEnvia)) {
       e.preventDefault();
       submit();
     }
@@ -369,7 +371,9 @@ export function Chat({
         {!showWelcome && (
           <div className="composer-meta">
             <span className="composer-hint" aria-hidden="true">
-              Enter para enviar · Shift+Enter salto de línea
+              {preferencias.enterEnvia
+                ? 'Enter para enviar · Shift+Enter salto de línea'
+                : 'Ctrl / ⌘ + Enter para enviar · Enter salto de línea'}
             </span>
             <p className="composer-note">{PRICE_NOTE}</p>
           </div>

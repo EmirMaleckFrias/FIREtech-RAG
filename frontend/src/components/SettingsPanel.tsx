@@ -43,14 +43,14 @@ import type { Id } from '../../convex/_generated/dataModel';
 import { avisarSiEsFatal } from '../lib/auth';
 import { mensajeDeError } from '../lib/errores';
 import { useSheetDrag } from '../lib/useSheetDrag';
-import { aplicarTema, guardarTema, leerTema, type Tema } from '../lib/theme';
+import { AccountSettings } from './AccountSettings';
 import { ROLE_LABEL, type AdminStats, type UserAccount, type UserRole } from '../types';
 import {
   IconAlert,
-  IconCheck,
+  IconBulb,
   IconChevronDown,
   IconLock,
-  IconLogout,
+  IconSettings,
   IconSearch,
   IconSpinner,
   IconTrash,
@@ -62,13 +62,6 @@ import {
 type SettingsTab = 'usuarios' | 'sistema' | 'cuenta';
 
 const NOTICE_MS = 3_200;
-
-/** Opciones de apariencia, en el orden en que se muestran. */
-const TEMAS: { valor: Tema; etiqueta: string; ayuda: string }[] = [
-  { valor: 'sistema', etiqueta: 'Automático', ayuda: 'Sigue la apariencia de tu sistema' },
-  { valor: 'claro', etiqueta: 'Claro', ayuda: 'Siempre en claro' },
-  { valor: 'oscuro', etiqueta: 'Oscuro', ayuda: 'Siempre en oscuro' },
-];
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), a[href], input:not([disabled]):not([type="file"]), ' +
@@ -438,6 +431,10 @@ function UsersTab({ open, currentUserId }: UsersTabProps) {
 
   return (
     <div className="settings-tabpanel" onKeyDown={handleListKeyDown}>
+      <div className="settings-tab-intro">
+        <h3>Tu equipo de investigación</h3>
+        <p>Gestiona accesos y permisos. Las conversaciones de cada persona siguen siendo privadas.</p>
+      </div>
       {users !== null && users.length > 0 && (
         <div className="users-search">
           <span className="users-search-icon" aria-hidden="true">
@@ -799,6 +796,10 @@ function SystemTab() {
 
   return (
     <div className="settings-tabpanel settings-scroll">
+      <div className="settings-tab-intro">
+        <h3>Una mirada al sistema</h3>
+        <p>El índice, la actividad y la configuración del proyecto, en un solo lugar.</p>
+      </div>
       <section className="stats-block">
         <h3 className="stats-title">Índice</h3>
         <div className="stats-grid">
@@ -834,78 +835,6 @@ function SystemTab() {
 }
 
 /* ======================================================================
-   Pestaña 3: Mi cuenta (todos los roles)
-
-   Ya no hay formulario de cambio de contraseña: con Supabase se hacía con
-   `updateUser` desde el cliente, y el proveedor Password de Convex Auth no
-   tiene un flujo de cambio con sesión (solo `reset` por código enviado al
-   correo, que exige configurar un proveedor de correo). Cuando exista ese
-   flujo, vuelve aquí.
-   ====================================================================== */
-
-interface AccountTabProps {
-  userEmail: string;
-  role: UserRole | null;
-  onSignOut: () => void;
-}
-
-function AccountTab({ userEmail, role, onSignOut }: AccountTabProps) {
-  // El tema vive en el DOM (data-theme en <html>), no en el arbol de React:
-  // este estado es solo para pintar cual esta marcado. Se lee de
-  // localStorage al montar, asi que refleja la eleccion real aunque el panel
-  // se abra despues de una recarga.
-  const [tema, setTema] = useState<Tema>(() => leerTema());
-
-  return (
-    <div className="settings-tabpanel settings-scroll">
-      <div className="account-identity">
-        <span className="account-email" title={userEmail}>
-          {userEmail}
-        </span>
-        {role !== null && (
-          <span className={`sidebar-role sidebar-role-${role}`}>{ROLE_LABEL[role]}</span>
-        )}
-      </div>
-
-      <section className="account-section">
-        <h3 className="stats-title">Apariencia</h3>
-        <div className="tema-opciones" role="radiogroup" aria-label="Apariencia">
-          {TEMAS.map((t) => (
-            <button
-              key={t.valor}
-              type="button"
-              role="radio"
-              aria-checked={tema === t.valor}
-              className="modo-item tema-opcion"
-              onClick={() => {
-                setTema(t.valor);
-                guardarTema(t.valor);
-                aplicarTema(t.valor);
-              }}
-            >
-              <span className="modo-item-texto">
-                <span className="modo-item-nombre">{t.etiqueta}</span>
-                <span className="modo-item-ayuda">{t.ayuda}</span>
-              </span>
-              {tema === t.valor && (
-                <span className="modo-item-check" aria-hidden="true">
-                  <IconCheck size={14} />
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <button type="button" className="settings-signout" onClick={onSignOut}>
-        <IconLogout size={15} />
-        <span>Cerrar sesión</span>
-      </button>
-    </div>
-  );
-}
-
-/* ======================================================================
    Panel
    ====================================================================== */
 
@@ -929,17 +858,16 @@ export function SettingsPanel({
   onSignOut,
 }: SettingsPanelProps) {
   const isAdmin = role === 'admin';
-  const [tab, setTab] = useState<SettingsTab>(isAdmin ? 'usuarios' : 'cuenta');
+  const [tab, setTab] = useState<SettingsTab>('cuenta');
 
   const panelRef = useRef<HTMLElement>(null);
   const grabberRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
 
-  // El rol llega asíncrono (usuarios.yo) y puede cambiar: la pestaña por
-  // defecto se recalcula al conocerlo, y un lector nunca se queda mirando una
-  // pestaña de admin.
+  // Mi cuenta es la entrada para todos. Al perder permisos, salir de las
+  // pestañas de administración sin suscribir queries reservadas.
   useEffect(() => {
-    setTab(role === 'admin' ? 'usuarios' : 'cuenta');
+    if (role !== 'admin') setTab('cuenta');
   }, [role]);
 
   // Bottom sheet en móvil: swipe-down sobre el asa cierra el panel.
@@ -965,7 +893,8 @@ export function SettingsPanel({
     if (e.key !== 'Tab') return;
     const root = panelRef.current;
     if (!root) return;
-    const nodes = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+    const nodes = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+      .filter((node) => node.tabIndex >= 0 && node.getClientRects().length > 0);
     if (nodes.length === 0) return;
     const first = nodes[0];
     const last = nodes[nodes.length - 1];
@@ -973,22 +902,34 @@ export function SettingsPanel({
     if (e.shiftKey && (active === first || !root.contains(active))) {
       e.preventDefault();
       last.focus();
-    } else if (!e.shiftKey && active === last) {
+    } else if (!e.shiftKey && (active === last || !root.contains(active))) {
       e.preventDefault();
       first.focus();
     }
   };
 
-  const tabs: Array<{ id: SettingsTab; label: string }> = [
-    { id: 'usuarios', label: 'Usuarios' },
-    { id: 'sistema', label: 'Sistema' },
-    { id: 'cuenta', label: 'Mi cuenta' },
+  const tabs: Array<{ id: SettingsTab; label: string; icon: typeof IconUser }> = [
+    { id: 'cuenta', label: 'Mi cuenta', icon: IconUser },
+    { id: 'usuarios', label: 'Usuarios', icon: IconUsers },
+    { id: 'sistema', label: 'Sistema', icon: IconBulb },
   ];
+
+  const handleTabKeys = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next: number;
+    if (e.key === 'ArrowRight') next = (index + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    setTab(tabs[next].id);
+    panelRef.current?.querySelector<HTMLButtonElement>(`#settings-tab-${tabs[next].id}`)?.focus();
+  };
 
   return (
     <aside
       ref={panelRef}
-      className={`settings-panel ${open ? '' : 'settings-closed'}`}
+      className={`settings-panel settings-redesign ${open ? '' : 'settings-closed'}`}
       role="dialog"
       aria-modal="true"
       aria-label="Ajustes"
@@ -997,7 +938,10 @@ export function SettingsPanel({
       <div ref={grabberRef} className="sheet-grabber" aria-hidden="true" />
       <div className="settings-inner">
         <div className="settings-header">
-          <h2>Ajustes</h2>
+          <div className="settings-heading">
+            <span className="settings-heading-icon"><IconSettings size={22} /></span>
+            <div><h2>Ajustes</h2><p>Tu espacio, a tu manera.</p></div>
+          </div>
           <button
             ref={closeBtnRef}
             type="button"
@@ -1013,17 +957,20 @@ export function SettingsPanel({
         {/* un lector solo tiene "Mi cuenta": sin fila de pestañas */}
         {isAdmin && (
           <div className="auth-tabs settings-tabs" role="tablist" aria-label="Secciones de ajustes">
-            {tabs.map((t) => (
+            {tabs.map((t, index) => (
               <button
                 key={t.id}
                 type="button"
                 role="tab"
                 id={`settings-tab-${t.id}`}
                 aria-selected={tab === t.id}
+                tabIndex={tab === t.id ? 0 : -1}
                 aria-controls="settings-panel-body"
                 className={`auth-tab ${tab === t.id ? 'auth-tab-active' : ''}`}
                 onClick={() => setTab(t.id)}
+                onKeyDown={(e) => handleTabKeys(e, index)}
               >
+                <t.icon size={14} />
                 {t.label}
               </button>
             ))}
@@ -1041,7 +988,7 @@ export function SettingsPanel({
           )}
           {isAdmin && tab === 'sistema' && <SystemTab />}
           {(!isAdmin || tab === 'cuenta') && (
-            <AccountTab userEmail={userEmail} role={role} onSignOut={onSignOut} />
+            <AccountSettings userEmail={userEmail} role={role} onSignOut={onSignOut} />
           )}
         </div>
       </div>
