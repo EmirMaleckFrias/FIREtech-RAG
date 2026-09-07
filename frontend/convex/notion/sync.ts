@@ -53,6 +53,7 @@ import {
   type PaginaNotion,
 } from "./api";
 import { renderizarPagina, textoUtil } from "./markdown";
+import type { BaseElegida } from "./oauth";
 
 /** Caracteres de texto útil a partir de los cuales una página merece su
  *  propio documento. Por debajo es una ficha (título y un par de líneas) que
@@ -62,6 +63,14 @@ export const MIN_TEXTO_UTIL = 200;
 /** Tiempo tras el que la corrida se corta y se anota como parcial. La acción
  *  del runtime por defecto tiene 30 minutos; 20 deja margen para cerrar. */
 export const LIMITE_CORRIDA_MS = 20 * 60_000;
+
+/** Cada cuántas páginas SALTADAS se escribe el avance. Las que sí se procesan
+ *  lo escriben siempre, porque son las que tardan. Existe porque escribir una
+ *  fila por página no escalaba: en régimen normal casi todas las páginas están
+ *  intactas, y una base de 10.000 páginas generaba 10.000 escrituras por
+ *  corrida sin contar nada nuevo. 25 páginas se saltan en mucho menos de lo
+ *  que el ojo distingue en una barra de progreso. */
+export const PASO_AVANCE = 25;
 
 /** Una corrida `running` más vieja que esto se da por muerta (la acción
  *  murió sin cerrarla) y no bloquea a la siguiente. */
@@ -163,123 +172,168 @@ export const sincronizar = internalAction({
 
     try {
       const cliente = new ClienteNotion(cred.token);
-      const conocidas = new Map(
-        (await ctx.runQuery(internal.notion.datos.paginasConocidas, { propietario })).map((p) => [
-          p.pageId,
-          p,
-        ]),
-      );
-      // Documentos de Notion que existen hoy: una página cuyo documento
-      // borró un administrador se vuelve a traer aunque Notion no cambiara,
-      // porque Notion manda sobre lo que hay en el índice.
+      // Documentos de Notion que existen hoy: una página cuyo documento borró
+      // su dueña a mano se vuelve a traer aunque Notion no cambiara, porque
+      // Notion manda sobre lo que hay en el índice.
       const vivos = new Set<string>(
         await ctx.runQuery(internal.notion.datos.idsDocumentosNotion, { propietario }),
       );
-      const paginas = await cliente.paginasDeBase(cred.databaseId);
-      // Las archivadas y las excluidas no cuentan: se tratan abajo, con las
-      // que ya no están. Filtrar antes permite anunciar el total real.
-      const activas = paginas.filter(
-        (p) => !(Boolean(p.archived || p.in_trash) || estaExcluida(p)),
-      );
+
+      // 1. Listar TODAS las bases antes de tocar ninguna página. Cuesta una
+      //    petición por cada 100 páginas, y a cambio el total que ve la
+      //    usuaria en la barra es el de verdad desde el primer segundo, en vez
+      //    de ir creciendo a saltos según se descubre cada base.
+      const porBase: Array<{ base: BaseElegida; activas: PaginaNotion[] }> = [];
+      for (const base of cred.bases) {
+        const paginas = await cliente.paginasDeBase(base.id);
+        // Las archivadas y las excluidas no cuentan: se tratan abajo, con las
+        // que ya no están. Filtrar antes permite anunciar el total real.
+        porBase.push({
+          base,
+          activas: paginas.filter((p) => !(Boolean(p.archived || p.in_trash) || estaExcluida(p))),
+        });
+      }
+      const total = porBase.reduce((n, b) => n + b.activas.length, 0);
       await ctx.runMutation(internal.notion.datos.avanzarCorrida, {
         runId,
-        paginasTotal: activas.length,
+        paginasTotal: total,
         paginasProcesadas: 0,
       });
-      const vistas = new Set<string>();
+
+      // Progreso por LOTES. Antes se escribía una fila por página, incluso por
+      // las que no cambiaban: con 10.000 páginas eran 10.000 escrituras por
+      // corrida sin contar nada nuevo. Ahora se escribe cuando de verdad hay
+      // algo que enseñar (una página que se va a procesar, que es la que
+      // tarda) o cada `PASO_AVANCE` páginas saltadas.
       let procesadas = 0;
-
-      for (const pagina of activas) {
-        const pageId = normalizarId(pagina.id);
-        vistas.add(pageId);
-        cifras.paginas += 1;
-
-        if (Date.now() - t0 > LIMITE_CORRIDA_MS) {
-          parcial = true;
-          break;
-        }
-
-        const titulo = tituloDe(pagina) || `pagina-${pageId.slice(0, 8)}`;
-        // Avance ANTES de tocar la página: si esta tarda (adjuntos grandes),
-        // la UI ya dice cuál es. Lleva los contadores de las anteriores.
+      let ultimoAvance = -1;
+      const avanzar = async (etiqueta: string | undefined, forzar: boolean) => {
+        if (!forzar && procesadas - ultimoAvance < PASO_AVANCE) return;
+        ultimoAvance = procesadas;
         await ctx.runMutation(internal.notion.datos.avanzarCorrida, {
           runId,
           paginasProcesadas: procesadas,
-          paginaActual: titulo,
+          ...(etiqueta === undefined ? {} : { paginaActual: etiqueta }),
           ...cifras,
         });
-        procesadas += 1;
+      };
 
-        const previa = conocidas.get(pageId) ?? null;
-        const intacta =
-          previa !== null &&
-          previa.lastEdited === pagina.last_edited_time &&
-          !previa.error &&
-          previa.documentIds.every((id) => vivos.has(id));
-        if (intacta) continue;
+      // 2. Base por base. El recorrido y el cálculo de lo que ha desaparecido
+      //    son POR BASE a propósito: si se juntaran, acabar con `Docs` dejaría
+      //    las páginas de `Tasks` como no vistas y se borraría su corpus.
+      for (const { base, activas } of porBase) {
+        const conocidas = new Map(
+          (
+            await ctx.runQuery(internal.notion.datos.paginasDeBase, {
+              propietario,
+              databaseId: base.id,
+            })
+          ).map((pg) => [pg.pageId, pg]),
+        );
+        const vistas = new Set<string>();
+        let completa = true;
 
-        try {
-          const r = await procesarPagina(ctx, propietario, cliente, pagina, pageId, titulo, previa, cifras);
-          await ctx.runMutation(internal.notion.datos.guardarPagina, {
-            propietario,
-            pageId,
-            titulo,
-            lastEdited: pagina.last_edited_time,
-            documentIds: r.documentIds,
-            documentoTextoId: r.documentoTextoId,
-          });
-        } catch (exc) {
-          const msg = mensajeDe(exc);
-          cifras.errores.push(`${titulo}: ${msg}`);
-          console.warn(`notion: fallo en la página '${titulo}' (${pageId}): ${msg}`);
-          // Se guarda con error y con los documentos que ya tenía, para no
-          // perderles la pista; el error hace que se reintente la próxima vez.
-          await ctx.runMutation(internal.notion.datos.guardarPagina, {
-            propietario,
-            pageId,
-            titulo,
-            lastEdited: pagina.last_edited_time,
-            documentIds: previa?.documentIds ?? [],
-            documentoTextoId: previa?.documentoTextoId,
-            error: msg.slice(0, 500),
-          });
-        }
-      }
+        for (const pagina of activas) {
+          const pageId = normalizarId(pagina.id);
+          vistas.add(pageId);
+          cifras.paginas += 1;
 
-      // Páginas que ya no están: archivadas, excluidas o borradas de la base.
-      // Solo si la corrida fue completa: en una parcial no se sabe qué no se
-      // llegó a ver, y borrar por no haber mirado sería destruir corpus.
-      if (!parcial) {
-        for (const fila of conocidas.values()) {
-          if (vistas.has(fila.pageId)) continue;
+          if (Date.now() - t0 > LIMITE_CORRIDA_MS) {
+            parcial = true;
+            completa = false;
+            break;
+          }
+
+          const titulo = tituloDe(pagina) || `pagina-${pageId.slice(0, 8)}`;
+          const previa = conocidas.get(pageId) ?? null;
+          const intacta =
+            previa !== null &&
+            previa.lastEdited === pagina.last_edited_time &&
+            !previa.error &&
+            previa.documentIds.every((id) => vivos.has(id));
+          if (intacta) {
+            procesadas += 1;
+            await avanzar(undefined, false);
+            continue;
+          }
+
+          // Avance ANTES de tocar la página, y este sí forzado: es la que
+          // puede tardar (adjuntos grandes) y la UI tiene que decir cuál es.
+          // Con varias bases se dice también de cuál, porque si no la usuaria
+          // ve un título suelto sin saber de dónde sale.
+          //
+          // `paginasProcesadas` cuenta las TERMINADAS, no incluida esta: el
+          // texto que lee la usuaria es "7 de 20 páginas, ahora: Protocolo
+          // dos", y contarse a sí misma haría que la barra adelantara al
+          // trabajo real.
+          await avanzar(cred.bases.length > 1 ? `${base.titulo} · ${titulo}` : titulo, true);
+
           try {
-            if (a.notionBorrarArchivados) {
-              for (const id of fila.documentIds) {
-                const borrado = await ctx.runMutation(internal.notion.datos.borrarDocumento, {
+            const r = await procesarPagina(ctx, propietario, cliente, pagina, pageId, titulo, previa, cifras);
+            await ctx.runMutation(internal.notion.datos.guardarPagina, {
+              propietario,
+              databaseId: base.id,
+              pageId,
+              titulo,
+              lastEdited: pagina.last_edited_time,
+              documentIds: r.documentIds,
+              documentoTextoId: r.documentoTextoId,
+            });
+          } catch (exc) {
+            const msg = mensajeDe(exc);
+            cifras.errores.push(`${titulo}: ${msg}`);
+            await ctx.runMutation(internal.notion.datos.guardarPagina, {
+              propietario,
+              databaseId: base.id,
+              pageId,
+              titulo,
+              lastEdited: pagina.last_edited_time,
+              documentIds: previa?.documentIds ?? [],
+              documentoTextoId: previa?.documentoTextoId,
+              error: msg.slice(0, 500),
+            });
+          }
+          procesadas += 1;
+        }
+
+        // Páginas que ya no están EN ESTA BASE: archivadas, excluidas o
+        // borradas. Solo si se recorrió entera: si el reloj la cortó a medias
+        // no se sabe qué no se llegó a ver, y borrar por no haber mirado sería
+        // destruir corpus.
+        if (completa) {
+          for (const fila of conocidas.values()) {
+            if (vistas.has(fila.pageId)) continue;
+            try {
+              if (a.notionBorrarArchivados) {
+                for (const id of fila.documentIds) {
+                  const borrado = await ctx.runMutation(internal.notion.datos.borrarDocumento, {
+                    propietario,
+                    documentId: id,
+                    pageId: fila.pageId,
+                  });
+                  if (borrado) cifras.borrados += 1;
+                }
+                await ctx.runMutation(internal.notion.datos.borrarPagina, {
                   propietario,
-                  documentId: id,
                   pageId: fila.pageId,
                 });
-                if (borrado) cifras.borrados += 1;
+              } else if (fila.error !== "archivada") {
+                await ctx.runMutation(internal.notion.datos.marcarPagina, {
+                  propietario,
+                  pageId: fila.pageId,
+                  error: "archivada",
+                });
               }
-              await ctx.runMutation(internal.notion.datos.borrarPagina, {
-                propietario,
-                pageId: fila.pageId,
-              });
-            } else if (fila.error !== "archivada") {
-              await ctx.runMutation(internal.notion.datos.marcarPagina, {
-                propietario,
-                pageId: fila.pageId,
-                error: "archivada",
-              });
+            } catch (exc) {
+              cifras.errores.push(`${fila.titulo}: al retirar, ${mensajeDe(exc)}`);
             }
-          } catch (exc) {
-            cifras.errores.push(`${fila.titulo}: al retirar, ${mensajeDe(exc)}`);
           }
         }
-      } else {
-        cifras.errores.push("sincronización parcial, continuará en la siguiente");
+        if (parcial) break;
       }
+      if (parcial) cifras.errores.push("sincronización parcial, continuará en la siguiente");
+      // Y el último avance, para que la barra llegue al final antes de cerrar.
+      await avanzar(undefined, true);
 
       await ctx.runMutation(internal.notion.datos.cerrarCorrida, {
         runId,

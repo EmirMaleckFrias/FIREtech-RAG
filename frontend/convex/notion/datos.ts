@@ -21,15 +21,21 @@ export const CORRIDAS_CONSERVADAS = 20;
 // ---------------------------------------------------------------------------
 // Lecturas
 // ---------------------------------------------------------------------------
-/** Todas las páginas conocidas. La tabla tiene una fila por página de la base
- *  de Notion (cientos como mucho), así que se lee entera al empezar la corrida
- *  y se compara en memoria en vez de una consulta por página. */
-export const paginasConocidas = internalQuery({
-  args: { propietario: v.id("users") },
-  handler: async (ctx, { propietario }) =>
+/** Las páginas conocidas DE UNA BASE. Se lee entera al empezar con esa base y
+ *  se compara en memoria en vez de una consulta por página; una base tiene
+ *  cientos de filas pequeñas.
+ *
+ *  Va por base y no por persona porque el cálculo de "qué ha desaparecido" es
+ *  por base: si se comparasen todas juntas, terminar de recorrer `Docs`
+ *  dejaría a las páginas de `Tasks` como no vistas y se borraría su corpus. */
+export const paginasDeBase = internalQuery({
+  args: { propietario: v.id("users"), databaseId: v.string() },
+  handler: async (ctx, { propietario, databaseId }) =>
     await ctx.db
       .query("notionPaginas")
-      .withIndex("porPropietarioYPageId", (q) => q.eq("propietario", propietario))
+      .withIndex("porPropietarioYBase", (q) =>
+        q.eq("propietario", propietario).eq("databaseId", databaseId),
+      )
       .collect(),
 });
 
@@ -49,21 +55,24 @@ export const documentosDe = internalQuery({
   },
 });
 
-/** El documento con ese sha256, si lo hay. Sin índice: el esquema de
- *  `documents` no se amplía con índices desde aquí y la tabla es pequeña (un
- *  documento por fichero, no por fragmento), así que recorrerla cuesta menos
- *  que una petición a Notion. `marcarListo` escribe el hash real del fichero
- *  al terminar la ingesta, y la subida manual lo calcula en el navegador, así
- *  que el campo compara bien contra el hash de un adjunto recién bajado. */
+/** El documento de esa persona con ese sha256, si lo hay. Por índice, y no es
+ *  un detalle: se llama UNA VEZ POR ADJUNTO, así que recorriendo el corpus
+ *  entero (como hacía antes) el coste de una corrida crecía con el cuadrado
+ *  del tamaño del corpus, y con miles de documentos era el primer sitio que se
+ *  atragantaba.
+ *
+ *  `marcarListo` escribe el hash real del fichero al terminar la ingesta, y la
+ *  subida manual lo calcula en el navegador, así que el campo compara bien
+ *  contra el hash de un adjunto recién bajado. */
 export const documentoPorSha256 = internalQuery({
   args: { propietario: v.id("users"), sha256: v.string() },
-  handler: async (ctx, { propietario, sha256 }) => {
-    const suyos = await ctx.db
+  handler: async (ctx, { propietario, sha256 }) =>
+    await ctx.db
       .query("documents")
-      .withIndex("porPropietario", (q) => q.eq("propietario", propietario))
-      .collect();
-    return suyos.find((d) => d.sha256 === sha256) ?? null;
-  },
+      .withIndex("porPropietarioYSha256", (q) =>
+        q.eq("propietario", propietario).eq("sha256", sha256),
+      )
+      .first(),
 });
 
 /** Ids de todos los documentos que trajo Notion, para saber en una sola
@@ -173,6 +182,7 @@ export const cerrarCorrida = internalMutation({
 export const guardarPagina = internalMutation({
   args: {
     propietario: v.id("users"),
+    databaseId: v.string(),
     pageId: v.string(),
     titulo: v.string(),
     lastEdited: v.string(),

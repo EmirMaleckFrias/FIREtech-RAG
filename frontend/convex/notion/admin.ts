@@ -30,7 +30,7 @@ export const sincronizarAhora = mutation({
     if (!cred) {
       throw errorDatos(
         "invalido",
-        "Antes de sincronizar hay que conectar con Notion y elegir la base de datos.",
+        "Antes de sincronizar hay que conectar con Notion y elegir al menos una base de datos.",
       );
     }
     // La última corrida SUYA: que otra persona esté sincronizando no puede
@@ -62,7 +62,6 @@ export const estado = query({
     const u = await usuario(ctx);
     const a = ajustes();
     const conexion = await conexionActual(ctx, u._id);
-    const cred = await credencialesDe(ctx, u._id);
     const corridas = await ctx.db
       .query("notionSincronizaciones")
       .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
@@ -105,14 +104,9 @@ export const estado = query({
             conectadoEn: conexion.conectadoEn,
           }
         : null,
-      // La base con la que se sincroniza, si ya eligió una.
-      base: cred
-        ? {
-            id: cred.databaseId,
-            titulo: conexion?.databaseTitulo ?? null,
-            elegidaEnApp: true,
-          }
-        : null,
+      // Las bases que sincroniza, en el orden en que las eligió. Lista vacía
+      // = conectada pero sin elegir ninguna todavía.
+      bases: conexion?.bases ?? [],
       periodicaMinutos: a.notionSyncMinutes,
       borrarArchivados: a.notionBorrarArchivados,
       paginas: paginas.length,

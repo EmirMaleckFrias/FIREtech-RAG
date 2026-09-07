@@ -26,9 +26,9 @@ export const repartirSincronizaciones = internalMutation({
     const conexiones = await ctx.db.query("notionConexion").collect();
     let agendadas = 0;
     for (const c of conexiones) {
-      // Sin base elegida no hay nada que traer; la acción también lo
+      // Sin ninguna base elegida no hay nada que traer; la acción también lo
       // comprobaría, pero agendarla sería ruido en los logs cada hora.
-      if (!c.databaseId) continue;
+      if (c.bases.length === 0) continue;
       await ctx.scheduler.runAfter(0, internal.notion.sync.sincronizar, {
         propietario: c.conectadoPor,
       });

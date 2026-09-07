@@ -187,7 +187,7 @@ interface NotionBloqueProps {
 function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) {
   const iniciar = useMutation(api.notion.oauth.iniciar);
   const listarBases = useAction(api.notion.oauth.listarBases);
-  const elegirBase = useMutation(api.notion.oauth.elegirBase);
+  const elegirBases = useMutation(api.notion.oauth.elegirBases);
   const desconectar = useMutation(api.notion.oauth.desconectar);
   const sincronizarAhora = useMutation(api.notion.admin.sincronizarAhora);
 
@@ -196,9 +196,10 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
   const [bases, setBases] = useState<BaseNotion[] | null>(null);
   const [basesError, setBasesError] = useState<string | null>(null);
   const [basesCargando, setBasesCargando] = useState(false);
-  /** La administradora pulsó "Cambiar" teniendo ya una base elegida. */
+  /** Pulsó "Cambiar" teniendo ya bases elegidas. */
   const [eligiendo, setEligiendo] = useState(false);
-  const [seleccion, setSeleccion] = useState('');
+  /** Los ids marcados en la lista de casillas, mientras elige. */
+  const [seleccion, setSeleccion] = useState<string[]>([]);
   const [confirmDesconectar, setConfirmDesconectar] = useState(false);
   const [avisosAbiertos, setAvisosAbiertos] = useState(false);
   /** La emergente de Notion está abierta y se espera su respuesta. */
@@ -207,12 +208,12 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
 
   const conexion = estado?.conexion ?? null;
   const conectadoEn = conexion?.conectadoEn ?? null;
-  const base = estado?.base ?? null;
-  const baseId = base?.id ?? null;
-  const baseTitulo = base?.titulo ?? null;
+  /** Las bases que se están sincronizando. Varias a propósito: sus guías
+   *  pueden estar en una y sus protocolos en otra. */
+  const basesElegidas = estado?.bases ?? [];
   const enCurso = estado?.enCurso ?? null;
   const ultima = estado?.ultimas[0] ?? null;
-  const mostrarSelector = conexion !== null && (base === null || eligiendo);
+  const mostrarSelector = conexion !== null && (basesElegidas.length === 0 || eligiendo);
 
   const cargarBases = useCallback(async () => {
     setBasesCargando(true);
@@ -234,7 +235,7 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
     setBasesError(null);
     setEligiendo(false);
     setConfirmDesconectar(false);
-    setSeleccion('');
+    setSeleccion([]);
   }, [conectadoEn]);
 
   // La lista se pide a Notion solo cuando hace falta el desplegable y aún no
@@ -244,29 +245,27 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
     void cargarBases();
   }, [open, mostrarSelector, bases, basesCargando, basesError, cargarBases]);
 
-  // Opciones del desplegable. Si la base en uso no está entre las que Notion
-  // enseña (venía configurada por el equipo técnico), se ofrece igual para
-  // que salga preseleccionada y se pueda conservar.
+  // Opciones de la lista. Una base que ya se sincroniza pero que Notion no
+  // enseña (dejó de compartirse) se ofrece igual, marcada, para que se vea que
+  // está y se pueda desmarcar a conciencia.
   const opciones = useMemo<BaseNotion[]>(() => {
     const lista = bases ?? [];
-    if (baseId !== null && !lista.some((b) => b.id === baseId)) {
-      return [
-        { id: baseId, titulo: baseTitulo ?? 'La configurada por el equipo técnico', ultimaEdicion: '' },
-        ...lista,
-      ];
-    }
-    return lista;
-  }, [bases, baseId, baseTitulo]);
+    const faltan = basesElegidas
+      .filter((e) => !lista.some((b) => b.id === e.id))
+      .map((e) => ({ id: e.id, titulo: e.titulo, ultimaEdicion: '' }));
+    return [...faltan, ...lista];
+  }, [bases, basesElegidas]);
 
-  // Preselección: la base en uso; si no hay y solo se ve una, esa.
+  // Preselección: lo que ya se sincroniza; si no hay nada y Notion solo
+  // comparte una base, esa, que es lo que ella iba a marcar de todas formas.
   useEffect(() => {
     if (bases === null) return;
     setSeleccion((actual) => {
-      if (actual !== '' && opciones.some((b) => b.id === actual)) return actual;
-      if (baseId !== null) return baseId;
-      return opciones.length === 1 ? opciones[0].id : '';
+      if (actual.length > 0) return actual;
+      if (basesElegidas.length > 0) return basesElegidas.map((b) => b.id);
+      return bases.length === 1 ? [bases[0].id] : [];
     });
-  }, [bases, opciones, baseId]);
+  }, [bases, basesElegidas]);
 
   /** Deja de esperar: cierra la emergente si sigue abierta y retira la marca. */
   const cancelarEspera = useCallback(() => {
@@ -356,20 +355,31 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
     return () => window.clearInterval(t);
   }, [esperandoNotion]);
 
+  const alternar = useCallback((id: string) => {
+    setSeleccion((actual) =>
+      actual.includes(id) ? actual.filter((x) => x !== id) : [...actual, id],
+    );
+  }, []);
+
   const guardar = useCallback(async () => {
-    const elegida = opciones.find((b) => b.id === seleccion);
-    if (!elegida) return;
+    // Se manda la selección COMPLETA: la mutación reemplaza la anterior, así
+    // que desmarcar una base es dejar de traer sus cambios (lo ya traído se
+    // conserva, como al desconectar).
+    const elegidas = opciones
+      .filter((b) => seleccion.includes(b.id))
+      .map((b) => ({ databaseId: b.id, titulo: b.titulo }));
+    if (elegidas.length === 0) return;
     setError(null);
     setOcupado('guardar');
     try {
-      await elegirBase({ databaseId: elegida.id, titulo: elegida.titulo });
+      await elegirBases({ bases: elegidas });
       setEligiendo(false);
     } catch (err) {
-      if (!avisarSiEsFatal(err)) setError(mensajeDeError(err, 'No se pudo guardar la base de datos elegida.'));
+      if (!avisarSiEsFatal(err)) setError(mensajeDeError(err, 'No se pudieron guardar las bases de datos elegidas.'));
     } finally {
       setOcupado(null);
     }
-  }, [elegirBase, opciones, seleccion]);
+  }, [elegirBases, opciones, seleccion]);
 
   const sincronizar = useCallback(async () => {
     setError(null);
@@ -643,9 +653,9 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
 
             {mostrarSelector ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <label htmlFor="notion-base" style={{ fontWeight: 600 }}>
-                  Base de datos a sincronizar
-                </label>
+                <span style={{ fontWeight: 600 }} id="notion-bases-titulo">
+                  Bases de datos a sincronizar
+                </span>
                 {bases === null && basesError === null ? (
                   <span className="shimmer-text">Buscando tus bases de datos…</span>
                 ) : basesError !== null ? (
@@ -665,7 +675,7 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                   <div style={FILA}>
                     <span style={CRECE}>
                       Notion no compartió ninguna base de datos con la aplicación. Vuelve a pulsar
-                      "Conectar con Notion" y marca la base que quieres compartir.
+                      "Conectar con Notion" y marca las que quieres compartir.
                     </span>
                     <button
                       type="button"
@@ -678,50 +688,63 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
                     </button>
                   </div>
                 ) : (
-                  <div style={FILA}>
-                    <select
-                      id="notion-base"
-                      className="auth-input"
-                      style={{ fontSize: 13, padding: '6px 8px', ...CRECE }}
-                      value={seleccion}
-                      onChange={(e) => setSeleccion(e.target.value)}
-                      disabled={ocupado !== null}
+                  <>
+                    {/* Casillas y no un desplegable: se pueden marcar varias,
+                        y se ven todas a la vez sin desplegar nada. */}
+                    <ul
+                      className="notion-bases-lista"
+                      role="group"
+                      aria-labelledby="notion-bases-titulo"
                     >
-                      {seleccion === '' && <option value="">Elige una base de datos</option>}
                       {opciones.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.titulo}
-                        </option>
+                        <li key={b.id}>
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={seleccion.includes(b.id)}
+                              onChange={() => alternar(b.id)}
+                              disabled={ocupado !== null}
+                            />
+                            <span>{b.titulo}</span>
+                          </label>
+                        </li>
                       ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="user-act-btn user-act-promote"
-                      disabled={seleccion === '' || ocupado !== null}
-                      onClick={() => void guardar()}
-                    >
-                      {ocupado === 'guardar' ? <IconSpinner size={13} /> : null}
-                      Guardar
-                    </button>
-                    {base !== null && (
+                    </ul>
+                    <div style={FILA}>
+                      <span style={CRECE}>
+                        {seleccion.length === 0
+                          ? 'Marca al menos una.'
+                          : `${plural(seleccion.length, 'base marcada', 'bases marcadas')}.`}
+                      </span>
                       <button
                         type="button"
-                        className="doc-confirm-btn doc-confirm-no"
-                        onClick={() => setEligiendo(false)}
+                        className="user-act-btn user-act-promote"
+                        disabled={seleccion.length === 0 || ocupado !== null}
+                        onClick={() => void guardar()}
                       >
-                        Cancelar
+                        {ocupado === 'guardar' ? <IconSpinner size={13} /> : null}
+                        Guardar
                       </button>
-                    )}
-                  </div>
+                      {basesElegidas.length > 0 && (
+                        <button
+                          type="button"
+                          className="doc-confirm-btn doc-confirm-no"
+                          onClick={() => setEligiendo(false)}
+                        >
+                          Cancelar
+                        </button>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
             ) : (
-              base !== null && (
+              basesElegidas.length > 0 && (
                 <div className="notion-selected-base" style={FILA}>
                   <IconDocument size={18} />
                   <span style={CRECE}>
-                    Base de datos:{' '}
-                    <strong>{base.titulo ?? 'la configurada por el equipo técnico'}</strong>
+                    {basesElegidas.length === 1 ? 'Base de datos: ' : 'Bases de datos: '}
+                    <strong>{basesElegidas.map((b) => b.titulo).join(', ')}</strong>
                   </span>
                   <button
                     type="button"
@@ -735,7 +758,7 @@ function NotionBloque({ open, estado, aviso, onAvisoVisto }: NotionBloqueProps) 
               )
             )}
 
-            {base !== null && !mostrarSelector && filaSincronizacion()}
+            {basesElegidas.length > 0 && !mostrarSelector && filaSincronizacion()}
           </>
         )}
 

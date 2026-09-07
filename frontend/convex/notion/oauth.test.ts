@@ -10,7 +10,7 @@ import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { configurarPausa, type BloqueNotion, type PaginaNotion } from "./api";
-import { MENSAJE_NO_HABILITADA, STATE_VIDA_MS } from "./oauth";
+import { MAX_BASES, MENSAJE_NO_HABILITADA, STATE_VIDA_MS } from "./oauth";
 
 vi.mock("../ingesta/pipeline", async () => {
   const { internalAction } = await import("../_generated/server");
@@ -216,6 +216,7 @@ async function conectar(t: T, userId: Id<"users">, extra: Partial<Doc<"notionCon
       workspaceName: "Clínica Neuro",
       conectadoPor: userId,
       conectadoEn: Date.now(),
+      bases: [],
       ...extra,
     }),
   );
@@ -365,7 +366,7 @@ describe("callback", () => {
       workspaceIcon: "https://img.example/icono.png",
       conectadoPor: id,
     });
-    expect(c.databaseId).toBeUndefined();
+    expect(c.bases).toEqual([]);
     expect(await estados(t)).toEqual([]);
   });
 
@@ -436,16 +437,16 @@ describe("callback", () => {
     expect(await conexiones(t)).toEqual([]);
   });
 
-  test("conectar de nuevo reemplaza la fila: conserva la base si es el mismo espacio y la olvida si es otro", async () => {
+  test("conectar de nuevo reemplaza la fila: conserva las bases si es el mismo espacio y las olvida si es otro", async () => {
     const t = nuevaBase();
     const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
-    await conectar(t, id, { accessToken: "viejo", databaseId: DB, databaseTitulo: "Protocolos" });
+    await conectar(t, id, { accessToken: "viejo", bases: [{ id: DB, titulo: "Protocolos" }] });
 
     let state = await iniciarComo(admin);
     await callback(t, `?code=c&state=${state}`);
     let filas = await conexiones(t);
     expect(filas).toHaveLength(1);
-    expect(filas[0]).toMatchObject({ accessToken: TOKEN_OAUTH, databaseId: DB, databaseTitulo: "Protocolos" });
+    expect(filas[0]).toMatchObject({ accessToken: TOKEN_OAUTH, bases: [{ id: DB, titulo: "Protocolos" }] });
 
     notion.canje = { ...(notion.canje as Record<string, unknown>), workspace_id: "ws-otro", workspace_name: "Otro" };
     state = await iniciarComo(admin);
@@ -453,7 +454,7 @@ describe("callback", () => {
     filas = await conexiones(t);
     expect(filas).toHaveLength(1);
     expect(filas[0]).toMatchObject({ workspaceId: "ws-otro", workspaceName: "Otro" });
-    expect(filas[0].databaseId).toBeUndefined();
+    expect(filas[0].bases).toEqual([]);
   });
 
   test("sin SITE_URL vuelve al origen desde el que se pulsó; sin ninguno, una página que dice que vuelva", async () => {
@@ -522,31 +523,81 @@ describe("listarBases", () => {
   });
 });
 
-describe("elegirBase y desconectar", () => {
-  test("elegirBase guarda el id normalizado y el título; acepta la URL pegada", async () => {
+describe("elegirBases y desconectar", () => {
+  test("elegirBases guarda los ids normalizados y los títulos; acepta la URL pegada", async () => {
     const t = nuevaBase();
+    const OTRA = "b".repeat(32);
     const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
     await conectar(t, id);
-    await admin.mutation(api.notion.oauth.elegirBase, {
-      databaseId: `https://www.notion.so/equipo/Protocolos-${DB}?v=1`,
-      titulo: "  Protocolos clínicos ",
+    await admin.mutation(api.notion.oauth.elegirBases, {
+      bases: [
+        { databaseId: `https://www.notion.so/equipo/Protocolos-${DB}?v=1`, titulo: "  Protocolos clínicos " },
+        { databaseId: OTRA, titulo: "Tareas" },
+      ],
     });
-    expect((await conexiones(t))[0]).toMatchObject({ databaseId: DB, databaseTitulo: "Protocolos clínicos" });
+    expect((await conexiones(t))[0].bases).toEqual([
+      { id: DB, titulo: "Protocolos clínicos" },
+      { id: OTRA, titulo: "Tareas" },
+    ]);
   });
 
-  test("elegirBase sin conexión o con un id que no lo es: invalido", async () => {
+  test("elegirBases reemplaza la selección entera y colapsa duplicados", async () => {
+    const t = nuevaBase();
+    const OTRA = "b".repeat(32);
+    const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
+    await conectar(t, id, { bases: [{ id: DB, titulo: "Protocolos" }, { id: OTRA, titulo: "Tareas" }] });
+    // Se manda solo una: la otra deja de sincronizarse. Y la misma base dos
+    // veces (con y sin guiones) no puede acabar recorriéndose dos veces por
+    // corrida.
+    const conGuiones = `${DB.slice(0, 8)}-${DB.slice(8, 12)}-${DB.slice(12, 16)}-${DB.slice(16, 20)}-${DB.slice(20)}`;
+    await admin.mutation(api.notion.oauth.elegirBases, {
+      bases: [
+        { databaseId: DB, titulo: "Protocolos" },
+        { databaseId: conGuiones, titulo: "Protocolos otra vez" },
+      ],
+    });
+    expect((await conexiones(t))[0].bases).toEqual([{ id: DB, titulo: "Protocolos" }]);
+  });
+
+  test("demasiadas bases a la vez: invalido, y no se guarda ninguna", async () => {
     const t = nuevaBase();
     const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
-    expect(await codigoDe(admin.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "x" }))).toBe("invalido");
+    await conectar(t, id, { bases: [{ id: DB, titulo: "Protocolos" }] });
+    const muchas = Array.from({ length: MAX_BASES + 1 }, (_, i) => ({
+      databaseId: String(i).padStart(32, "0"),
+      titulo: `Base ${i}`,
+    }));
+    expect(await codigoDe(admin.mutation(api.notion.oauth.elegirBases, { bases: muchas }))).toBe("invalido");
+    expect((await conexiones(t))[0].bases).toEqual([{ id: DB, titulo: "Protocolos" }]);
+  });
+
+  test("elegirBases sin conexión o con un id que no lo es: invalido", async () => {
+    const t = nuevaBase();
+    const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
+    expect(
+      await codigoDe(admin.mutation(api.notion.oauth.elegirBases, { bases: [{ databaseId: DB, titulo: "x" }] })),
+    ).toBe("invalido");
     await conectar(t, id);
-    expect(await codigoDe(admin.mutation(api.notion.oauth.elegirBase, { databaseId: "no-es-un-id", titulo: "x" }))).toBe("invalido");
-    expect((await conexiones(t))[0].databaseId).toBeUndefined();
+    // Una sola base mala invalida la selección ENTERA: guardar las buenas y
+    // callarse la mala dejaría a la usuaria creyendo que eligió algo que no
+    // se va a sincronizar.
+    expect(
+      await codigoDe(
+        admin.mutation(api.notion.oauth.elegirBases, {
+          bases: [
+            { databaseId: DB, titulo: "buena" },
+            { databaseId: "no-es-un-id", titulo: "mala" },
+          ],
+        }),
+      ),
+    ).toBe("invalido");
+    expect((await conexiones(t))[0].bases).toEqual([]);
   });
 
   test("desconectar borra la conexión y los states pendientes, y conserva el corpus", async () => {
     const t = nuevaBase();
     const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
-    await conectar(t, id, { databaseId: DB });
+    await conectar(t, id, { bases: [{ id: DB, titulo: "Protocolos" }] });
     await iniciarComo(admin);
     await t.run((ctx) =>
       ctx.db.insert("documents", {
@@ -575,21 +626,25 @@ describe("permisos", () => {
     expect(await lector.query(api.notion.admin.estado, {})).toMatchObject({ conexion: null });
     // Y lo que exige tener conexión propia falla por eso, no por permisos.
     expect(await codigoDe(lector.action(api.notion.oauth.listarBases, {}))).toBe("invalido");
-    expect(await codigoDe(lector.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "x" }))).toBe("invalido");
+    expect(
+      await codigoDe(lector.mutation(api.notion.oauth.elegirBases, { bases: [{ databaseId: DB, titulo: "x" }] })),
+    ).toBe("invalido");
     expect(await codigoDe(lector.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
   });
 
   test("nadie puede tocar la conexión de otra persona, ni un administrador", async () => {
     const t = nuevaBase();
     const { id: anaId } = await alta(t, "ana@airobotix.net", "lector");
-    await conectar(t, anaId, { databaseId: DB });
+    await conectar(t, anaId, { bases: [{ id: DB, titulo: "Protocolos" }] });
     const { como: admin } = await alta(t, "admin@airobotix.net", "admin");
 
     // El administrador no ve la conexión de Ana ni en su estado…
-    expect(await admin.query(api.notion.admin.estado, {})).toMatchObject({ conexion: null, base: null });
+    expect(await admin.query(api.notion.admin.estado, {})).toMatchObject({ conexion: null, bases: [] });
     // …ni puede listar sus bases, ni elegirle una, ni sincronizarla.
     expect(await codigoDe(admin.action(api.notion.oauth.listarBases, {}))).toBe("invalido");
-    expect(await codigoDe(admin.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "x" }))).toBe("invalido");
+    expect(
+      await codigoDe(admin.mutation(api.notion.oauth.elegirBases, { bases: [{ databaseId: DB, titulo: "x" }] })),
+    ).toBe("invalido");
     expect(await codigoDe(admin.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
     // Y "desconectar" no lanza, pero tampoco borra la de Ana: solo la suya,
     // que no existe. Es el caso que un `collect()` sin índice sí habría roto.
@@ -613,7 +668,7 @@ describe("sincronizar con la conexión", () => {
   test("sincroniza con el token de SU conexión", async () => {
     const t = nuevaBase();
     const { id } = await alta(t, "ana@airobotix.net", "lector");
-    await conectar(t, id, { databaseId: DB });
+    await conectar(t, id, { bases: [{ id: DB, titulo: "Protocolos" }] });
     notion.pagina("p1", "Protocolo uno");
 
     const r = await t.action(internal.notion.sync.sincronizar, { propietario: id, forzar: true });
@@ -661,7 +716,7 @@ describe("sincronizar con la conexión", () => {
   test("escribe el avance página a página en la fila running y lo limpia al cerrar", async () => {
     const t = nuevaBase();
     const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
-    await conectar(t, id, { databaseId: DB, databaseTitulo: "Protocolos" });
+    await conectar(t, id, { bases: [{ id: DB, titulo: "Protocolos" }] });
     notion.pagina("p1", "Protocolo uno");
     notion.pagina("p2", "Protocolo dos");
     notion.pagina("p3", "Protocolo tres");
@@ -695,13 +750,16 @@ describe("sincronizar con la conexión", () => {
     const e = await admin.query(api.notion.admin.estado, {});
     expect(e.enCurso).toMatchObject({ paginasTotal: 3, paginasProcesadas: 1, paginaActual: "Protocolo dos", nuevos: 1 });
     expect(e.conexion).toMatchObject({ workspaceName: "Clínica Neuro" });
-    expect(e.base).toEqual({ id: DB, titulo: "Protocolos", elegidaEnApp: true });
+    expect(e.bases).toEqual([{ id: DB, titulo: "Protocolos" }]);
     expect(JSON.stringify(e)).not.toContain(TOKEN_OAUTH);
 
     abrir();
     expect(await corriendo).toMatchObject({ estado: "ok", paginas: 3, nuevos: 3 });
     const [cerrada] = await corridas(t);
-    expect(cerrada).toMatchObject({ estado: "ok", paginasTotal: 3, paginasProcesadas: 2, nuevos: 3 });
+    // 3 de 3, no 2: al cerrar se escribe el avance final. Antes el último se
+    // escribía ANTES de procesar la última página y no había ninguno después,
+    // así que la corrida terminada se quedaba en "2 de 3" para siempre.
+    expect(cerrada).toMatchObject({ estado: "ok", paginasTotal: 3, paginasProcesadas: 3, nuevos: 3 });
     expect(cerrada.paginaActual).toBeUndefined();
     expect((await admin.query(api.notion.admin.estado, {})).enCurso).toBeNull();
   });
@@ -716,26 +774,35 @@ describe("estado", () => {
     const { como: admin } = await alta(t, "admin@airobotix.net", "admin");
     vi.stubEnv("NOTION_CLIENT_ID", "");
     const e = await admin.query(api.notion.admin.estado, {});
-    expect(e).toMatchObject({ habilitada: false, conexion: null, base: null, enCurso: null, documentos: 0 });
+    expect(e).toMatchObject({ habilitada: false, conexion: null, bases: [], enCurso: null, documentos: 0 });
     expect(JSON.stringify(e)).not.toContain(CLIENT_SECRET);
   });
 
-  test("habilitada sin conexión; conectada sin base; con base por variable preseleccionada", async () => {
+  test("habilitada sin conexión; conectada sin bases; y con las bases que ELLA elige", async () => {
     const t = nuevaBase();
     const { id, como: admin } = await alta(t, "admin@airobotix.net", "admin");
-    expect(await admin.query(api.notion.admin.estado, {})).toMatchObject({ habilitada: true, conexion: null, base: null });
+    expect(await admin.query(api.notion.admin.estado, {})).toMatchObject({ habilitada: true, conexion: null, bases: [] });
 
     await conectar(t, id, { workspaceIcon: "https://img.example/i.png" });
     let e = await admin.query(api.notion.admin.estado, {});
     expect(e.conexion).toMatchObject({ workspaceName: "Clínica Neuro", workspaceIcon: "https://img.example/i.png" });
-    expect(e.base).toBeNull();
+    expect(e.bases).toEqual([]);
     expect(await codigoDe(admin.mutation(api.notion.admin.sincronizarAhora, {}))).toBe("invalido");
 
-    // La base solo aparece cuando ELLA la elige: ya no hay variable que la
-    // rellene por detrás.
-    await admin.mutation(api.notion.oauth.elegirBase, { databaseId: DB, titulo: "Protocolos" });
+    // Las bases solo aparecen cuando ELLA las elige, y pueden ser varias: ya
+    // no hay variable del despliegue que rellene nada por detrás.
+    const OTRA = "b".repeat(32);
+    await admin.mutation(api.notion.oauth.elegirBases, {
+      bases: [
+        { databaseId: DB, titulo: "Protocolos" },
+        { databaseId: OTRA, titulo: "Tareas" },
+      ],
+    });
     e = await admin.query(api.notion.admin.estado, {});
-    expect(e.base).toEqual({ id: DB, titulo: "Protocolos", elegidaEnApp: true });
+    expect(e.bases).toEqual([
+      { id: DB, titulo: "Protocolos" },
+      { id: OTRA, titulo: "Tareas" },
+    ]);
     expect(await admin.mutation(api.notion.admin.sincronizarAhora, {})).toEqual({ ok: true });
   });
 
@@ -745,7 +812,7 @@ describe("estado", () => {
     vi.stubEnv("NOTION_TOKEN", TOKEN_ENTORNO);
     vi.stubEnv("NOTION_DATABASE_ID", DB);
     const e = await admin.query(api.notion.admin.estado, {});
-    expect(e).toMatchObject({ conexion: null, base: null });
+    expect(e).toMatchObject({ conexion: null, bases: [] });
     expect(JSON.stringify(e)).not.toContain(TOKEN_ENTORNO);
   });
 });

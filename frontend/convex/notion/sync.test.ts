@@ -238,8 +238,7 @@ async function nuevaBase(): Promise<T> {
       workspaceName: "Espacio de prueba",
       conectadoPor: userId,
       conectadoEn: 1,
-      databaseId: DB,
-      databaseTitulo: "Protocolos",
+      bases: [{ id: DB, titulo: "Protocolos" }],
     });
     return userId;
   });
@@ -646,7 +645,7 @@ describe("autoexclusión", () => {
     // Conectada pero sin base: no hay nada que traer.
     await t.run(async (ctx) => {
       const c = (await ctx.db.query("notionConexion").first())!;
-      await ctx.db.patch(c._id, { databaseId: undefined });
+      await ctx.db.patch(c._id, { bases: [] });
     });
     expect(await sincronizar(t)).toEqual({ estado: "apagado" });
     // Y sin conexión ninguna: tampoco. Ya no hay respaldo por variables de
@@ -673,7 +672,7 @@ describe("autoexclusión", () => {
       });
       await ctx.db.insert("notionConexion", {
         accessToken: TOKEN, botId: "bot2", workspaceId: "ws", workspaceName: "Otro",
-        conectadoPor: userId, conectadoEn: 1, databaseId: DB, databaseTitulo: "Protocolos",
+        conectadoPor: userId, conectadoEn: 1, bases: [{ id: DB, titulo: "Protocolos" }],
       });
       return userId;
     });
@@ -769,7 +768,7 @@ describe("el panel de cada persona", () => {
     await sincronizar(t);
     const e = await comoDuena(t).query(api.notion.admin.estado, {});
     expect(e).toMatchObject({
-      base: { id: DB, elegidaEnApp: true, titulo: "Protocolos" },
+      bases: [{ id: DB, titulo: "Protocolos" }],
       conexion: { workspaceName: "Espacio de prueba" },
       periodicaMinutos: 60,
       paginas: 2,
@@ -784,7 +783,7 @@ describe("el panel de cada persona", () => {
     // Un administrador sin conexión ve su propio estado vacío, no el de ella.
     const admin = await alta(t, "admin@airobotix.net", "admin");
     const suyo = await admin.query(api.notion.admin.estado, {});
-    expect(suyo).toMatchObject({ conexion: null, base: null, paginas: 0, documentos: 0, ultimas: [] });
+    expect(suyo).toMatchObject({ conexion: null, bases: [], paginas: 0, documentos: 0, ultimas: [] });
   });
 
   test("el cron reparte UNA sincronización por cuenta conectada", async () => {
@@ -797,14 +796,14 @@ describe("el panel de cada persona", () => {
       });
       await ctx.db.insert("notionConexion", {
         accessToken: TOKEN, botId: "b2", workspaceId: "w2", workspaceName: "Otro",
-        conectadoPor: conBase, conectadoEn: 1, databaseId: DB,
+        conectadoPor: conBase, conectadoEn: 1, bases: [{ id: DB, titulo: "Protocolos" }],
       });
       const sinBase = await ctx.db.insert("users", {
         email: "sinbase@airobotix.net", rol: "lector", bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1,
       });
       await ctx.db.insert("notionConexion", {
         accessToken: TOKEN, botId: "b3", workspaceId: "w3", workspaceName: "Tercero",
-        conectadoPor: sinBase, conectadoEn: 1,
+        conectadoPor: sinBase, conectadoEn: 1, bases: [],
       });
     });
 

@@ -55,6 +55,14 @@ import { ClienteNotion, normalizarId, type BaseNotion } from "./api";
  *  permisos y elegir páginas; más sería dejar estados vivos sin motivo. */
 export const STATE_VIDA_MS = 10 * 60_000;
 
+/** Cuántas bases puede sincronizar una persona a la vez. No es un límite de
+ *  Notion: es que cada base se recorre entera en cada corrida, y la corrida
+ *  tiene 20 minutos (ver `LIMITE_CORRIDA_MS` en sync.ts). Con 20 hay sitio de
+ *  sobra para un espacio de trabajo organizado y sigue habiendo un número
+ *  arriba, que es lo que evita que una selección accidental de cien bases deje
+ *  la sincronización dando vueltas para siempre. */
+export const MAX_BASES = 20;
+
 const URL_AUTORIZAR = "https://api.notion.com/v1/oauth/authorize";
 const URL_TOKEN = "https://api.notion.com/v1/oauth/token";
 
@@ -78,9 +86,15 @@ export function redirectUri(a: Ajustes): string {
 // ---------------------------------------------------------------------------
 // Credenciales efectivas
 // ---------------------------------------------------------------------------
+export interface BaseElegida {
+  id: string;
+  titulo: string;
+}
+
 export interface Credenciales {
   token: string;
-  databaseId: string;
+  /** Las bases que sincroniza esa persona, en el orden en que las eligió. */
+  bases: BaseElegida[];
 }
 
 /** La conexión de esa persona, si la hay. */
@@ -94,15 +108,16 @@ export async function conexionActual(
     .first();
 }
 
-/** Con qué token y sobre qué base sincroniza esa persona. `null` = no hay
- *  nada que sincronizar: no ha conectado, o conectó y aún no eligió base. */
+/** Con qué token y sobre qué bases sincroniza esa persona. `null` = no hay
+ *  nada que sincronizar: no ha conectado, o conectó y aún no eligió ninguna
+ *  base. */
 export async function credencialesDe(
   ctx: QueryCtx | MutationCtx,
   propietario: Id<"users">,
 ): Promise<Credenciales | null> {
   const conexion = await conexionActual(ctx, propietario);
-  if (!conexion || !conexion.databaseId) return null;
-  return { token: conexion.accessToken, databaseId: conexion.databaseId };
+  if (!conexion || conexion.bases.length === 0) return null;
+  return { token: conexion.accessToken, bases: conexion.bases };
 }
 
 /** Para la acción de sincronización. Interna: el token no sale al cliente. */
@@ -111,14 +126,14 @@ export const credenciales = internalQuery({
   handler: async (ctx, { propietario }) => await credencialesDe(ctx, propietario),
 });
 
-/** Quiénes tienen hoy una conexión con base elegida, para que el cron lance
- *  una sincronización por persona en vez de una sola global. Interna y sin
- *  tokens: devuelve solo ids de cuenta. */
+/** Quiénes tienen hoy una conexión con alguna base elegida, para que el cron
+ *  lance una sincronización por persona en vez de una sola global. Interna y
+ *  sin tokens: devuelve solo ids de cuenta. */
 export const propietariosConectados = internalQuery({
   args: {},
   handler: async (ctx): Promise<Id<"users">[]> => {
     const todas = await ctx.db.query("notionConexion").collect();
-    return todas.filter((c) => Boolean(c.databaseId)).map((c) => c.conectadoPor);
+    return todas.filter((c) => c.bases.length > 0).map((c) => c.conectadoPor);
   },
 });
 
@@ -225,10 +240,10 @@ export const consumirState = internalMutation({
 });
 
 /** Guarda la conexión DE ESA PERSONA, reemplazando la suya anterior si la
- *  había y sin tocar las de las demás. La base elegida se conserva solo si es
- *  el MISMO espacio de trabajo: con otro espacio, la base anterior no existe
- *  o no es accesible, y dejarla preseleccionada haría fallar la primera
- *  sincronización con un motivo confuso. */
+ *  había y sin tocar las de las demás. Las bases elegidas se conservan solo si
+ *  es el MISMO espacio de trabajo: con otro espacio no existen o no son
+ *  accesibles, y dejarlas puestas haría fallar la primera sincronización con
+ *  un motivo confuso. */
 export const guardarConexion = internalMutation({
   args: {
     accessToken: v.string(),
@@ -249,8 +264,7 @@ export const guardarConexion = internalMutation({
       ...datos,
       conectadoPor: userId,
       conectadoEn: Date.now(),
-      databaseId: mismoEspacio?.databaseId,
-      databaseTitulo: mismoEspacio?.databaseTitulo,
+      bases: mismoEspacio?.bases ?? [],
     });
   },
 });
@@ -393,15 +407,38 @@ export const listarBases = action({
   },
 });
 
-export const elegirBase = mutation({
-  args: { databaseId: v.string(), titulo: v.string() },
-  handler: async (ctx, { databaseId, titulo }) => {
+/** Fija QUÉ bases sincroniza: la selección completa, no una sola. Se manda
+ *  entera y reemplaza la anterior, que es como funciona la lista de casillas
+ *  del panel; quitar una base de la lista deja de traer sus cambios pero NO
+ *  borra lo ya traído, igual que desconectar.
+ *
+ *  Se acepta el id con o sin guiones y también la URL de la base pegada tal
+ *  cual (`normalizarId`). Los duplicados se colapsan: la misma base dos veces
+ *  la recorrería dos veces por corrida. */
+export const elegirBases = mutation({
+  args: { bases: v.array(v.object({ databaseId: v.string(), titulo: v.string() })) },
+  handler: async (ctx, { bases }) => {
     const u = await usuario(ctx);
     const conexion = await conexionActual(ctx, u._id);
     if (!conexion) throw errorDatos("invalido", "Primero conecta con Notion.");
-    const id = normalizarId(databaseId);
-    if (!/^[0-9a-f]{32}$/.test(id)) throw errorDatos("invalido", "Esa base de datos no se reconoce.");
-    await ctx.db.patch(conexion._id, { databaseId: id, databaseTitulo: titulo.trim() || "Sin título" });
+    if (bases.length > MAX_BASES) {
+      throw errorDatos(
+        "invalido",
+        `Son demasiadas bases de datos a la vez (máximo ${MAX_BASES}).`,
+      );
+    }
+    const vistas = new Set<string>();
+    const limpias: BaseElegida[] = [];
+    for (const b of bases) {
+      const id = normalizarId(b.databaseId);
+      if (!/^[0-9a-f]{32}$/.test(id)) {
+        throw errorDatos("invalido", "Una de las bases de datos no se reconoce.");
+      }
+      if (vistas.has(id)) continue;
+      vistas.add(id);
+      limpias.push({ id, titulo: b.titulo.trim() || "Sin título" });
+    }
+    await ctx.db.patch(conexion._id, { bases: limpias });
     return { ok: true as const };
   },
 });

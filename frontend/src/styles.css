@@ -4643,6 +4643,17 @@ button.doc-badge-failed:active {
 .notion-workspace strong, .notion-selected-base strong { color: var(--text); overflow-wrap: anywhere; }
 .notion-selected-base { padding: 11px; border: 1px solid var(--border); border-radius: 10px; background: var(--inset); }
 .notion-selected-base > svg { flex-shrink: 0; }
+/* Lista de bases de Notion a sincronizar: casillas, porque se pueden marcar
+   varias (sus guias en una base y sus protocolos en otra). Con scroll propio:
+   un espacio de trabajo grande comparte muchas bases y la tarjeta no puede
+   crecer sin fin dentro del panel. */
+.notion-bases-lista { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 5px; list-style: none; max-height: 168px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--inset); }
+.notion-bases-lista label { display: flex; align-items: center; gap: 8px; padding: 6px 7px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.notion-bases-lista label:hover { background: var(--hover); }
+.notion-bases-lista input { flex-shrink: 0; margin: 0; accent-color: var(--accent); }
+.notion-bases-lista span { color: var(--text); overflow-wrap: anywhere; }
+.notion-bases-lista input:disabled + span { opacity: 0.55; }
+
 .notion-card-footer { display: flex; align-items: flex-start; gap: 6px; padding: 10px 18px; border-top: 1px solid var(--border); background: var(--inset); font-size: 10px; }
 .notion-card-footer svg { flex-shrink: 0; margin-top: 2px; }
 @media (max-width: 380px) {

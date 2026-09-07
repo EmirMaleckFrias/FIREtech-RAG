@@ -318,13 +318,9 @@ export interface EstadoNotion {
     workspaceIcon: string | null;
     conectadoEn: number;
   } | null;
-  /** La base con la que se sincroniza, o null si aún no hay ninguna. */
-  base: {
-    id: string;
-    /** null cuando la base viene de la configuración del equipo técnico. */
-    titulo: string | null;
-    elegidaEnApp: boolean;
-  } | null;
+  /** Las bases que se sincronizan, en el orden en que se eligieron. Vacía =
+   *  conectada pero sin elegir ninguna todavía. */
+  bases: Array<{ id: string; titulo: string }>;
   periodicaMinutos: number;
   borrarArchivados: boolean;
   paginas: number;

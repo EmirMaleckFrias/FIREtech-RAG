@@ -193,7 +193,13 @@ export default defineSchema({
     // porque no hay ni una lectura legítima que cruce corpus.
     .index("porPropietarioYNombre", ["propietario", "fileName"])
     .index("porPropietario", ["propietario"])
-    .index("porPropietarioYEstado", ["propietario", "status"]),
+    .index("porPropietarioYEstado", ["propietario", "status"])
+    // Para el dedupe de adjuntos de Notion: el mismo fichero, venga de otra
+    // página o de una subida manual, no se indexa dos veces. Antes esto
+    // recorría TODOS los documentos de la persona una vez por adjunto, o sea
+    // cuadrático sobre el tamaño del corpus; con miles de documentos y muchos
+    // adjuntos era el primer sitio que se atragantaba.
+    .index("porPropietarioYSha256", ["propietario", "sha256"]),
 
   // Una fila por página de la base de Notion que se ha sincronizado. Es la
   // memoria que permite saltar páginas sin cambios (`lastEdited` es el
@@ -203,6 +209,11 @@ export default defineSchema({
   notionPaginas: defineTable({
     // De quién es esta sincronización: cada persona conecta su propio Notion.
     propietario: v.id("users"),
+    // De qué base salió. Es necesario, no informativo: al terminar de recorrer
+    // una base se retira del índice lo que ya no está en ELLA, y sin este
+    // campo las páginas de las otras bases parecerían desaparecidas y se
+    // borraría su corpus. Ver `notion/sync.ts`.
+    databaseId: v.string(),
     pageId: v.string(),
     titulo: v.string(),
     lastEdited: v.string(),
@@ -216,7 +227,9 @@ export default defineSchema({
     // está apagado y la página ya no está en la base. Una fila con error se
     // reintenta en la siguiente corrida aunque `lastEdited` no cambie.
     error: v.optional(v.string()),
-  }).index("porPropietarioYPageId", ["propietario", "pageId"]),
+  })
+    .index("porPropietarioYPageId", ["propietario", "pageId"])
+    .index("porPropietarioYBase", ["propietario", "databaseId"]),
 
   // Corridas de la sincronización con Notion, para el bloque de estado que ve
   // el administrador. Se conservan solo las últimas 20 (ver notion/datos.ts).
@@ -259,10 +272,16 @@ export default defineSchema({
     workspaceIcon: v.optional(v.string()),
     conectadoPor: v.id("users"),
     conectadoEn: v.number(),
-    // La base elegida por la administradora en el desplegable. Sin ella la
-    // conexión existe pero no hay nada que sincronizar.
-    databaseId: v.optional(v.string()),
-    databaseTitulo: v.optional(v.string()),
+    // Las bases de datos que ha elegido sincronizar. VARIAS a propósito: una
+    // persona puede tener sus guías en una base y sus protocolos en otra
+    // (`Docs` y `Tasks`, por ejemplo), y obligarla a elegir una sola era una
+    // limitación de esta aplicación, no de Notion. Lista vacía = conectada
+    // pero sin nada que sincronizar todavía.
+    //
+    // Va como array y no como tabla aparte porque son un puñado por persona y
+    // siempre se leen y se reemplazan juntas (el desplegable manda la
+    // selección completa).
+    bases: v.array(v.object({ id: v.string(), titulo: v.string() })),
   }).index("porUsuario", ["conectadoPor"]),
 
   // Estados pendientes del OAuth de Notion: uno por clic en "Conectar con
