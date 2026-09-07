@@ -1,15 +1,15 @@
 import { useMemo, useState } from 'react';
-import { filasCobertura, parcial } from '../lib/cobertura';
+import { filasCobertura } from '../lib/cobertura';
 import { Markdown, type CitationRef } from '../lib/markdown';
-import { etiquetaFase, hopEnCurso, hopFallido, puntosDelPlan } from '../lib/mensajes';
-import type { ChatMessage, Hop } from '../types';
+import { puntosDelPlan } from '../lib/mensajes';
+import type { ChatMessage } from '../types';
 import { CoberturaPregunta, PlanEnVivo } from './Cobertura';
+import { LineaDeTiempo, ResumenPasos } from './Pasos';
 import {
   IconAlert,
   IconChevronDown,
   IconDocument,
   IconSearch,
-  IconSpinner,
   IconThumbDown,
   IconThumbUp,
 } from './icons';
@@ -23,22 +23,6 @@ interface MessageItemProps {
   feedbackError?: string;
   onCitation: (msgLocalId: string, ref: CitationRef) => void;
   onShowSources: (msgLocalId: string) => void;
-}
-
-/** Texto a la derecha de una consulta en la lista de busquedas.
- *
- *  Un hop antiguo (solo n y query) no lleva nada. Uno fallido dice que no se
- *  pudo comprobar, que no es lo mismo que "sin resultados": lo segundo afirma
- *  que se busco y no estaba. El hop del inventario (cubierto con 0
- *  resultados) tampoco dice "sin resultados", porque no buscaba fragmentos. */
-function detalleHop(h: Hop, enCurso: boolean): string | null {
-  if (hopEnCurso(h, enCurso)) return 'buscando';
-  if (hopFallido(h, enCurso)) return 'no se pudo comprobar';
-  if (parcial(h)) return 'busqueda incompleta, sin resultados';
-  if (h.estado === 'sin_resultados') return 'sin resultados';
-  if (typeof h.resultados !== 'number') return null;
-  if (h.resultados === 0) return h.estado === 'cubierto' ? null : 'sin resultados';
-  return `${h.resultados} ${h.resultados === 1 ? 'fragmento' : 'fragmentos'}`;
 }
 
 export function MessageItem({
@@ -81,8 +65,10 @@ export function MessageItem({
   // Con plan, el bloque de razonamiento existe desde que llega el plan (antes
   // del primer hop) y en vivo muestra los puntos con su estado en vez de la
   // lista cruda de consultas.
-  const mostrarRazonamiento = msg.hops.length > 0 || (enCurso && variasPartes);
-  const fase = etiquetaFase(msg.estado, variasPartes);
+  // En curso se enseña desde el primer instante: los pasos (entender, buscar,
+  // redactar, comprobar) van apareciendo según ocurren, aunque aún no haya
+  // ninguna búsqueda. Cerrado, solo si hubo búsquedas que contar.
+  const mostrarRazonamiento = enCurso || msg.hops.length > 0;
 
   return (
     <div className={`msg msg-assistant ${isPanelTarget ? 'msg-panel-target' : ''}`}>
@@ -98,23 +84,19 @@ export function MessageItem({
         */}
         {mostrarRazonamiento && (
           <div className={`reasoning ${enCurso ? 'reasoning-live' : 'reasoning-done'}`}>
-            {enCurso ? (
-              <div className="reasoning-head">
-                <IconSpinner size={13} />
-                <span className="shimmer-text">{fase}</span>
-              </div>
-            ) : (
+            {/* En vivo, la fase la dice la propia línea de tiempo (el paso en
+                curso lleva el spinner y el texto en movimiento): una cabecera
+                encima repetía "Redactando" dos veces seguidas. */}
+            {enCurso ? null : (
               <button
                 type="button"
                 className="reasoning-toggle"
                 aria-expanded={hopsOpen}
                 onClick={() => setHopsOpen((v) => !v)}
+                title="Ver los pasos de esta respuesta"
               >
                 <IconSearch size={12} />
-                <span>
-                  {msg.hops.length}{' '}
-                  {msg.hops.length === 1 ? 'búsqueda realizada' : 'búsquedas realizadas'}
-                </span>
+                <ResumenPasos msg={msg} />
                 <IconChevronDown size={13} className="reasoning-chevron" />
               </button>
             )}
@@ -123,37 +105,20 @@ export function MessageItem({
               aria-hidden={!showHops}
             >
               <div className="reasoning-clip">
-                {enCurso && variasPartes ? (
-                  <PlanEnVivo plan={msg.plan} hops={msg.hops} enCurso={enCurso} />
-                ) : (
-                  <div className="reasoning-steps">
-                    {msg.hops.map((h, idx) => {
-                      const detalle = detalleHop(h, enCurso);
-                      return (
-                        <div
-                          key={`${h.n}-${h.query}`}
-                          className="reasoning-step"
-                          style={{ animationDelay: `${Math.min(idx, 8) * 40}ms` }}
-                        >
-                          {hopEnCurso(h, enCurso) ? <IconSpinner size={12} /> : <IconSearch size={12} />}
-                          <code className="reasoning-query">{h.query}</code>
-                          {detalle !== null && <span className="reasoning-count">{detalle}</span>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                {/* Los pasos del turno (lib/pasos.ts). Con varias partes, el
+                    plan en vivo cuelga del paso de buscar; si no, cada
+                    búsqueda es una fila de herramienta con sus documentos. */}
+                <LineaDeTiempo
+                  msg={msg}
+                  enCurso={enCurso}
+                  cuerpoBusqueda={
+                    enCurso && variasPartes ? (
+                      <PlanEnVivo plan={msg.plan} hops={msg.hops} enCurso={enCurso} />
+                    ) : undefined
+                  }
+                />
               </div>
             </div>
-          </div>
-        )}
-
-        {/* Fase sin bloque de razonamiento: pensando antes del plan, o
-            redactando/revisando una pregunta que no fue a los documentos. */}
-        {enCurso && !mostrarRazonamiento && (
-          <div className="thinking">
-            <IconSpinner size={13} />
-            <span className="shimmer-text">{fase}</span>
           </div>
         )}
 

@@ -277,3 +277,34 @@ export function IconMinusCircle({ size = 14, ...props }: IconProps) {
     </svg>
   );
 }
+
+/** Bombilla: el paso de pensar o entender, en la línea de tiempo del turno. */
+export function IconBulb({ size = 14, ...props }: IconProps) {
+  return (
+    <svg {...base(size, props)}>
+      <path d="M9 18h6" />
+      <path d="M10 21h4" />
+      <path d="M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1.1 2h5c.1-.8.5-1.5 1.1-2A6 6 0 0 0 12 3z" />
+    </svg>
+  );
+}
+
+/** Pluma: el paso de redactar. */
+export function IconPen({ size = 14, ...props }: IconProps) {
+  return (
+    <svg {...base(size, props)}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+/** Escudo con tic: el paso de comprobar cada afirmación. */
+export function IconShieldCheck({ size = 14, ...props }: IconProps) {
+  return (
+    <svg {...base(size, props)}>
+      <path d="M12 3 4.5 6v5.2c0 4.5 3.2 8.2 7.5 9.8 4.3-1.6 7.5-5.3 7.5-9.8V6L12 3z" />
+      <path d="m9 12 2 2 4-4" />
+    </svg>
+  );
+}

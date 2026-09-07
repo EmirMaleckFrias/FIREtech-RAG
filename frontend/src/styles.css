@@ -978,20 +978,6 @@ textarea {
   min-width: 0;
 }
 
-/* indicador "pensando" antes del primer hop */
-.thinking {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 4px 0;
-  color: var(--text-2);
-  font-size: 13.5px;
-}
-
-.thinking svg {
-  color: var(--accent);
-}
-
 /* caret de escritura: fino y parpadeante */
 .caret {
   display: inline-block;
@@ -5583,4 +5569,265 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
   .biblio-cabecera { padding: 13px 14px 11px; }
   .biblio-orden { margin-left: 0; }
   .biblio-rejilla { grid-template-columns: 1fr; }
+}
+
+/* ----------------------------------------------------------------------
+   7c. Línea de tiempo del turno (components/Pasos.tsx)
+
+   Los pasos con nombre cuelgan de un riel vertical; cada búsqueda es una
+   fila de herramienta con icono, nombre, separadores verticales (no un
+   carácter), las monedas de sus documentos y su recuento. Las monedas
+   reutilizan la paleta de formatos de la biblioteca (--fmt-*), que ya
+   existe en los dos temas. Todo en gris salvo lo que cambia: el paso en
+   curso y el color del formato.
+   ---------------------------------------------------------------------- */
+.tl {
+  margin: 0;
+  padding: 9px 0 2px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tl-paso {
+  position: relative;
+  padding: 3px 0 3px 24px;
+  animation: hop-in 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* el riel: de icono a icono, no bajo el último */
+.tl-paso:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 7.5px;
+  top: 21px;
+  bottom: -4px;
+  width: 1px;
+  background: var(--border);
+}
+
+.tl-fila {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.tl-cabecera .tl-icono {
+  position: absolute;
+  left: 0;
+  top: 5px;
+}
+
+.tl-icono {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.tl-en_curso .tl-cabecera .tl-icono {
+  color: var(--accent);
+}
+
+.tl-hecho .tl-cabecera .tl-icono {
+  color: var(--green);
+}
+
+.tl-titulo {
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.tl-en_curso .tl-titulo {
+  color: var(--text);
+}
+
+.tl-pendiente .tl-titulo,
+.tl-pendiente .tl-detalle {
+  color: var(--text-3);
+}
+
+.tl-detalle,
+.tl-meta {
+  color: var(--text-3);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* separador vertical entre piezas de una misma fila */
+.tl-sep {
+  display: inline-block;
+  width: 1px;
+  height: 11px;
+  flex-shrink: 0;
+  background: var(--border);
+}
+
+.tl-anidado {
+  margin: 4px 0 2px;
+}
+
+.tl-herramientas {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.tl-herramienta {
+  animation: hop-in 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tl-herramienta .tl-fila {
+  font-size: 12px;
+}
+
+.tl-nombre {
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+
+.tl-buscando .tl-icono {
+  color: var(--accent);
+}
+
+.tl-fallo .tl-meta {
+  color: var(--amber);
+}
+
+.tl-consulta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 46%;
+}
+
+.tl-tiempo {
+  margin-left: auto;
+  padding-left: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+/* qué se buscaba: la viñeta anidada bajo la herramienta */
+.tl-vineta {
+  position: relative;
+  margin: 1px 0 0 23px;
+  padding-left: 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+.tl-vineta::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.62em;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+/* monedas: los documentos de una búsqueda, apiladas como los favicons de un
+   navegador, con la sigla de su formato en el color de la biblioteca */
+.monedas {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.moneda {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--surface);
+  font-size: 6.5px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: #fff;
+  background: var(--text-3);
+}
+
+.moneda + .moneda {
+  margin-left: -6px;
+}
+
+/* en vivo la tarjeta ya tiene su relleno: la lista no añade el de arriba */
+.reasoning-live .tl {
+  padding-top: 2px;
+}
+
+.moneda-pdf { background: var(--fmt-pdf); }
+.moneda-word { background: var(--fmt-word); }
+.moneda-hoja { background: var(--fmt-hoja); }
+.moneda-imagen { background: var(--fmt-imagen); }
+.moneda-texto { background: var(--fmt-texto); }
+
+.moneda-neutra {
+  background: var(--hover);
+  color: var(--text-2);
+  border-color: var(--border);
+}
+
+.moneda-resto {
+  background: var(--surface);
+  color: var(--text-3);
+  border-color: var(--border);
+  font-size: 8px;
+}
+
+/* el resumen del turno cerrado, en el botón que despliega los pasos */
+.resumen-pasos {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.resumen-pieza {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+/* dentro del bloque colapsado el riel ya no hace falta encima: lo hace el
+   propio bloque; se conserva el sangrado */
+.reasoning-done .tl {
+  margin-left: 5px;
+  padding: 8px 2px 4px 10px;
+  border-left: 2px solid var(--border);
+}
+
+@media (max-width: 640px) {
+  .tl-consulta {
+    max-width: 38%;
+  }
+  .tl-tiempo {
+    display: none;
+  }
 }
