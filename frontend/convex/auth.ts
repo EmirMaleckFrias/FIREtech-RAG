@@ -25,15 +25,19 @@ function normalizarCorreo(valor: unknown): string {
   return typeof valor === "string" ? valor.trim().toLowerCase() : "";
 }
 
-/** Si el correo pertenece al dominio permitido.
+/** Si el correo pertenece a ALGUNO de los dominios permitidos.
  *
  *  La comprobación es sobre el sufijo `@dominio`, no un `includes`: sin la
- *  arroba, "airobotix.net.atacante.com" pasaría. */
-export function correoPermitido(correo: string, dominio: string): boolean {
+ *  arroba, "airobotix.net.atacante.com" pasaría. Una lista vacía no permite
+ *  nada, y un dominio vacío dentro de la lista se ignora: si contara, dejaría
+ *  pasar cualquier correo. */
+export function correoPermitido(correo: string, dominios: readonly string[]): boolean {
   const c = normalizarCorreo(correo);
-  const d = dominio.trim().toLowerCase();
-  if (!c || !d) return false;
-  return c.endsWith(`@${d}`);
+  if (!c) return false;
+  return dominios.some((crudo) => {
+    const d = crudo.trim().toLowerCase().replace(/^@/, "");
+    return d !== "" && c.endsWith(`@${d}`);
+  });
 }
 
 /** Google solo se ofrece si el despliegue tiene sus credenciales.
@@ -79,10 +83,9 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
       //    entrar: si mañana se cambia el dominio permitido, una cuenta
       //    antigua fuera de él deja de poder entrar, en vez de quedarse
       //    dentro para siempre por haberse creado antes.
-      if (correo && !correoPermitido(correo, a.dominioPermitido)) {
-        throw new Error(
-          `Solo se permiten correos del dominio ${a.dominioPermitido}.`,
-        );
+      if (correo && !correoPermitido(correo, a.dominiosPermitidos)) {
+        const lista = a.dominiosPermitidos.map((d) => `@${d}`).join(" o ");
+        throw new Error(`Solo se permiten correos ${lista}.`);
       }
 
       if (args.existingUserId) {

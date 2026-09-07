@@ -6,18 +6,27 @@
 //   compartir. Quién está dentro lo dice useConvexAuth().
 // - Los errores llegan estructurados (ver lib/errores.ts): desaparecen las
 //   traducciones por comparación de cadenas en inglés.
-// - El dominio permitido se comprueba en cliente ANTES de enviar, igual que
-//   antes, y el servidor lo vuelve a comprobar en `createOrUpdateUser`.
+// - Los dominios permitidos se comprueban en cliente ANTES de enviar, igual
+//   que antes, y el servidor los vuelve a comprobar en `createOrUpdateUser`.
 
 import { useCallback } from 'react';
 import { useAuthActions } from '@convex-dev/auth/react';
 import { esAccesoRevocado, esNoAutenticado, mensajeDeError } from './errores';
 
-/** Único dominio de correo permitido (lo impone también convex/auth.ts). */
-export const ALLOWED_DOMAIN = 'airobotix.net';
+/** Dominios de correo permitidos (los impone también convex/auth.ts, que es
+ *  quien manda; esta copia solo evita un viaje a la red para decir lo mismo).
+ *
+ *  Van VARIOS porque el proyecto lo usan la empresa y el equipo clínico, con
+ *  correos distintos. Si algún día se configuran por variable de entorno en el
+ *  despliegue, esta lista se queda corta y el servidor seguirá siendo el que
+ *  decide: el cliente solo se adelanta a los casos evidentes. */
+export const ALLOWED_DOMAINS = ['airobotix.net', 'alzheimer.com'] as const;
+
+/** El primero, para el `placeholder` del formulario. */
+export const ALLOWED_DOMAIN = ALLOWED_DOMAINS[0];
 
 /** Mismo texto para la validación en cliente y para el aviso permanente. */
-export const DOMAIN_ERROR = `Solo se permiten correos @${ALLOWED_DOMAIN}.`;
+export const DOMAIN_ERROR = `Solo se permiten correos ${ALLOWED_DOMAINS.map((d) => `@${d}`).join(' o ')}.`;
 
 /** Mínimo del proveedor Password de Convex Auth (rechaza menos de 8). Se
  *  valida antes de salir a la red para dar el motivo exacto. */
@@ -25,13 +34,14 @@ export const MIN_PASSWORD = 8;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** ¿El correo pertenece al dominio permitido?
+/** ¿El correo pertenece a alguno de los dominios permitidos?
  *
  *  Sufijo `@dominio`, no `includes`: sin la arroba, "airobotix.net.atacante.com"
  *  pasaría. Es la misma regla que `correoPermitido` en convex/auth.ts. */
 export function isAllowedEmail(email: string): boolean {
   const value = email.trim().toLowerCase();
-  return EMAIL_RE.test(value) && value.endsWith(`@${ALLOWED_DOMAIN}`);
+  if (!EMAIL_RE.test(value)) return false;
+  return ALLOWED_DOMAINS.some((d) => value.endsWith(`@${d}`));
 }
 
 export type AuthResult = { ok: true } | { ok: false; message: string };

@@ -68,8 +68,11 @@ export interface Ajustes {
   candidatosPorPunto: number;
   prefetchTimeoutS: number;
   searchTopK: number;
-  // Dominio de correo permitido para darse de alta.
-  dominioPermitido: string;
+  // Dominios de correo permitidos para darse de alta. VARIOS: el proyecto lo
+  // usan la empresa y el equipo clínico, que tienen correos distintos, y con
+  // uno solo había que elegir a quién dejar fuera. Se configuran con
+  // DOMINIOS_PERMITIDOS separados por comas.
+  dominiosPermitidos: string[];
   limiteSubidaMb: number;
   // Sincronización con Notion (convex/notion/). Ya no hay token ni base de
   // datos en el entorno: cada persona conecta su propio Notion desde la app y
@@ -148,7 +151,21 @@ export function ajustes(): Ajustes {
     // 60 candidatos por consulta, como en Qdrant. El índice de búsqueda de
     // Convex recorre hasta 1024, así que hay margen de sobra.
     searchTopK: numero("SEARCH_TOP_K", 60),
-    dominioPermitido: texto("DOMINIO_PERMITIDO", "airobotix.net"),
+    // Se acepta el nombre nuevo en plural y, por compatibilidad, el viejo
+    // DOMINIO_PERMITIDO en singular, que es el que puede estar puesto en un
+    // despliegue anterior. Los espacios y las arrobas sobrantes se recortan
+    // ("@alzheimer.com" y "alzheimer.com" valen igual), y un valor repetido o
+    // vacío se descarta: un dominio vacío en la lista dejaría pasar cualquier
+    // correo.
+    dominiosPermitidos: (() => {
+      const crudo = texto("DOMINIOS_PERMITIDOS") || texto("DOMINIO_PERMITIDO");
+      const lista = crudo
+        .split(",")
+        .map((d) => d.trim().toLowerCase().replace(/^@/, ""))
+        .filter((d) => d !== "");
+      const unicos = Array.from(new Set(lista));
+      return unicos.length > 0 ? unicos : ["airobotix.net", "alzheimer.com"];
+    })(),
     // 100 MB. La subida va por URL firmada de Convex, que NO limita el tamaño
     // del fichero (documentado el 4 sep 2026: "the file size is not limited");
     // lo que la acota es que el POST de subida tiene 2 minutos de tiempo, así

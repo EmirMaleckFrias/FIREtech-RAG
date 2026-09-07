@@ -14,10 +14,11 @@
 // - Un solo formulario para las dos pestañas (mismos campos): al cambiar de
 //   pestaña se conserva lo escrito y se limpian los mensajes.
 
-import { useId, useRef, useState } from 'react';
+import { Fragment, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   ALLOWED_DOMAIN,
+  ALLOWED_DOMAINS,
   DOMAIN_ERROR,
   MIN_PASSWORD,
   isAllowedEmail,
@@ -253,7 +254,14 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
         )}
 
         <p className="auth-domain-note">
-          Solo se permiten correos <strong>@{ALLOWED_DOMAIN}</strong>. Los archivos son
+          Solo se permiten correos{' '}
+          {ALLOWED_DOMAINS.map((d, i) => (
+            <Fragment key={d}>
+              {i > 0 && ' o '}
+              <strong>@{d}</strong>
+            </Fragment>
+          ))}
+          . Los archivos son
           compartidos; tus conversaciones son privadas.
         </p>
       </main>
