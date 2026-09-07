@@ -83,3 +83,25 @@ describe('etiquetasDeMermaid', () => {
     expect(respaldoDeMermaid('%% solo un comentario')).toEqual([]);
   });
 });
+
+describe('etiquetasDeMermaid con un mapa mental', () => {
+  it('cada línea es un nodo, la raíz sin su forma, y la cabecera no cuenta', async () => {
+    const { etiquetasDeMermaid, respaldoDeMermaid } = await import('../components/Diagrama');
+    const codigo = [
+      'mindmap',
+      '  root((p-tau217 en plasma))',
+      '    Cohorte china',
+      '      AUC 0.983 frente a controles',
+      '    Clínica de memoria en Tailandia',
+      '      AUC 0.932 para AD frente a no AD',
+    ].join('\n');
+    expect(etiquetasDeMermaid(codigo).split('\n')).toEqual([
+      'p-tau217 en plasma',
+      'Cohorte china',
+      'AUC 0.983 frente a controles',
+      'Clínica de memoria en Tailandia',
+      'AUC 0.932 para AD frente a no AD',
+    ]);
+    expect(respaldoDeMermaid(codigo)).toHaveLength(5);
+  });
+});

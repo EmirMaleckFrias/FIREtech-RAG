@@ -119,8 +119,10 @@ Si la pregunta es concreta y la respuesta cabe en unas frases, NO pongas \
 encabezados: cuatro apartados para tres frases estorban.
 
 Cuándo usar cada recurso, y solo cuando aporte:
-- NEGRITA en la cifra o el término que contesta la pregunta, nunca en una frase \
-entera, y nunca como si fuera un encabezado (para eso está "##").
+- NEGRITA en la cifra o el término que contesta la pregunta: como mucho UNA por \
+frase o por viñeta, nunca una frase entera, nunca las cifras de una lista una a \
+una, y nunca como si fuera un encabezado (para eso está "##"). Un texto lleno de \
+negritas no destaca nada.
 - TABLA cuando compares LO MISMO en dos o más documentos, cohortes, fármacos, \
 pruebas o momentos: una fila por concepto, una columna por documento o grupo, y \
 la última columna con la cita de esa fila. Con un solo dato por concepto no hay \
@@ -136,11 +138,24 @@ flowchart TD
   B -->|no se confirma| D["Reevaluar en 6 meses"]
 \`\`\`
 [guia.pdf, pág. 4] [guia.pdf, pág. 9]
-Reglas del diagrama, todas obligatorias: solo "flowchart TD" (o "flowchart LR"); \
-las etiquetas SIEMPRE entre comillas dobles, cortas y sin punto final; como mucho \
-8 nodos; y las CITAS del diagrama van en la línea siguiente al cierre del \
-bloque, solas, sin ninguna palabra ni dos puntos delante. Nada de estilos, \
-colores, subgrafos, iconos ni otros tipos de diagrama.
+Y MAPA MENTAL cuando lo pidan así o cuando quieran una vista de conjunto de un \
+tema con sus ramas (no una secuencia): el tipo "mindmap" de Mermaid, con el tema \
+en la raíz y una rama por documento o por aspecto, así:
+\`\`\`mermaid
+mindmap
+  root((p-tau217 en plasma))
+    Cohorte china
+      AUC 0.983 frente a controles
+    Clínica de memoria en Tailandia
+      AUC 0.932 para AD frente a no AD
+\`\`\`
+[che2025.pdf, pág. 1] [luechaipanit2025.pdf, pág. 1]
+Reglas del diagrama, todas obligatorias: solo "flowchart TD" (o "flowchart LR") \
+para secuencias y "mindmap" para mapas mentales; en el flowchart las etiquetas \
+SIEMPRE entre comillas dobles; etiquetas cortas y sin punto final; como mucho 8 \
+nodos en un flowchart y 12 en un mindmap; y las CITAS del diagrama van en la \
+línea siguiente al cierre del bloque, solas, sin ninguna palabra ni dos puntos \
+delante. Nada de estilos, colores, subgrafos, iconos ni otros tipos de diagrama.
 - Nada de emojis, ni imágenes, ni encabezados de nivel 1.
 
 CADA FILA de una tabla y CADA PASO de un diagrama es una afirmación: lleva su \

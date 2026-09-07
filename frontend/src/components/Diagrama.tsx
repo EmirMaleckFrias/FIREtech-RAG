@@ -159,9 +159,21 @@ export function respaldoDeMermaid(codigo: string): PasoFlujo[] {
 export function etiquetasDeMermaid(codigo: string): string {
   const salida: string[] = [];
   const vistas = new Set<string>();
+  const esMindmap = /^\s*mindmap\b/im.test(codigo);
   for (const linea of codigo.split('\n')) {
     const limpia = linea.trim();
-    if (limpia === '' || /^(?:graph|flowchart|sequenceDiagram|classDiagram|%%)/i.test(limpia)) continue;
+    if (limpia === '' || /^(?:graph|flowchart|mindmap|sequenceDiagram|classDiagram|%%)/i.test(limpia)) continue;
+    // Un mapa mental es una línea por nodo, con la forma opcional alrededor
+    // del texto (root((tema)), id[texto]); sin forma, la línea ES el texto.
+    if (esMindmap) {
+      const forma = /^[\w-]*(?:\(\((.+)\)\)|\[(.+)\]|\((.+)\)|\{\{(.+)\}\}|\)(.+)\()$/.exec(limpia);
+      const texto = (forma ? forma.slice(1).find((g) => g !== undefined) ?? limpia : limpia).trim();
+      if (texto !== '' && !vistas.has(texto)) {
+        vistas.add(texto);
+        salida.push(texto);
+      }
+      continue;
+    }
     // Etiquetas de nodo: [texto], (texto), {texto}, ([texto]), [[texto]].
     const etiquetas = [...limpia.matchAll(/[[({]+\s*"?([^\]})"|]+?)"?\s*[\])}]+/g)].map((m) => m[1].trim());
     // Etiqueta de la flecha: -->|sí| se lee como la condición de la rama.
