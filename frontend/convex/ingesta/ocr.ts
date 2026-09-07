@@ -42,7 +42,7 @@ import type { ContextoOcr, ImagenParaOcr, Ocr } from "./tipos";
 
 /** Versión del prompt: va en la clave de caché, así cambiar el prompt
  *  invalida las entradas solas. */
-export const OCR_PROMPT_VERSION = "ocr-v1";
+export const OCR_PROMPT_VERSION = "ocr-v2";
 
 /** Lado largo máximo de una imagen de píxeles antes de mandarla. */
 export const LADO_MAXIMO = 1600;
@@ -54,10 +54,19 @@ export const LADO_MINIMO = 48;
  *  se deja margen para el resto del cuerpo y el base64. */
 const MAX_BYTES_IMAGEN = 15 * 1024 * 1024;
 
+// v2: el título del documento va PRIMERO y como `#`. Medido en el despliegue el
+// 7 sep 2026 con v1: la página escaneada empezaba por "DOI: …" y el título iba
+// como texto plano, así que el documento quedaba sin título en la cita; la
+// foto de página empezaba por "# Abstract" y ese era el "título". El parser
+// toma el primer encabezado como título del documento, así que hay que
+// pedírselo al modelo.
 export const PROMPT_OCR =
   "Transcribe TODO el texto legible de esta imagen de un documento, en su idioma " +
-  "original, como Markdown: encabezados con #, párrafos separados por una línea en " +
-  "blanco, tablas como tablas Markdown (con su fila de cabecera), listas como listas. " +
+  "original, como Markdown. Si la imagen muestra el título del documento (el " +
+  "encabezado principal de un artículo, guía o protocolo), escríbelo en la PRIMERA " +
+  "línea como `# Título`; el resto de encabezados con `##`. Párrafos separados por " +
+  "una línea en blanco, tablas como tablas Markdown (con su fila de cabecera), " +
+  "listas como listas. " +
   "Conserva cifras, unidades, símbolos y abreviaturas exactamente como están. No " +
   "resumas, no expliques, no traduzcas y no añadas nada que no esté escrito. Si una " +
   "palabra es ilegible escribe [ilegible]. Si la imagen no contiene texto, responde " +
