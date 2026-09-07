@@ -27,8 +27,8 @@
 // - Solo se hace OCR de lo que NO tiene texto (lo decide el parser de PDF con
 //   `ocrMinTextoPagina`); un artículo con figuras no se manda al modelo.
 // - Los píxeles de una página escaneada se REDUCEN antes de codificar: un
-//   escaneo a 300 ppp son 2500x3500 píxeles y 26 MB crudos; a 1600 de lado
-//   largo el texto se lee igual y la petición pesa la décima parte.
+//   escaneo a 300 ppp son 2500x3500 píxeles y 26 MB crudos; dividido por 2 el
+//   texto se lee igual y la petición pesa la cuarta parte (ver LADO_MAXIMO).
 // - Caché por sha256 de los bytes enviados: reindexar no vuelve a leer nada.
 // - Las lecturas van en paralelo hasta el tope del gateway (`plaza`, 8).
 // - Nunca lanza por una imagen: una página ilegible no tira la ingesta.
@@ -44,8 +44,16 @@ import type { ContextoOcr, ImagenParaOcr, Ocr } from "./tipos";
  *  invalida las entradas solas. */
 export const OCR_PROMPT_VERSION = "ocr-v2";
 
-/** Lado largo máximo de una imagen de píxeles antes de mandarla. */
-export const LADO_MAXIMO = 1600;
+/** Lado largo máximo de una imagen de píxeles antes de mandarla.
+ *
+ *  2200 y no 1600, medido el 7 sep 2026 en el despliegue: la reducción es por
+ *  factor ENTERO, así que con 1600 una página escaneada de 1700 px de alto
+ *  caía a 850 (factor 2), donde un cuerpo de 10 pt mide 8 px; el modelo leía
+ *  el texto pero perdía la maqueta y no devolvía ni un encabezado, y el
+ *  documento se quedaba sin título. Con 2200, ese escaneo no se toca y uno a
+ *  300 ppp (2480x3508) solo se divide por 2 (1240x1754), que sigue leyéndose
+ *  bien y pesa la cuarta parte. */
+export const LADO_MAXIMO = 2200;
 
 /** Imágenes más pequeñas que esto no se leen: son iconos, líneas, viñetas. */
 export const LADO_MINIMO = 48;

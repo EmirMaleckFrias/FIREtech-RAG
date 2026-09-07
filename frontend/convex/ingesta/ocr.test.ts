@@ -84,9 +84,16 @@ describe("reducirARgb", () => {
     const alto = 3508;
     const r = reducirARgb(ancho, alto, new Uint8Array(ancho * alto), 1);
     expect(Math.max(r.ancho, r.alto)).toBeLessThanOrEqual(LADO_MAXIMO);
-    // Factor 3: 2480/3 = 826, 3508/3 = 1169. Y el texto sigue legible a eso.
-    expect([r.ancho, r.alto]).toEqual([826, 1169]);
-    expect(r.rgb.length).toBe(826 * 1169 * 3);
+    // Factor 2: 2480/2 = 1240, 3508/2 = 1754. Un cuerpo de 10 pt queda en ~17 px.
+    expect([r.ancho, r.alto]).toEqual([1240, 1754]);
+    expect(r.rgb.length).toBe(1240 * 1754 * 3);
+  });
+
+  test("un escaneo corriente (1293x1700, como sale de un escáner de oficina) NO se reduce", () => {
+    // Es el caso que falló en el despliegue: con el lado máximo en 1600 caía a
+    // 646x850 y el modelo dejaba de devolver encabezados.
+    const r = reducirARgb(1293, 1700, new Uint8Array(1293 * 1700 * 3), 3);
+    expect([r.ancho, r.alto]).toEqual([1293, 1700]);
   });
 });
 
@@ -131,12 +138,12 @@ describe("prepararImagen", () => {
   });
 
   test("los píxeles salen como PNG reducido", () => {
-    const ancho = 3200;
+    const ancho = 4400;
     const alto = 100;
     const r = prepararImagen({ tipo: "pixeles", ancho, alto, datos: new Uint8Array(ancho * alto * 3), canales: 3 })!;
     expect(r.mime).toBe("image/png");
     const p = leerPng(r.bytes);
-    expect(p.ancho).toBe(1600); // factor 2
+    expect(p.ancho).toBe(2200); // factor 2
     expect(p.alto).toBe(50);
   });
 });
