@@ -261,8 +261,7 @@ export function AuthScreen({ expired = false, revoked = false }: AuthScreenProps
               <strong>@{d}</strong>
             </Fragment>
           ))}
-          . Los archivos son
-          compartidos; tus conversaciones son privadas.
+          . Tus documentos y tus conversaciones son tuyos: nadie más los ve.
         </p>
       </main>
     </div>
