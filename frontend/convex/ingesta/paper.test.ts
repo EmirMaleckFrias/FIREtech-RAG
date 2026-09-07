@@ -570,3 +570,99 @@ describe("lo que enseñaron cinco PDF reales (4 sep 2026)", () => {
     expect(meta.autor).toBe("Mugosa");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Una cita solo se emite si la autoría está corroborada
+// ---------------------------------------------------------------------------
+//
+// Medido en producción el 7 sep 2026: de diez guías clínicas en español sin
+// bloque de autores, las diez salieron con una cita INVENTADA ("Pagina et al.,
+// 2026" de un pie de página, "Questions et al., 2025", "Global Outcomes et
+// al., 2024"), y el agente atribuía evidencia a autores que no existen. Los
+// cinco artículos de revista del mismo corpus salieron bien, y todos traen DOI.
+//
+// La guarda: sin coautores, sin formato bibliográfico, sin iniciales y sin DOI,
+// no hay cita. Estas pruebas fijan los dos lados de la línea.
+describe("cita solo con autoría corroborada", () => {
+  /** Metadatos de una portada dada como (texto, tamaño de letra). */
+  function meta(lineas: Array<[string, number]>, textoCompleto?: string) {
+    const formato = lineas.map(([texto, tamano], i) => ({
+      texto,
+      tamano,
+      negrita: false,
+      y: 700 - i * 20,
+      esFila: false,
+    }));
+    const { meta: m } = paper.extraerMetadatosConBloque(
+      formato as never,
+      textoCompleto ?? lineas.map(([t]) => t).join("\n"),
+    );
+    return { autor: m.autor, cita: paper.referenciaDe(m), doi: m.doi };
+  }
+
+  test("una palabra capitalizada suelta NO es un autor: es el caso que inventaba las citas", () => {
+    // La forma exacta de las guías clínicas: título grande, y debajo una línea
+    // de una palabra que el extractor tomaba por apellido.
+    for (const suelta of ["Pagina", "Questions", "Resistance", "Prevention", "Sepsis"]) {
+      const r = meta([
+        ["Hipertensión arterial en adultos: evaluación y manejo", 16],
+        [suelta, 10],
+        ["El diagnóstico se establece con medidas repetidas en consulta.", 10],
+      ]);
+      expect(r.cita).toBe("");
+      expect(r.autor).toBe("");
+    }
+  });
+
+  test("dos palabras capitalizadas sin iniciales tampoco, aunque parezcan nombre y apellido", () => {
+    // "Global Outcomes" y "Asthma Management" son indistinguibles de "Manuel
+    // Colome" por la forma. Ante la duda se cita el fichero, que es honesto.
+    for (const par of ["Global Outcomes", "Asthma Management", "Kidney Disease"]) {
+      expect(meta([["Enfermedad renal crónica: evaluación y manejo", 16], [par, 10]]).cita).toBe("");
+    }
+  });
+
+  test("la MISMA portada con y sin DOI: el DOI acredita que es un trabajo publicado", () => {
+    // "Marta Silva" es un autor único sin iniciales: por la forma es
+    // indistinguible de "Global Outcomes", así que es el DOI el que decide.
+    const portada: Array<[string, number]> = [
+      ["Plasma p-tau217 in cognitively unimpaired adults", 16],
+      ["Marta Silva", 10],
+      ["Study conducted in 2026.", 10],
+    ];
+    const texto = portada.map(([t]) => t).join("\n");
+
+    expect(meta(portada, texto).cita).toBe("");
+
+    const conDoi = meta(portada, `${texto}\nhttps://doi.org/10.1002/alz.71599`);
+    expect(conDoi.doi).toBe("10.1002/alz.71599");
+    expect(conDoi.cita).toBe("Silva et al., 2026");
+  });
+
+  test("una firma Vancouver de UN solo autor corrobora sola: las iniciales no salen por casualidad", () => {
+    const r = meta([
+      ["Amyloid pathology and cognitive decline", 16],
+      ["Sperling RA", 10],
+      ["Published in 2024 by the journal.", 10],
+    ]);
+    expect(r.cita).toBe("Sperling et al., 2024");
+  });
+
+  test("varios autores corroboran, sin DOI y sin iniciales", () => {
+    const r = meta([
+      ["Diagnostic accuracy of plasma biomarkers", 16],
+      ["Ping Che, Nan Zhang", 10],
+      ["Study conducted in 2025.", 10],
+    ]);
+    expect(r.cita).toBe("Che et al., 2025");
+  });
+
+  test("el formato bibliográfico corrobora: \"Apellido, N. M.\"", () => {
+    const r = meta([
+      ["Cognitive trajectories in ageing", 16],
+      ["van der Flier, W. M.", 10],
+      ["Data from 2023.", 10],
+    ]);
+    expect(r.cita).toBe("van der Flier et al., 2023");
+  });
+});

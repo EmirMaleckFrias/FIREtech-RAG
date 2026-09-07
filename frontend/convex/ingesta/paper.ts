@@ -1130,8 +1130,17 @@ const SEPARADOR_DE_AUTORES = /,|\band\b|\by\b|&|;|\||\u00b7/;
  *  Department of Neurology, Boston, MA, USA"), y con la comprobación sobre
  *  toda la línea se descartaba la línea legítima y la cita salía de la línea
  *  bibliográfica de la revista (revisión adversarial final). */
-function extraerAutor(lineas: LineaFormato[], tamanoTitulo: number, titulo: string): string {
-  if (!lineas.length) return "";
+/** El apellido del primer autor y si esa autoría está CORROBORADA por la
+ *  forma de la línea: había más de un autor, o venía en formato bibliográfico
+ *  ("Apellido, N. M."). Sin corroborar, el apellido sale de una línea de una
+ *  sola palabra capitalizada, que es lo que un documento sin autores (una guía
+ *  clínica, un informe) tiene de sobra. Ver `extraerMetadatosConBloque`. */
+function extraerAutor(
+  lineas: LineaFormato[],
+  tamanoTitulo: number,
+  titulo: string,
+): { apellido: string; corroborado: boolean } {
+  if (!lineas.length) return { apellido: "", corroborado: false };
   const normalTitulo = normalizar(titulo);
   let despues = false;
   for (const { tamano, texto } of lineas) {
@@ -1179,10 +1188,19 @@ function extraerAutor(lineas: LineaFormato[], tamanoTitulo: number, titulo: stri
     const comaInicial = FORMATO_APELLIDO_INICIAL.exec(texto);
     const formatoApellidoInicial = comaInicial !== null && !pareceDireccion(texto, comaInicial);
 
+    // Una firma Vancouver de un solo autor ("Sperling RA") es evidencia
+    // bibliográfica igual de buena que varias: el bloque de iniciales no
+    // aparece por casualidad. Lo que NO corrobora nada es una línea de una o
+    // dos palabras capitalizadas sin iniciales, que es lo que tiene de sobra
+    // un documento sin autores ("Página", "Global Outcomes").
+    const conIniciales = tokensDeFirma(primero).some((t) => INICIALES.test(t));
+
     const apellido = apellidoDelPrimerAutor(primero, hayMasAutores, formatoApellidoInicial, otros);
-    if (apellido) return apellido;
+    if (apellido) {
+      return { apellido, corroborado: hayMasAutores || formatoApellidoInicial || conIniciales };
+    }
   }
-  return "";
+  return { apellido: "", corroborado: false };
 }
 
 /** Metadatos del trabajo desde la primera página.
@@ -1206,11 +1224,27 @@ export function extraerMetadatosConBloque(
   texto: string,
 ): { meta: MetaObra; lineasTitulo: Set<number> } {
   const { titulo, tamano, indices } = extraerTitulo(lineas);
-  const autor = extraerAutor(lineas, tamano, titulo);
+  const { apellido, corroborado } = extraerAutor(lineas, tamano, titulo);
 
   let doi = "";
   const encontrado = DOI.exec(texto ?? "");
   if (encontrado) doi = encontrado[0].replace(/[.,;)]+$/, "");
+
+  // Un apellido SIN corroborar (sin coautores, sin formato bibliográfico y sin
+  // iniciales) y SIN DOI no se acepta como autoría.
+  //
+  // Medido en producción el 7 sep 2026: de diez guías clínicas en español sin
+  // bloque de autores, las diez salieron con una cita inventada ("Pagina et
+  // al., 2026" de un pie de página, "Questions et al., 2025", "Global
+  // Outcomes et al., 2024"), y el agente atribuía evidencia a autores que no
+  // existen. Los cinco artículos de revista del mismo corpus salieron bien y
+  // todos traen DOI.
+  //
+  // El precio de la guarda es que un artículo de un solo autor y sin DOI
+  // pierde su cita y se cita por el nombre del archivo. Es el fallo correcto:
+  // en un sistema cuyo trabajo es atribuir evidencia, citar el fichero es
+  // honesto y citar a un autor inventado no.
+  const autor = corroborado || doi !== "" ? apellido : "";
 
   const textoPortada = lineas.map((l) => l.texto).join("\n");
   const meta = { titulo, autor, anio: extraerAnio(texto ?? "", doi, textoPortada), doi };
