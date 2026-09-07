@@ -14,17 +14,27 @@ import { ajustes } from "./lib/config";
 const CORREO_PRUEBAS = "pruebas@airobotix.net";
 
 export const prepararPregunta = internalMutation({
-  args: { texto: v.string(), modo: v.string(), sessionId: v.optional(v.id("sessions")) },
+  args: {
+    texto: v.string(),
+    modo: v.string(),
+    sessionId: v.optional(v.id("sessions")),
+    // Desde quién se pregunta. Importa: cada persona tiene su propio corpus
+    // (ver `propietario` en schema.ts), así que la misma pregunta desde dos
+    // cuentas distintas busca en índices distintos. Sin correo se usa la
+    // cuenta de pruebas, que no tiene documentos.
+    correo: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
+    const correo = args.correo ?? CORREO_PRUEBAS;
     let usuario = await ctx.db
       .query("users")
-      .withIndex("email", (q) => q.eq("email", CORREO_PRUEBAS))
+      .withIndex("email", (q) => q.eq("email", correo))
       .unique();
     const ahora = Date.now();
     const userId =
       usuario?._id ??
       (await ctx.db.insert("users", {
-        email: CORREO_PRUEBAS,
+        email: correo,
         rol: "lector",
         bloqueado: false,
         creadoEn: ahora,
