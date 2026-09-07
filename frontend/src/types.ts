@@ -284,6 +284,12 @@ export interface DocumentInfo {
   status: DocumentStatus;
   error: string | null;
   ingestadoEn: number;
+  /** Título de la obra y cita ("Silva-Rodríguez et al., 2026"), cuando la
+   *  ingesta pudo determinarlos. Son la IDENTIDAD del documento para quien
+   *  investiga, así que la ficha los enseña antes que el nombre del fichero;
+   *  el servidor ya los devolvía y el panel los tiraba. */
+  titulo: string | null;
+  citation: string | null;
   /** De dónde salió: subida manual o sincronización con Notion. null en los
    *  registros anteriores a que existiera el campo. */
   origen: 'subida' | 'notion' | null;

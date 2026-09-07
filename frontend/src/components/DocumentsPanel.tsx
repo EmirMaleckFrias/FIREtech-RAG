@@ -29,7 +29,6 @@
 //   en lib/notion.ts.
 
 import {
-  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -69,9 +68,12 @@ import {
   type ArchivoOmitido,
   type ArchivoPlaneado,
 } from '../lib/carpetas';
+import type { Documentos } from '../lib/useDocumentos';
 import { sha256De, subirFichero } from '../lib/subida';
 import { useSheetDrag } from '../lib/useSheetDrag';
-import type { AvisoNotion, BaseNotion, DocumentInfo, DocumentStatus, EstadoNotion } from '../types';
+import { BandaCorpus } from './BandaCorpus';
+import { FichaDocumento } from './FichaDocumento';
+import type { AvisoNotion, BaseNotion, DocumentStatus, EstadoNotion } from '../types';
 import {
   IconAlert,
   IconCheck,
@@ -80,12 +82,10 @@ import {
   IconLock,
   IconRefresh,
   IconSpinner,
-  IconTrash,
   IconUpload,
   IconX,
 } from './icons';
 
-const JUST_READY_MS = 1_800;
 /** Mismo valor que `limiteSubidaMb` en convex/lib/config.ts (100 MB). Es solo el
  *  valor de reserva mientras no llega el real por `estadisticas.sistema`; la
  *  subida por URL firmada no limita el tamaño, el techo lo pone la ingesta. */
@@ -102,43 +102,17 @@ interface DocumentsPanelProps {
    *  URL, leído por App al montar). null si no viene de ahí. */
   notionAviso: AvisoNotion | null;
   onNotionAvisoVisto: () => void;
+  /** Abre la vista de todos los documentos, opcionalmente ya filtrada por un
+   *  estado (al pulsar "3 sin leer" en la banda). */
+  onVerTodos: (estado: DocumentStatus | null) => void;
+  /** La lista suscrita y las acciones, compartidas con la vista de todos para
+   *  que no haya dos suscripciones ni dos copias de "borrar". Ver
+   *  lib/useDocumentos.ts. */
+  documentos: Documentos;
 }
 
 /** Lo que el frontend lee de un registro de `documents`. Tipo estructural,
  *  para que un campo que la query añada no rompa nada. */
-interface DocumentoDoc {
-  _id: Id<'documents'>;
-  fileName: string;
-  pages?: number;
-  chunks?: number;
-  status?: string;
-  error?: string | null;
-  ingestadoEn?: number;
-  _creationTime?: number;
-  origen?: string | null;
-  sha256?: string | null;
-}
-
-function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
-  const status: DocumentStatus =
-    d.status === 'processing' || d.status === 'failed' ? d.status : 'ready';
-  return {
-    id: d._id,
-    fileName: d.fileName,
-    pages: typeof d.pages === 'number' ? d.pages : 0,
-    chunks: typeof d.chunks === 'number' ? d.chunks : 0,
-    status,
-    error: typeof d.error === 'string' && d.error !== '' ? d.error : null,
-    ingestadoEn:
-      typeof d.ingestadoEn === 'number'
-        ? d.ingestadoEn
-        : typeof d._creationTime === 'number'
-          ? d._creationTime
-          : 0,
-    origen: d.origen === 'notion' || d.origen === 'subida' ? d.origen : null,
-    sha256: typeof d.sha256 === 'string' && d.sha256 !== '' ? d.sha256 : null,
-  };
-}
 
 /** Un archivo que se está subiendo ahora mismo (hay hasta SUBIDAS_A_LA_VEZ). */
 interface SubidaEnVuelo {
@@ -181,13 +155,6 @@ function fraccionDeCola(c: ColaSubida): number | null {
 /** ¿Hay algo que la usuaria deba leer antes de cerrar el resumen? */
 function colaMereceResumen(c: ColaSubida): boolean {
   return c.fallidos.length > 0 || c.omitidos.length > 0 || c.truncada || c.cancelada;
-}
-
-function ingestedTitle(ms: number): string | undefined {
-  if (ms <= 0) return undefined;
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return undefined;
-  return `Indexado el ${d.toLocaleString('es')}`;
 }
 
 const FILA = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } as const;
@@ -826,10 +793,12 @@ export function DocumentsPanel({
   onClose,
   notionAviso,
   onNotionAvisoVisto,
+  onVerTodos,
+  documentos,
 }: DocumentsPanelProps) {
   // Suscripción permanente: barata, y así el panel abre con la lista ya
   // puesta y ve pasar a "listo" un documento subido con el panel cerrado.
-  const docsQuery = useQuery(api.documentos.listar);
+
   // El límite de subida lo anuncia el despliegue. Solo lo necesita quien
   // sube, y solo con el panel abierto: es un agregado sobre varias tablas y
   // no merece una suscripción viva permanente.
@@ -845,8 +814,8 @@ export function DocumentsPanel({
 
   const urlDeSubida = useMutation(api.documentos.urlDeSubida);
   const registrar = useMutation(api.documentos.registrar);
-  const reindexar = useMutation(api.documentos.reindexar);
-  const borrar = useMutation(api.documentos.borrar);
+
+  const { docs, maximo } = documentos;
 
   // Notion, con el panel abierto. La suscripción hace que el avance de la
   // sincronización (página a página) y el paso a la cifra final lleguen
@@ -856,13 +825,7 @@ export function DocumentsPanel({
     | undefined;
 
   // Más recientes primero, como devolvía el backend anterior.
-  const docs = useMemo<DocumentInfo[] | null>(
-    () =>
-      docsQuery === undefined
-        ? null
-        : docsQuery.map(normalizeDocumento).sort((a, b) => b.ingestadoEn - a.ingestadoEn),
-    [docsQuery],
-  );
+
 
   const [cola, setCola] = useState<ColaSubida | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -870,12 +833,6 @@ export function DocumentsPanel({
   const [omitidosAbiertos, setOmitidosAbiertos] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  const [confirmFor, setConfirmFor] = useState<Id<'documents'> | null>(null);
-  const [deleting, setDeleting] = useState<Set<string>>(new Set());
-  const [reindexing, setReindexing] = useState<Set<string>>(new Set());
-  const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
-  const [openErrors, setOpenErrors] = useState<Set<string>>(new Set());
-  const [justReady, setJustReady] = useState<Set<string>>(new Set());
 
   const panelRef = useRef<HTMLElement>(null);
   const grabberRef = useRef<HTMLDivElement>(null);
@@ -886,45 +843,19 @@ export function DocumentsPanel({
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const dragCounterRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
-  const prevDocsRef = useRef<DocumentInfo[] | null>(null);
-  const readyTimersRef = useRef<number[]>([]);
 
   // Bottom sheet en móvil: swipe-down sobre el asa cierra el panel.
   useSheetDrag(panelRef, grabberRef, onClose);
 
-  // Limpieza al desmontar: timers de la micro-animación y subida en vuelo.
+  // Limpieza al desmontar: la subida en vuelo. El destello de "listo" y sus
+  // temporizadores los lleva ahora useDocumentos, que es quien ve las
+  // entregas de la suscripción.
   useEffect(
     () => () => {
-      for (const t of readyTimersRef.current) window.clearTimeout(t);
       uploadAbortRef.current?.abort();
     },
     [],
   );
-
-  // Transiciones processing -> ready: micro-animación de éxito. Se detectan
-  // comparando cada lista con la anterior, que es lo que antes hacía el
-  // sondeo; ahora las entrega la suscripción.
-  useEffect(() => {
-    const prev = prevDocsRef.current;
-    prevDocsRef.current = docs;
-    if (prev === null || docs === null) return;
-    const prevStatus = new Map(prev.map((d) => [d.id, d.status]));
-    const becameReady = docs
-      .filter((d) => d.status === 'ready' && prevStatus.get(d.id) === 'processing')
-      .map((d) => d.id);
-    if (becameReady.length === 0) return;
-    setJustReady((s) => new Set([...s, ...becameReady]));
-    for (const id of becameReady) {
-      const timer = window.setTimeout(() => {
-        setJustReady((s) => {
-          const next = new Set(s);
-          next.delete(id);
-          return next;
-        });
-      }, JUST_READY_MS);
-      readyTimersRef.current.push(timer);
-    }
-  }, [docs]);
 
   // Foco: al abrir entra al botón de cerrar; al cerrar vuelve a donde estaba.
   useEffect(() => {
@@ -1092,82 +1023,6 @@ export function DocumentsPanel({
   );
 
   // --- borrado con confirmación inline de dos pasos ---
-  const handleDelete = useCallback(
-    async (doc: DocumentInfo) => {
-      setConfirmFor(null);
-      setRowErrors((errs) => {
-        const next = { ...errs };
-        delete next[doc.id];
-        return next;
-      });
-      setDeleting((s) => new Set(s).add(doc.id));
-      try {
-        await borrar({ documentId: doc.id });
-        // La fila desaparece con la siguiente entrega de la suscripción, que
-        // llega antes de que esta promesa se resuelva.
-      } catch (err) {
-        if (!avisarSiEsFatal(err)) {
-          setRowErrors((errs) => ({
-            ...errs,
-            [doc.id]: mensajeDeError(err, 'No se pudo borrar el documento.'),
-          }));
-        }
-      } finally {
-        setDeleting((s) => {
-          const next = new Set(s);
-          next.delete(doc.id);
-          return next;
-        });
-      }
-    },
-    [borrar],
-  );
-
-  /**
-   * Reintenta la indexación de un documento que falló.
-   *
-   * Casi siempre falla por algo transitorio (un timeout del gateway, un
-   * corte a mitad de embeber), y sin esto la única salida era borrar la fila
-   * y volver a buscar el archivo. El fichero original está en el
-   * almacenamiento, así que el servidor lo relee de ahí.
-   */
-  const handleReindex = useCallback(
-    async (doc: DocumentInfo) => {
-      setRowErrors((errs) => {
-        const next = { ...errs };
-        delete next[doc.id];
-        return next;
-      });
-      setReindexing((s) => new Set(s).add(doc.id));
-      try {
-        await reindexar({ documentId: doc.id });
-      } catch (err) {
-        if (!avisarSiEsFatal(err)) {
-          setRowErrors((errs) => ({
-            ...errs,
-            [doc.id]: mensajeDeError(err, 'No se pudo reindexar el documento.'),
-          }));
-        }
-      } finally {
-        setReindexing((s) => {
-          const next = new Set(s);
-          next.delete(doc.id);
-          return next;
-        });
-      }
-    },
-    [reindexar],
-  );
-
-  const toggleErrorDetail = (id: string) => {
-    setOpenErrors((s) => {
-      const next = new Set(s);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
   // --- drag & drop ---
   const handleDragEnter = (e: DragEvent<HTMLButtonElement>) => {
     e.preventDefault();
@@ -1212,7 +1067,7 @@ export function DocumentsPanel({
   const handleKeyDown = (e: KeyboardEvent<HTMLElement>) => {
     if (e.key === 'Escape') {
       e.stopPropagation();
-      if (confirmFor !== null) setConfirmFor(null);
+      if (documentos.confirmando !== null) documentos.confirmar(null);
       else onClose();
       return;
     }
@@ -1264,6 +1119,13 @@ export function DocumentsPanel({
         </div>
 
         <div className="docs-body">
+          {/* La forma del corpus, antes que nada: es lo primero que hay que
+              saber al abrir esto, y con 18 documentos la lista se ve igual que
+              con 3. Ver BandaCorpus. */}
+          {docs !== null && docs.length > 0 && (
+            <BandaCorpus docs={docs} onVerEstado={(estado) => onVerTodos(estado)} />
+          )}
+
           {/* Notion: conectar, elegir la base, sincronizar y ver el avance en
               vivo. Ver NotionBloque. */}
           <NotionBloque
@@ -1482,156 +1344,34 @@ export function DocumentsPanel({
           )}
 
           {docs !== null && docs.length > 0 && (
-            <ul className="docs-list">
-              {docs.map((d) => {
-                const isDeleting = deleting.has(d.id);
-                const isReindexing = reindexing.has(d.id);
-                const isConfirm = confirmFor === d.id;
-                const errOpen = openErrors.has(d.id);
-                const popped = justReady.has(d.id);
-                const rowError = rowErrors[d.id];
-                // Se muestra lo que haya, separado por puntos medios: un
-                // documento en cola aún no tiene chunks ni páginas.
-                const metaParts: string[] = [];
-                if (d.chunks > 0) {
-                  metaParts.push(
-                    `${d.chunks.toLocaleString('es')} ${d.chunks === 1 ? 'chunk' : 'chunks'}`,
-                  );
-                }
-                if (d.pages > 0) {
-                  metaParts.push(
-                    `${d.pages.toLocaleString('es')} ${d.pages === 1 ? 'pág.' : 'págs.'}`,
-                  );
-                }
-                // Etiqueta discreta: lo trajo la sincronización, no una subida.
-                if (d.origen === 'notion') metaParts.push('Notion');
-                return (
-                  <li
-                    key={d.id}
-                    className={`doc-card ${popped ? 'doc-card-ready-flash' : ''}`}
-                  >
-                    <div className="doc-row">
-                      <span className="doc-icon" aria-hidden="true">
-                        <IconDocument size={15} />
-                      </span>
-                      <span className="doc-info">
-                        <span className="doc-file" title={ingestedTitle(d.ingestadoEn)}>
-                          {d.fileName}
-                        </span>
-                        {metaParts.length > 0 && (
-                          <span className="doc-meta">
-                            {metaParts.map((part, i) => (
-                              <Fragment key={part}>
-                                {i > 0 && <span className="doc-sep">·</span>}
-                                <span>{part}</span>
-                              </Fragment>
-                            ))}
-                          </span>
-                        )}
-                      </span>
+            <div className="fichas-cabecera">
+              <h3>{docs.length === 1 ? 'Tu documento' : 'Tus documentos'}</h3>
+              <button type="button" onClick={() => onVerTodos(null)}>
+                Verlos todos
+              </button>
+            </div>
+          )}
 
-                      <span className="doc-side">
-                        {isConfirm ? (
-                          <span className="doc-confirm">
-                            <span>¿Borrar?</span>
-                            <button
-                              type="button"
-                              className="doc-confirm-btn doc-confirm-yes"
-                              onClick={() => void handleDelete(d)}
-                            >
-                              Sí
-                            </button>
-                            <button
-                              type="button"
-                              className="doc-confirm-btn doc-confirm-no"
-                              onClick={() => setConfirmFor(null)}
-                            >
-                              No
-                            </button>
-                          </span>
-                        ) : (
-                          <>
-                            {d.status === 'ready' && (
-                              <span
-                                className={`doc-badge doc-badge-ready ${popped ? 'doc-badge-pop' : ''}`}
-                              >
-                                <IconCheck size={11} />
-                                Listo
-                              </span>
-                            )}
-                            {d.status === 'processing' && (
-                              <span className="doc-badge doc-badge-processing" role="status">
-                                <IconSpinner size={11} />
-                                <span className="shimmer-text">Procesando</span>
-                              </span>
-                            )}
-                            {d.status === 'failed' && (
-                              <button
-                                type="button"
-                                className="doc-badge doc-badge-failed"
-                                onClick={() => toggleErrorDetail(d.id)}
-                                aria-expanded={errOpen}
-                                title={d.error ?? 'Error durante la ingesta'}
-                              >
-                                <IconAlert size={11} />
-                                Error
-                              </button>
-                            )}
-
-                            {/* Reintentar: solo en los fallidos y solo para
-                                admin. Va ANTES de la papelera a propósito:
-                                reintentar es la acción esperada ante un error,
-                                y borrar la de último recurso. */}
-                            {d.status === 'failed' && (
-                              <button
-                                type="button"
-                                className="doc-action-btn"
-                                disabled={isReindexing}
-                                onClick={() => void handleReindex(d)}
-                                title="Reintentar la indexación"
-                                aria-label={`Reintentar la indexación de ${d.fileName}`}
-                              >
-                                {isReindexing ? (
-                                  <IconSpinner size={14} />
-                                ) : (
-                                  <IconRefresh size={14} />
-                                )}
-                              </button>
-                            )}
-
-                            {(isDeleting ? (
-                                <span
-                                  className="doc-lock"
-                                  role="status"
-                                  aria-label={`Borrando ${d.fileName}`}
-                                >
-                                  <IconSpinner size={14} />
-                                </span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="doc-action-btn"
-                                  onClick={() => setConfirmFor(d.id)}
-                                  title="Borrar del índice"
-                                  aria-label={`Borrar ${d.fileName} del índice`}
-                                >
-                                  <IconTrash size={15} />
-                                </button>
-                              ))}
-                          </>
-                        )}
-                      </span>
-                    </div>
-
-                    {d.status === 'failed' && errOpen && (
-                      <div className="doc-error-detail">
-                        {d.error ?? 'Error desconocido durante la ingesta.'}
-                      </div>
-                    )}
-                    {rowError !== undefined && <div className="doc-row-error">{rowError}</div>}
-                  </li>
-                );
-              })}
+          {docs !== null && docs.length > 0 && (
+            <ul className="fichas">
+              {docs.map((d) => (
+                <FichaDocumento
+                  key={d.id}
+                  doc={d}
+                  maximo={maximo}
+                  borrando={documentos.borrando.has(String(d.id))}
+                  reindexando={documentos.reindexando.has(String(d.id))}
+                  confirmando={documentos.confirmando === d.id}
+                  errorAbierto={documentos.erroresAbiertos.has(String(d.id))}
+                  destella={documentos.recienListos.has(String(d.id))}
+                  onConfirmar={() => documentos.confirmar(d.id)}
+                  onCancelar={() => documentos.confirmar(null)}
+                  onBorrar={() => void documentos.borrar(d)}
+                  onReindexar={() => void documentos.reindexar(d)}
+                  onAlternarError={() => documentos.alternarError(String(d.id))}
+                  errorDeFila={documentos.erroresDeFila[String(d.id)]}
+                />
+              ))}
             </ul>
           )}
         </div>

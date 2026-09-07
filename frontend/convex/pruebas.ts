@@ -9,6 +9,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
+import type { Doc } from "./_generated/dataModel";
 import { ajustes } from "./lib/config";
 
 const CORREO_PRUEBAS = "pruebas@airobotix.net";
@@ -404,5 +405,61 @@ export const diagnosticoNotion = internalQuery({
       redirectUriARegistrar: a.convexSiteUrl ? `${a.convexSiteUrl}/notion/callback` : "no se puede calcular",
       habilitada: Boolean(a.notionClientId && a.notionClientSecret),
     };
+  },
+});
+
+/** Siembra documentos VARIADOS en el corpus de una cuenta, sin ingesta: para
+ *  revisar el diseño de la sección de documentos con datos que se parezcan a
+ *  los de verdad (papers con su cita, una hoja sin título, una imagen, uno
+ *  indexándose y uno que falló) sin gastar embeddings ni esperar dos minutos.
+ *
+ *  No escribe ni un fragmento, así que estos documentos NO responden nada: es
+ *  para mirar la pantalla, no para preguntar. */
+export const sembrarDocumentosDePrueba = internalMutation({
+  args: { correo: v.string() },
+  handler: async (ctx, { correo }) => {
+    const dueno = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", correo))
+      .first();
+    if (!dueno) throw new Error(`no existe la cuenta ${correo}`);
+    const dia = 86_400_000;
+    const ahora = Date.now();
+    const muestras: Array<Partial<Doc<"documents">> & { fileName: string }> = [
+      { fileName: "PMC13390017.pdf", chunks: 52, pages: 12, titulo: "Prognostic value of plasma %p-tau217 in cognitively unimpaired older adults", citation: "Silva-Rodríguez et al., 2026", ingestadoEn: ahora - 300_000 },
+      { fileName: "PMC13382852.pdf", chunks: 57, pages: 15, titulo: "Performance of Alzheimer Disease Plasma Biomarkers in Patients With Prion Diseases", citation: "Coysh et al., 2026", ingestadoEn: ahora - dia },
+      { fileName: "PMC12777541.pdf", chunks: 5, pages: 3, titulo: "Head to head comparison of plasma phosphorylated tau 217 assays in real life memory clinic in Thailand", citation: "Luechaipanit et al., 2025", ingestadoEn: ahora - dia * 2 },
+      { fileName: "PMC12739034.pdf", chunks: 3, pages: 3, titulo: "Diagnostic and discriminative accuracy of plasma phosphorylated tau 217 for symptomatic Alzheimer's disease in a Chinese cohort", citation: "Che et al., 2025", ingestadoEn: ahora - dia * 2 },
+      { fileName: "guia_dcl_biomarcadores.docx", chunks: 18, pages: 18, titulo: "Guía de práctica clínica: biomarcadores plasmáticos en deterioro cognitivo leve", ingestadoEn: ahora - dia * 4 },
+      { fileName: "biomarcadores_plasma.xlsx", chunks: 5, pages: 5, ingestadoEn: ahora - dia * 6 },
+      { fileName: "protocolo-extraccion.png", chunks: 2, pages: 1, titulo: "Protocolo de extracción y procesamiento de muestras", ingestadoEn: ahora - dia * 9 },
+      { fileName: "notion-la-literatura.md", chunks: 2, pages: 2, origen: "notion" as const, notionPageId: "p1", ingestadoEn: ahora - dia * 11 },
+      { fileName: "notion-brand-guidelines.md", chunks: 1, pages: 1, origen: "notion" as const, notionPageId: "p2", ingestadoEn: ahora - dia * 11 },
+      { fileName: "10_influenza_extenso.pdf", chunks: 20, pages: 11, citation: "Epidemiology et al., 2024", ingestadoEn: ahora - dia * 40 },
+      { fileName: "consenso-2025.pdf", chunks: 0, pages: 0, status: "processing" as const, ingestadoEn: ahora - 20_000 },
+      { fileName: "escaneo-ilegible.pdf", chunks: 0, pages: 0, status: "failed" as const, error: "'escaneo-ilegible.pdf' no contiene texto legible: ni texto propio ni texto reconocible en sus imágenes.", ingestadoEn: ahora - dia * 3 },
+    ];
+    let creados = 0;
+    for (const m of muestras) {
+      const previo = await ctx.db
+        .query("documents")
+        .withIndex("porPropietarioYNombre", (q) =>
+          q.eq("propietario", dueno._id).eq("fileName", m.fileName),
+        )
+        .first();
+      if (previo) continue;
+      await ctx.db.insert("documents", {
+        sha256: `${"0".repeat(60)}${String(creados).padStart(4, "0")}`,
+        pages: 0,
+        chunks: 0,
+        status: "ready",
+        propietario: dueno._id,
+        ingestadoEn: ahora,
+        origen: "subida",
+        ...m,
+      });
+      creados += 1;
+    }
+    return { creados };
   },
 });

@@ -23,17 +23,20 @@ import { DocumentsPanel } from './components/DocumentsPanel';
 import { Header } from './components/Header';
 import { LimiteErrores } from './components/LimiteErrores';
 import { SessionSidebar } from './components/SessionSidebar';
+import { Biblioteca } from './components/Biblioteca';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SourcesPanel } from './components/SourcesPanel';
 import { avisarSiEsFatal, onSalidaForzada, useAcceso, type MotivoSalida } from './lib/auth';
 import { codigoDeError, mensajeDeError } from './lib/errores';
 import type { CitationRef } from './lib/markdown';
 import { mensajeDesdeDoc, type MensajeDoc } from './lib/mensajes';
+import { useDocumentos } from './lib/useDocumentos';
 import { leerAvisoNotion, urlSinAvisoNotion } from './lib/notion';
 import { escucharAvisos } from './lib/notionEmergente';
 import type {
   AvisoNotion,
   ChatMessage,
+  DocumentStatus,
   EstadoConexion,
   Me,
   ModoPensamiento,
@@ -313,6 +316,14 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   // sitio y scrim, así que nunca están abiertos los dos a la vez.
   const [docsOpen, setDocsOpen] = useState(() => notionAviso !== null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** La vista de todos los documentos, y con qué estado se pidió abrirla. */
+  const [biblioOpen, setBiblioOpen] = useState(false);
+  const [biblioEstado, setBiblioEstado] = useState<DocumentStatus | null>(null);
+
+  // La lista de documentos y sus acciones viven aquí, no en el panel: las
+  // comparten el panel y la vista de todos, así que una sola suscripción y un
+  // solo "borrar". Ver lib/useDocumentos.ts.
+  const documentos = useDocumentos(docsOpen || biblioOpen);
 
   // Y el camino normal: la emergente que pidió el consentimiento a Notion
   // manda el aviso por el canal de mismo origen y se cierra. Se escucha aquí,
@@ -633,6 +644,18 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
         onClose={closeDocuments}
         notionAviso={notionAviso}
         onNotionAvisoVisto={() => setNotionAviso(null)}
+        documentos={documentos}
+        onVerTodos={(estado) => {
+          setBiblioEstado(estado);
+          setBiblioOpen(true);
+        }}
+      />
+
+      <Biblioteca
+        open={biblioOpen}
+        onClose={() => setBiblioOpen(false)}
+        documentos={documentos}
+        estadoInicial={biblioEstado}
       />
 
       {settingsOpen && (

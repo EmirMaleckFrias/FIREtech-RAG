@@ -67,6 +67,17 @@
      producto anterior; esa placa ya no existe. */
   --logo-disc: #ffffff;
 
+  /* Un color por FAMILIA de formato de documento. Se usan solo como lomo de
+     2 px de la ficha y como tramo de la barra de composición: sirven para
+     barrer la rejilla con la vista, no para decorar. Contrastan entre sí
+     incluso en escala de grises, porque el color nunca es el único canal (la
+     ficha lleva además su sigla escrita). */
+  --fmt-pdf: #d6001c;
+  --fmt-word: #2563eb;
+  --fmt-hoja: #16a34a;
+  --fmt-imagen: #7c3aed;
+  --fmt-texto: #a8a29e;
+
   /* semánticos */
   --green: #16a34a;
   --red: #dc2626;
@@ -136,6 +147,14 @@
   --accent-soft-2: rgba(255, 90, 99, 0.18);
   --accent-border: rgba(255, 90, 99, 0.42);
   --chip-text: #ff8087;
+
+  /* Aclarados para el fondo oscuro: los del tema claro caen por debajo de
+     3:1 sobre #101010 y el lomo desaparecía. */
+  --fmt-pdf: #ff5a63;
+  --fmt-word: #60a5fa;
+  --fmt-hoja: #4ade80;
+  --fmt-imagen: #a78bfa;
+  --fmt-texto: #78716c;
 
   --green: #4ade80;
   --red: #f87171;
@@ -2461,7 +2480,10 @@ textarea {
   right: 0;
   bottom: 0;
   z-index: 40;
-  width: min(380px, 100vw);
+  /* 560 y no 380: con 380 la ficha de un documento tenía que meter cita,
+     título, peso, fecha, nombre de fichero y dos botones en el ancho de un
+     móvil, y todo competía. Ver la nota de FichaDocumento. */
+  width: min(560px, 100vw);
   background: var(--bg);
   border-left: 1px solid var(--border);
   transform: translateX(105%);
@@ -4272,6 +4294,21 @@ button.doc-badge-failed:active {
   .dropzone-active svg {
     transform: none;
   }
+  /* Lo nuevo de documentos: la entrada de la ficha y de la rejilla, el
+     destello de "listo" y el tic. La barra de peso deja de transicionar: es
+     movimiento no pedido por la usuaria. */
+  .ficha,
+  .ficha-destella,
+  .biblio-rejilla,
+  .ficha-listo-flash {
+    animation: none;
+  }
+
+  .ficha-peso-relleno,
+  .biblio {
+    transition: none;
+  }
+
 }
 
 /* ----------------------------------------------------------------------
@@ -4882,4 +4919,629 @@ button.doc-badge-failed:active {
 
 .fallo-card .settings-signout {
   align-self: center;
+}
+
+/* ==========================================================================
+   Documentos: la banda del corpus y la ficha
+   --------------------------------------------------------------------------
+   Rediseño de la sección entera. Lo que había era una lista de filas de 380 px
+   con el nombre del fichero en monoespaciada como elemento más gritón y una
+   insignia "Listo" en el 100 % de los documentos.
+
+   Tres reglas que sostienen esto:
+   - Ninguna ficha lleva sombra propia ni se levanta al pasar por encima. El
+     hover cambia el borde y revela las acciones; nada más. Una rejilla de
+     tarjetas con sombra y `scale(1.02)` es el tópico que hay que evitar.
+   - El color de formato entra solo por el lomo izquierdo (2 px) y por la barra
+     de composición, y nunca es el único canal: la ficha lleva su sigla escrita.
+   - Una sola animación de entrada, escalonada por la propia lista, y ninguna
+     al pasar por encima.
+   ========================================================================== */
+
+/* --- la banda del corpus --------------------------------------------------- */
+.banda {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0 14px 14px;
+  padding: 14px 16px 15px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.banda-cifras {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.banda-cifras strong {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.banda-sep {
+  margin: 0 7px;
+  color: var(--text-3);
+}
+
+.banda-barra {
+  display: flex;
+  gap: 2px;
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--inset);
+}
+
+.banda-tramo {
+  min-width: 3px;
+  border-radius: 999px;
+  background: var(--fmt-texto);
+}
+
+.banda-tramo-pdf { background: var(--fmt-pdf); }
+.banda-tramo-word { background: var(--fmt-word); }
+.banda-tramo-hoja { background: var(--fmt-hoja); }
+.banda-tramo-imagen { background: var(--fmt-imagen); }
+.banda-tramo-texto { background: var(--fmt-texto); }
+
+.banda-leyenda {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.banda-leyenda li {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.banda-punto {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.banda-leyenda-n {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.banda-avisos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 1px 0 0;
+}
+
+.banda-aviso {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.banda-aviso-proceso {
+  border-color: color-mix(in srgb, var(--amber) 30%, transparent);
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+  color: var(--amber);
+}
+
+.banda-aviso-error {
+  border-color: color-mix(in srgb, var(--red) 30%, transparent);
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  color: var(--red);
+}
+
+button.banda-aviso {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+button.banda-aviso-proceso:hover { background: color-mix(in srgb, var(--amber) 16%, transparent); }
+button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, transparent); }
+
+/* --- la ficha de un documento --------------------------------------------- */
+.fichas {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.ficha {
+  position: relative;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--fmt-texto);
+  border-radius: 12px;
+  background: var(--surface);
+  transition: border-color 0.15s ease;
+  animation: fade-up 0.28s ease both;
+}
+
+.ficha-pdf { border-left-color: var(--fmt-pdf); }
+.ficha-word { border-left-color: var(--fmt-word); }
+.ficha-hoja { border-left-color: var(--fmt-hoja); }
+.ficha-imagen { border-left-color: var(--fmt-imagen); }
+.ficha-texto { border-left-color: var(--fmt-texto); }
+
+.ficha:hover,
+.ficha:focus-within {
+  border-top-color: var(--border-strong);
+  border-right-color: var(--border-strong);
+  border-bottom-color: var(--border-strong);
+}
+
+.ficha-cuerpo {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 14px;
+}
+
+/* El monograma del formato: dice lo mismo que el lomo, escrito, para quien no
+   distingue los colores. */
+.ficha-sigla {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--inset);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+}
+
+.ficha-texto {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* La cita: la identidad del documento. Es la línea grande. */
+.ficha-principal {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.005em;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* El título de la obra, a dos líneas como máximo: en una ficha lo que hace
+   falta es reconocerlo, no leerlo entero. */
+.ficha-secundaria {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ficha-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ficha-peso {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-2);
+}
+
+.ficha-peso-riel {
+  display: block;
+  width: 46px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--inset);
+  overflow: hidden;
+}
+
+.ficha-peso-relleno {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--text-3);
+  transform-origin: 0 50%;
+  transition: transform 0.3s ease;
+}
+
+.ficha-dato {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+}
+
+.ficha-notion img {
+  opacity: 0.75;
+}
+
+.ficha-insignia {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+}
+
+.ficha-insignia-proceso {
+  border-color: color-mix(in srgb, var(--amber) 30%, transparent);
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+  color: var(--amber);
+}
+
+.ficha-insignia-error {
+  border-color: color-mix(in srgb, var(--red) 30%, transparent);
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  color: var(--red);
+  cursor: pointer;
+}
+
+.ficha-insignia-error:hover {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+}
+
+/* El nombre del fichero, al final y pequeño: es el dato administrativo, no la
+   identidad del documento. */
+.ficha-fichero {
+  margin: 2px 0 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.ficha-acciones {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Las acciones se revelan al pasar por encima o al enfocar con teclado. Una
+   papelera permanente en cada ficha es ruido, y un clic de más cerca del
+   desastre. */
+.ficha-accion {
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.ficha:hover .ficha-accion,
+.ficha:focus-within .ficha-accion {
+  opacity: 1;
+}
+
+/* Sin puntero (móvil, tableta) no hay "pasar por encima": siempre visibles. */
+@media (hover: none) {
+  .ficha-accion {
+    opacity: 1;
+  }
+}
+
+.ficha-confirmar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.ficha-error-detalle {
+  margin: 0;
+  padding: 0 14px 12px 60px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+
+/* Al pasar a "listo": un tic verde que aparece y se va. Una sola vez, y solo
+   por lo que acaba de cambiar. */
+.ficha-destella {
+  animation: fade-up 0.28s ease both, ficha-flash 1.5s ease both;
+}
+
+.ficha-listo-flash {
+  position: absolute;
+  top: 11px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  color: var(--green);
+  animation: ficha-tic 1.5s ease both;
+}
+
+@keyframes ficha-flash {
+  0% { border-top-color: color-mix(in srgb, var(--green) 50%, transparent);
+       border-right-color: color-mix(in srgb, var(--green) 50%, transparent);
+       border-bottom-color: color-mix(in srgb, var(--green) 50%, transparent); }
+  100% { border-top-color: var(--border); border-right-color: var(--border); border-bottom-color: var(--border); }
+}
+
+@keyframes ficha-tic {
+  0%, 70% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: scale(0.8); }
+}
+
+/* --- cabecera de la lista dentro del panel -------------------------------- */
+.fichas-cabecera {
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 16px 9px;
+}
+
+.fichas-cabecera h3 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.fichas-cabecera button {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--accent);
+  border-radius: 7px;
+  padding: 2px 6px;
+  transition: background 0.15s ease;
+}
+
+.fichas-cabecera button:hover {
+  background: var(--accent-soft);
+}
+
+/* ==========================================================================
+   Todos tus documentos (components/Biblioteca.tsx)
+   --------------------------------------------------------------------------
+   El panel lateral es la entrada; esto es el archivo. Se abre encima de todo
+   porque para buscar entre cien documentos hace falta el ancho de la pantalla,
+   que es exactamente lo que un panel de 560 px no da.
+
+   La rejilla NO anima ficha por ficha: con cien documentos, cien entradas
+   escalonadas es el efecto genérico que delata a una pantalla generada. Anima
+   una vez el contenedor y ya.
+   ========================================================================== */
+
+.biblio {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  opacity: 1;
+  transition: opacity 0.18s ease, visibility 0s;
+}
+
+.biblio-cerrada {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.18s ease, visibility 0s linear 0.18s;
+}
+
+.biblio-cabecera {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 20px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.biblio-cabecera h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.biblio-cabecera .icon-btn {
+  margin-left: auto;
+}
+
+.biblio-cuerpo {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 6px 40px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* La banda y los controles comparten el ancho de la rejilla, centrados: en una
+   pantalla de 1600 px una barra de 1600 px de ancho no se lee. */
+.biblio-cuerpo > * {
+  max-width: 1180px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.biblio-controles {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 0 14px 14px;
+}
+
+.biblio-buscador {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-3);
+  transition: border-color 0.15s ease;
+}
+
+.biblio-buscador:focus-within {
+  border-color: var(--accent-border);
+}
+
+.biblio-buscador svg {
+  flex-shrink: 0;
+}
+
+.biblio-buscador input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.biblio-buscador input::placeholder {
+  color: var(--text-3);
+}
+
+/* El aspa nativa del type=search en WebKit no hereda el color y queda como una
+   mancha oscura sobre el tema oscuro. */
+.biblio-buscador input::-webkit-search-cancel-button {
+  filter: grayscale(1) opacity(0.5);
+}
+
+.biblio-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.biblio-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--text-2);
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.biblio-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.biblio-chip.es-activo {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--chip-text);
+}
+
+.biblio-orden {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.biblio-orden select {
+  font-size: 12.5px;
+  padding: 6px 8px;
+  width: auto;
+}
+
+.biblio-cuenta {
+  margin: 0 0 10px;
+  padding: 0 14px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.biblio-rejilla {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0 14px;
+  list-style: none;
+  animation: fade-up 0.25s ease both;
+}
+
+/* La entrada la hace el contenedor, no cada ficha. */
+.biblio-rejilla .ficha {
+  animation: none;
+}
+
+.biblio-rejilla .ficha-destella {
+  animation: ficha-flash 1.5s ease both;
+}
+
+.biblio-cargando {
+  padding: 24px 14px;
+  font-size: 13px;
+}
+
+@media (max-width: 560px) {
+  .biblio-cabecera { padding: 13px 14px 11px; }
+  .biblio-orden { margin-left: 0; }
+  .biblio-rejilla { grid-template-columns: 1fr; }
 }

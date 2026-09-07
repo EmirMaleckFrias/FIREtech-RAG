@@ -42,6 +42,7 @@ import type * as ingesta_util from "../ingesta/util.js";
 import type * as lib_citas from "../lib/citas.js";
 import type * as lib_config from "../lib/config.js";
 import type * as lib_gateway from "../lib/gateway.js";
+import type * as lib_latencia from "../lib/latencia.js";
 import type * as lib_modos from "../lib/modos.js";
 import type * as lib_telemetry from "../lib/telemetry.js";
 import type * as mensajes from "../mensajes.js";
@@ -102,6 +103,7 @@ declare const fullApi: ApiFromModules<{
   "lib/citas": typeof lib_citas;
   "lib/config": typeof lib_config;
   "lib/gateway": typeof lib_gateway;
+  "lib/latencia": typeof lib_latencia;
   "lib/modos": typeof lib_modos;
   "lib/telemetry": typeof lib_telemetry;
   mensajes: typeof mensajes;
