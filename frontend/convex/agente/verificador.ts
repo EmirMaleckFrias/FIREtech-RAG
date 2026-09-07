@@ -547,7 +547,7 @@ async function dictaminar(pendientes: Pendiente[], a: Ajustes, tel: Telemetria):
 
   let r: Awaited<ReturnType<typeof gateway.completionJson>>;
   try {
-    r = await gateway.completionJson(kwargs, a);
+    r = await gateway.completionJson(kwargs, a, { perfil: "chat", tel });
   } catch (exc) {
     tel.anota("verificador", modelo, null, {
       ms: Date.now() - t0,

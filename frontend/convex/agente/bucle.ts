@@ -390,7 +390,7 @@ export const correr = internalAction({
         let modeloRonda = a.modelo;
         let finish: string | null = null;
         try {
-          for await (const trozo of gateway.streamCompletion(kwargs, a)) {
+          for await (const trozo of gateway.streamCompletion(kwargs, a, { perfil: "chat", tel })) {
             if (trozo.usage) {
               usage = trozo.usage;
               if (trozo.modelo) modeloRonda = trozo.modelo;
@@ -764,7 +764,7 @@ async function responderSinDocumentos(
     ],
     ...gateway.razonamiento("low"),
   };
-  const { datos } = await gateway.crearCompletion(kwargs, a);
+  const { datos } = await gateway.crearCompletion(kwargs, a, { perfil: "chat", tel });
   const choice = datos?.choices?.[0];
   tel.anota("agente", datos?.model || a.modelo, gateway.usoDe(datos?.usage), {
     ms: Date.now() - t0,

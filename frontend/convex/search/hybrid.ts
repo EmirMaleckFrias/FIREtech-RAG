@@ -376,6 +376,18 @@ export async function buscarHibridoVarias(
 
   // 1. Embeddings: un lote con las consultas distintas y no vacías.
   const textos = consultas.map((c) => (c ?? "").trim());
+  // El léxico no depende del vector: empieza mientras se consulta la caché
+  // y el gateway genera los embeddings. Se esperan AMBOS lados antes de
+  // fusionar; no se recortan candidatos ni se relajan filtros/propietario.
+  // `intentar` consume inmediatamente los fallos, aun si el embedding tarda.
+  const lexicas = textos.map((texto) => {
+    const terminos = texto ? terminosDeBusqueda(texto) : [];
+    return terminos.length
+      ? intentar("lexico", () => ctx.runQuery(internal.search.hybrid.lexica, {
+          propietario, terminos: terminos.join(" "), n: limiteLexico, filtros: activos,
+        }), tel)
+      : Promise.resolve(null);
+  });
   const unicos = Array.from(new Set(textos.filter(Boolean)));
   let vectores: Map<string, number[]> | null = null;
   if (unicos.length) {
@@ -425,26 +437,13 @@ export async function buscarHibridoVarias(
   // 2. Por consulta, los dos lados en paralelo. Cada lado devuelve ids en
   //    orden de rango, o null si falló / no procede.
   const lados = await Promise.all(
-    textos.map(async (texto) => {
-      const terminos = texto ? terminosDeBusqueda(texto) : [];
+    textos.map(async (texto, i) => {
       const vector = vectores?.get(texto);
       const [denso, lexico] = await Promise.all([
         vector
           ? intentar("denso", () => ladoDenso(ctx, vector, elegido, limiteDenso), tel)
           : Promise.resolve(null),
-        terminos.length
-          ? intentar(
-              "lexico",
-              () =>
-                ctx.runQuery(internal.search.hybrid.lexica, {
-                  propietario,
-                  terminos: terminos.join(" "),
-                  n: limiteLexico,
-                  filtros: activos,
-                }),
-              tel,
-            )
-          : Promise.resolve(null),
+        lexicas[i],
       ]);
       return { denso, lexico };
     }),

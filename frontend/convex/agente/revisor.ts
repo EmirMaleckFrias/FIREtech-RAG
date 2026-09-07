@@ -282,7 +282,7 @@ async function _corregir(
 
   let r: Awaited<ReturnType<typeof gateway.crearCompletion>>;
   try {
-    r = await gateway.crearCompletion(kwargs, a);
+    r = await gateway.crearCompletion(kwargs, a, { perfil: "chat", tel });
   } catch (exc) {
     tel.anota("revisor", modelo, null, {
       ms: Date.now() - t0,

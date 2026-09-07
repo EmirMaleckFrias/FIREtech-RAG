@@ -148,6 +148,35 @@ const TRES = [
 const CONSULTA_ZORRO = vector({ 1: 3, 0: 2, 2: 1 });
 
 describe("buscarHibrido", () => {
+  test("el léxico empieza con el embedding pendiente y conserva la fusión y el dueño", async () => {
+    const t = convexTest(schema);
+    const [a, b, c] = await sembrar(t, TRES);
+    let liberar!: () => void;
+    const pendiente = new Promise<void>((r) => { liberar = r; });
+    const embed = vi.spyOn(gateway, "embed").mockImplementation(async () => {
+      await pendiente;
+      return { vectores: [CONSULTA_ZORRO], usage: USO, modelo: MODELO };
+    });
+    let lexicoIniciado = false;
+    await t.action(async (ctx) => {
+      const runQuery: ActionCtx["runQuery"] = async (ref, args) => {
+        if (getFunctionName(ref) === "search/hybrid:lexica") {
+          expect(args).toMatchObject({ propietario: DUENO });
+          lexicoIniciado = true;
+        }
+        return ctx.runQuery(ref, args);
+      };
+      const busqueda = buscarHibrido({ ...ctx, runQuery }, DUENO, "zorro", {}, 3);
+      try {
+        await vi.waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+        expect(lexicoIniciado).toBe(true);
+      } finally { liberar(); }
+      const r = await busqueda;
+      expect(r.recuperacion).toBe("hibrida");
+      expect(r.fragmentos.map((f) => f._id)).toEqual([a, b, c]);
+    });
+  });
+
   test("un fragmento presente en los dos lados sube por encima del primero de un solo lado", async () => {
     const t = convexTest(schema);
     const [a, b, c] = await sembrar(t, TRES);

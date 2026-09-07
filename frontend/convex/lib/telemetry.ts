@@ -180,7 +180,8 @@ export class Telemetria {
       por_componente: porComponente,
       por_modelo: porModelo,
       cost_usd: this.costeUsd(),
-      pricing: ETIQUETA_PRECIOS,
+      pricing: ETIQUETA_PRECIOS + (this.meta.chat_service_tier_solicitado === "priority"
+        ? "; no incluye el posible recargo de priority" : ""),
       counters: { ...this.contadores },
       meta: { ...this.meta },
     };

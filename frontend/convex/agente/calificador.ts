@@ -155,6 +155,7 @@ async function calificarLote(
         ...gateway.razonamiento(a.razonamientoCalificador),
       },
       a,
+      { perfil: "chat", tel },
     );
     modeloReal = r.modelo || modelo;
     usage = r.usage;

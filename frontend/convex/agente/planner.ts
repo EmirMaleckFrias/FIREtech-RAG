@@ -177,6 +177,7 @@ export async function planificar(
         ...gateway.razonamiento(a.razonamientoPlanner),
       },
       a,
+      { perfil: "chat", tel },
     );
     const crudos: unknown = r.datos?.items;
     if (!Array.isArray(crudos)) throw new Error("respuesta sin lista items");
@@ -305,6 +306,7 @@ export async function clasificar(
         ...gateway.razonamiento(a.razonamientoCalificador),
       },
       a,
+      { perfil: "chat", tel },
     );
     // Tolerante con la forma ("sobre el asistente", mayúsculas), estricto con
     // el contenido: lo que no sea una de las tres clases es documental.

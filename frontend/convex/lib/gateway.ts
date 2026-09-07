@@ -11,6 +11,7 @@
 // El proveedor es SIEMPRE el gateway, nunca la API de OpenAI directa, y los
 // modelos van con el proveedor por delante (`openai/gpt-5.4`).
 import { ajustes, exigirClave, type Ajustes } from "./config";
+import { prepararChat, anotarTier, tierDe, type PerfilChat } from "./latencia";
 
 // --- Razonamiento -----------------------------------------------------------
 //
@@ -189,11 +190,15 @@ export function usoDe(usage: any): UsoTokens {
 export async function crearCompletion(
   kwargs: Record<string, unknown>,
   a: Ajustes = ajustes(),
+  perfil?: PerfilChat,
 ): Promise<{ datos: any; razonamientoRechazado: boolean }> {
+  const cuerpo = await prepararChat(kwargs, perfil);
   return plaza(async () => {
     try {
-      const r = await peticion("/chat/completions", kwargs, a);
-      return { datos: await r.json(), razonamientoRechazado: false };
+      const r = await peticion("/chat/completions", cuerpo, a);
+      const datos = await r.json();
+      anotarTier(tierDe(datos), perfil);
+      return { datos, razonamientoRechazado: false };
     } catch (exc) {
       if (
         !(exc instanceof ErrorGateway) ||
@@ -203,10 +208,12 @@ export async function crearCompletion(
         throw exc;
       }
       _razonamientoRechazadoHasta = Date.now() + RAZONAMIENTO_REINTENTO_MS;
-      const sin = { ...kwargs };
+      const sin = { ...cuerpo };
       delete sin.reasoning_effort;
       const r = await peticion("/chat/completions", sin, a);
-      return { datos: await r.json(), razonamientoRechazado: true };
+      const datos = await r.json();
+      anotarTier(tierDe(datos), perfil);
+      return { datos, razonamientoRechazado: true };
     }
   });
 }
@@ -219,6 +226,7 @@ export async function crearCompletion(
 export async function completionJson(
   kwargs: Record<string, unknown>,
   a: Ajustes = ajustes(),
+  perfil?: PerfilChat,
 ): Promise<{
   datos: any;
   usage: UsoTokens;
@@ -229,6 +237,7 @@ export async function completionJson(
   const { datos, razonamientoRechazado: rechazado } = await crearCompletion(
     { ...kwargs, response_format: { type: "json_object" } },
     a,
+    perfil,
   );
   const choice = datos?.choices?.[0];
   const contenido = choice?.message?.content;
@@ -264,9 +273,10 @@ export interface TrozoStream {
 export async function* streamCompletion(
   kwargs: Record<string, unknown>,
   a: Ajustes = ajustes(),
+  perfil?: PerfilChat,
 ): AsyncGenerator<TrozoStream> {
   const cuerpo = {
-    ...kwargs,
+    ...await prepararChat(kwargs, perfil),
     stream: true,
     stream_options: { include_usage: true },
   };
@@ -276,6 +286,7 @@ export async function* streamCompletion(
   const lector = r.body.getReader();
   const dec = new TextDecoder();
   let resto = "";
+  let tierServido: string | undefined;
   // Tope de INACTIVIDAD del stream. `peticion` suelta su AbortController al
   // recibir las cabeceras, así que un stream que se queda mudo a mitad
   // colgaba el `for await` hasta que la acción muriera por la plataforma, y
@@ -321,6 +332,7 @@ export async function* streamCompletion(
         continue; // un trozo partido por el medio: el siguiente lo completa
       }
       const trozo: TrozoStream = {};
+      tierServido = tierDe(d) ?? tierServido;
       if (d.usage) {
         trozo.usage = usoDe(d.usage);
         trozo.modelo = d.model;
@@ -342,6 +354,7 @@ export async function* streamCompletion(
       if (Object.keys(trozo).length) yield trozo;
     }
   }
+  anotarTier(tierServido, perfil);
 }
 
 // --- Embeddings -------------------------------------------------------------
