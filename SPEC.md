@@ -698,9 +698,14 @@ cada regla):
 - **PDF** (`ingesta/pdf.ts`, `lineas.ts`, `paper.ts`): las líneas físicas se reconstruyen desde
   los items de pdf.js por coordenada vertical y, en una página a dos columnas, se separan por
   el canal vertical que ninguna línea cruza y se leen columna a columna (una línea que cruza
-  el canal es de ancho completo y cierra la banda); las filas de tabla se reconocen por
-  geometría (huecos horizontales grandes), no por densidad de cifras; las líneas se unen en párrafos
-  recomponiendo palabras cortadas con guion. La sección vigente se detecta por nombre
+  el canal es de ancho completo y cierra la banda, y una fila de tabla a todo el ancho con
+  vecinas alineadas no se parte aunque no lo pise); las filas de tabla se reconocen por
+  geometría (huecos horizontales grandes, sin celdas de prosa larga), no por densidad de
+  cifras, y dos o más seguidas forman una tabla propia: fragmentos `table` con las columnas
+  reconstruidas por posición (`filasDeTablaPdf`), la cabecera repetida en cada bloque, la celda
+  ausente vacía en su sitio y el rótulo y la sección en el contexto, con `tablaEnBloques`
+  compartido con Word (`ingesta/tablas.ts`); una fila suelta sigue siendo un párrafo. Las
+  líneas se unen en párrafos recomponiendo palabras cortadas con guion. La sección vigente se detecta por nombre
   (Methods, Resultados...) o por maqueta (línea corta, sin punto final, con más cuerpo o en
   negrita que el texto). Título, primer autor, año y DOI salen de la primera página con
   heurísticas; `citation` solo se rellena con autor y año, nunca con el título. La

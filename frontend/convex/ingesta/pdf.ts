@@ -25,8 +25,9 @@ import {
   empaquetar,
   partirParrafoLargo,
 } from "./chunking";
-import { abreParrafo, esPalabraDeEnlace, unirLineas } from "./lineas";
+import { abreParrafo, esPalabraDeEnlace, ROTULO_TABLA, unirLineas } from "./lineas";
 import * as paper from "./paper";
+import { tablaEnBloques, type CeldaTabla, type FilaTabla } from "./tablas";
 import {
   META_VACIA,
   SIN_AVISOS,
@@ -38,6 +39,15 @@ import {
   type ResultadoOcr,
 } from "./tipos";
 
+/** Una celda de una línea: el texto entre dos huecos grandes y dónde empieza
+ *  y acaba en x. Es lo que permite reconstruir las columnas de una tabla
+ *  comparando filas vecinas (ver `filasDeTablaPdf`). */
+export interface CeldaPdf {
+  texto: string;
+  x0: number;
+  x1: number;
+}
+
 /** Una línea física con su formato y su geometría. */
 export interface LineaPdf extends paper.LineaFormato {
   /** Fila de tabla, decidida por geometría (ver `construirLineas`). */
@@ -47,6 +57,8 @@ export interface LineaPdf extends paper.LineaFormato {
   /** x de inicio y de fin de cada item que sigue a un hueco grande, para
    *  comprobar la alineación de columnas con las líneas vecinas. */
   columnas: number[];
+  /** Las celdas de la línea (una si no hay huecos grandes). */
+  celdas: CeldaPdf[];
   /** Base de la línea (coordenada y de pdf.js, crece hacia arriba). */
   y: number;
 }
@@ -146,6 +158,9 @@ function montarLinea(items: ItemTexto[], nombresFuente: Map<string, string>): Li
   let strPrevio = ordenados[0].str;
   let huecos = 0;
   const columnas: number[] = [];
+  // Las celdas se van cerrando en cada hueco grande, con su x de inicio y fin.
+  const celdas: CeldaPdf[] = [];
+  let celda: CeldaPdf = { texto: ordenados[0].str.trim(), x0: ordenados[0].x, x1: finPrevio };
   for (let i = 1; i < ordenados.length; i++) {
     const it = ordenados[i];
     const hueco = it.x - finPrevio;
@@ -154,19 +169,24 @@ function montarLinea(items: ItemTexto[], nombresFuente: Map<string, string>): Li
       separador = "  ";
       huecos++;
       columnas.push(it.x, it.x + it.ancho);
-    } else if (hueco > 0.15 * it.tamano || /\s$/.test(strPrevio) || /^\s/.test(it.str)) {
-      separador = " ";
+      celdas.push(celda);
+      celda = { texto: it.str.trim(), x0: it.x, x1: it.x + it.ancho };
+    } else {
+      if (hueco > 0.15 * it.tamano || /\s$/.test(strPrevio) || /^\s/.test(it.str)) separador = " ";
+      celda.texto = `${celda.texto}${separador}${it.str.trim()}`.trim();
+      celda.x1 = Math.max(celda.x1, it.x + it.ancho);
     }
     texto += separador + it.str.trim();
     finPrevio = Math.max(finPrevio, it.x + it.ancho);
     strPrevio = it.str;
   }
+  celdas.push(celda);
   // La negrita sale del nombre de la fuente, que es donde la deja el PDF
   // ("...-Bold", "...-Black"); no es infalible, pero es lo único que hay sin
   // renderizar la página.
   const negrita = caracteresNegrita * 2 > caracteres;
   const mayor = ordenados.reduce((m, it) => (it.tamano > m.tamano ? it : m), ordenados[0]);
-  return { texto: texto.trim(), tamano, negrita, esFila: false, huecos, columnas, y: mayor.y };
+  return { texto: texto.trim(), tamano, negrita, esFila: false, huecos, columnas, celdas, y: mayor.y };
 }
 
 /** Agrupa los items por línea física (misma base), de arriba abajo.
@@ -327,8 +347,9 @@ export function ordenarEnColumnas(grupos: ItemTexto[][], g: number): ItemTexto[]
     izquierda = [];
     derecha = [];
   };
-  for (const grupo of grupos) {
-    if (grupo.some((it) => cruzaCanal(it, g))) {
+  const filaAnchaEn = grupos.map((_, i) => esFilaATodoElAncho(grupos, i, g));
+  for (const [i, grupo] of grupos.entries()) {
+    if (grupo.some((it) => cruzaCanal(it, g)) || filaAnchaEn[i]) {
       volcar();
       salida.push(grupo);
       continue;
@@ -340,6 +361,131 @@ export function ordenarEnColumnas(grupos: ItemTexto[][], g: number): ItemTexto[]
   }
   volcar();
   return salida;
+}
+
+/** x de inicio de los items que siguen a un hueco grande: las columnas de la
+ *  línea, para compararlas con sus vecinas. */
+function inicioDeColumnas(grupo: ItemTexto[]): number[] {
+  const ordenados = grupo.slice().sort((a, b) => a.x - b.x);
+  const umbral = umbralDeHueco(ordenados);
+  const salida: number[] = [];
+  let finPrevio = ordenados[0].x + ordenados[0].ancho;
+  for (let i = 1; i < ordenados.length; i++) {
+    if (ordenados[i].x - finPrevio >= umbral) salida.push(ordenados[i].x);
+    finPrevio = Math.max(finPrevio, ordenados[i].x + ordenados[i].ancho);
+  }
+  return salida;
+}
+
+/** ¿Es el grupo `i` una fila de tabla a todo el ancho que NO pisa el canal?
+ *
+ *  Antes toda línea que no cruzaba el canal se partía en su lado izquierdo y
+ *  su derecho, y una fila de tabla de cuatro celdas cuyo hueco central caía
+ *  justo sobre el canal salía en dos mitades, cada una con sus celdas: no se
+ *  perdía el dato, pero la fila dejaba de ser una fila (era el límite conocido
+ *  de OPERACION.md). Una línea de prosa fundida de las dos columnas tiene UN
+ *  solo hueco grande (el canal); una fila de tabla a todo el ancho tiene dos o
+ *  más, y sus vecinas de arriba o de abajo también, con alguna columna
+ *  alineada. Con esas tres cosas a la vez se deja entera. */
+function esFilaATodoElAncho(grupos: ItemTexto[][], i: number, g: number): boolean {
+  const grupo = grupos[i];
+  const aAmbosLados = (gr: ItemTexto[]) =>
+    gr.some((it) => it.x + it.ancho <= g + TOL_CANAL) && gr.some((it) => it.x >= g - TOL_CANAL);
+  if (!aAmbosLados(grupo) || contarHuecos(grupo) < 2) return false;
+  const columnas = inicioDeColumnas(grupo);
+  const tamano = medianaPonderada(grupo);
+  const tolerancia = Math.max(2, 0.6 * tamano);
+  for (const vecina of [grupos[i - 1], grupos[i + 1]]) {
+    if (!vecina || !aAmbosLados(vecina) || contarHuecos(vecina) < 2) continue;
+    if (vecina.some((it) => cruzaCanal(it, g))) return true;
+    const suyas = inicioDeColumnas(vecina);
+    if (columnas.some((c) => suyas.some((d) => Math.abs(c - d) <= tolerancia))) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Tablas por geometría
+// ---------------------------------------------------------------------------
+/** Filas de tabla mínimas para tratar un tramo de líneas `esFila` como una
+ *  tabla con columnas y cabecera. Una fila suelta sigue siendo un párrafo con
+ *  sus celdas separadas por dos espacios, como hasta ahora. */
+export const MIN_FILAS_TABLA = 2;
+
+/**
+ * Reconstruye las columnas de una tabla a partir de las celdas de sus filas.
+ *
+ * Es lo que Word da hecho en su cuadrícula y el PDF no: aquí solo hay celdas
+ * con su x de inicio y de fin. Las columnas son BANDAS de x definidas por
+ * POSICIÓN: las filas con más celdas tienen exactamente una por columna, así
+ * que la celda k de cada una de ellas es la columna k y la banda k es su
+ * unión. Cada celda de las demás filas cae en las bandas que su texto solapa:
+ * la primera es su columna y, si abarca varias, `ancho` > 1 (como una
+ * combinada de Word); una que no solapa ninguna va a la más cercana por su
+ * centro. Una fila con menos celdas deja vacías las columnas que no tiene, en
+ * su sitio, que es lo que permite leer cada valor bajo su cabecera.
+ *
+ * Por qué por posición y no agrupando por x: las dos primeras versiones
+ * agrupaban las celdas por dónde empiezan o por solapamiento de intervalos, y
+ * una cabecera centrada ("Control" sobre "72.4 (6.1)") empieza 30 o 40 pt más
+ * a la derecha que sus datos, así que salía en una columna propia y la tabla
+ * quedaba "Variable |  | Control |  | AD". Lo cazó la propia prueba de la
+ * cabecera en negrita, cuyas celdas no están alineadas con las de los datos.
+ *
+ * La forma de salida es la misma `FilaTabla` que usa Word, así que
+ * `tablaEnBloques` (cabecera repetida, bloques de ~400 tokens) sirve igual.
+ */
+export function filasDeTablaPdf(lineas: LineaPdf[]): FilaTabla[] {
+  if (!lineas.length) return [];
+  const tamano = medianaSimple(lineas.map((l) => l.tamano)) || 10;
+  const tolerancia = Math.max(2, 0.6 * tamano);
+  // Las filas con el máximo de celdas tienen UNA celda por columna, así que su
+  // celda k ES la columna k: la banda k es la unión de esas celdas, esté la
+  // cabecera alineada con los datos o centrada sobre ellos.
+  const maxCeldas = Math.max(...lineas.map((l) => l.celdas.length));
+  const densas = lineas.filter((l) => l.celdas.length === maxCeldas);
+  const bandas: Array<[number, number]> = [];
+  for (let k = 0; k < maxCeldas; k++) {
+    const x0 = Math.min(...densas.map((l) => l.celdas[k].x0));
+    const x1 = Math.max(...densas.map((l) => l.celdas[k].x1));
+    bandas.push([x0, x1]);
+  }
+  const centro = (b: [number, number]) => (b[0] + b[1]) / 2;
+  /** Las bandas que la celda solapa (por más que la tolerancia), o la más
+   *  cercana por su centro si no solapa ninguna. */
+  const bandasDe = (celda: CeldaPdf): number[] => {
+    const solapes = bandas.map((b) => Math.min(b[1], celda.x1) - Math.max(b[0], celda.x0));
+    const conSolape = solapes.map((v, k) => (v > tolerancia ? k : -1)).filter((k) => k >= 0);
+    if (conSolape.length) return conSolape;
+    const c = (celda.x0 + celda.x1) / 2;
+    let mejor = 0;
+    for (let k = 1; k < bandas.length; k++) {
+      if (Math.abs(centro(bandas[k]) - c) < Math.abs(centro(bandas[mejor]) - c)) mejor = k;
+    }
+    return [mejor];
+  };
+  const filas: FilaTabla[] = [];
+  for (const linea of lineas) {
+    const celdas: string[] = Array<string>(bandas.length).fill("");
+    const reales: CeldaTabla[] = [];
+    for (const celda of linea.celdas) {
+      const suyas = bandasDe(celda);
+      const desde = suyas[0];
+      const ancho = suyas[suyas.length - 1] - desde + 1;
+      celdas[desde] = celdas[desde] ? `${celdas[desde]} ${celda.texto}`.trim() : celda.texto;
+      reales.push({ texto: celda.texto, desde, ancho });
+    }
+    if (!celdas.some(Boolean)) continue;
+    filas.push({ celdas, reales });
+  }
+  return filas;
+}
+
+function medianaSimple(valores: number[]): number {
+  if (!valores.length) return 0;
+  const orden = valores.slice().sort((a, b) => a - b);
+  const mitad = Math.floor(orden.length / 2);
+  return orden.length % 2 ? orden[mitad] : (orden[mitad - 1] + orden[mitad]) / 2;
 }
 
 /** Líneas físicas de una página a partir de sus items, en orden de lectura.
@@ -367,6 +513,16 @@ export function construirLineas(
       continue;
     }
     if (linea.huecos !== 1) continue;
+    // Con un solo hueco, una celda de prosa larga delata que no es una fila
+    // de tabla sino una línea de texto con algo al margen: en las portadas de
+    // Neurology y de Alzheimer's & Dementia el resumen lleva a su derecha una
+    // barra lateral ("MORE ONLINE", "Correspondence") o la dirección de
+    // contacto, alineada línea a línea, y cada línea del resumen salía como
+    // fila de dos celdas (medido el 8 sep 2026 con PMC13382852 y PMC13390017:
+    // el resumen entero acababa troceado en una "tabla"). Una celda de una
+    // tabla de dos columnas de verdad ("Variable | Control", "Edad | 72.4") es
+    // corta.
+    if (linea.celdas.some((c) => esProsaLarga(c.texto))) continue;
     const tolerancia = Math.max(2, 0.6 * linea.tamano);
     const vecinas = [lineas[i - 1], lineas[i + 1]].filter(
       (v): v is LineaPdf => v !== undefined && v.huecos >= 1,
@@ -376,6 +532,12 @@ export function construirLineas(
     );
   }
   return lineas;
+}
+
+/** Una celda que ya no es una celda: más de 12 palabras o más de 70
+ *  caracteres es una frase, no un dato. */
+function esProsaLarga(texto: string): boolean {
+  return texto.length > 70 || texto.split(/\s+/).filter(Boolean).length > 12;
 }
 
 /** Índices de las líneas del borde superior e inferior de la página POR
@@ -696,16 +858,24 @@ export async function parsearPdf(
 
   // (párrafo, páginas que abarca, sección)
   const paras: Array<[string, number[], string]> = [];
+  // Tablas reconstruidas por geometría, en el orden del documento.
+  const tablas: Array<{ filas: FilaTabla[]; paginas: number[]; seccion: string; rotulo: string }> = [];
   let descartados = 0;
   let seccion = "";
   let canonica = "";
 
-  // Segunda pasada: secciones y párrafos. Los encabezados se detectan línea a
-  // línea, porque un encabezado suele ser su propia línea corta. El resto de
-  // líneas se van UNIENDO en párrafos (ver lineas.abreParrafo).
+  // Segunda pasada: secciones, párrafos y tablas. Los encabezados se detectan
+  // línea a línea, porque un encabezado suele ser su propia línea corta. El
+  // resto de líneas se van UNIENDO en párrafos (ver lineas.abreParrafo), salvo
+  // las filas de tabla, que se acumulan aparte: dos o más filas seguidas son
+  // una tabla con columnas y cabecera (ver `filasDeTablaPdf`); una sola sigue
+  // siendo un párrafo con sus celdas separadas por dos espacios.
   let abierto = ""; // párrafo en construcción
-  let abiertoEsFila = false;
   let abiertoPaginas: number[] = []; // páginas que toca (puede cruzar de página)
+  let filasAbiertas: Array<{ linea: LineaPdf; pagina: number }> = [];
+  // El último párrafo cerrado: si es un rótulo ("Table 1. ..."), describe la
+  // tabla que viene justo detrás y viaja en su contexto.
+  let ultimoParrafo = "";
   // Encabezado por formato en construcción: su tamaño, mientras la línea
   // anterior haya sido también de encabezado. Sirve para unir un encabezado
   // partido en dos líneas ("3.2  Longitudinal cognitive trajectories of" /
@@ -720,10 +890,36 @@ export async function parsearPdf(
     const texto = abierto.trim();
     if (texto) {
       for (const pieza of partirParrafoLargo(texto)) paras.push([pieza, abiertoPaginas.slice(), seccion]);
+      ultimoParrafo = texto;
     }
     abierto = "";
-    abiertoEsFila = false;
     abiertoPaginas = [];
+  };
+
+  /** Cierra el tramo de filas acumulado: tabla si son dos o más, párrafo si es
+   *  una sola (como hasta ahora). El rótulo es el párrafo inmediatamente
+   *  anterior si lo parece; un párrafo cualquiera no describe la tabla. */
+  const cerrarTabla = () => {
+    if (!filasAbiertas.length) return;
+    const paginas = [...new Set(filasAbiertas.map((f) => f.pagina))].sort((a, b) => a - b);
+    if (filasAbiertas.length >= MIN_FILAS_TABLA) {
+      const filas = filasDeTablaPdf(filasAbiertas.map((f) => f.linea));
+      if (filas.length) {
+        tablas.push({ filas, paginas, seccion, rotulo: ROTULO_TABLA.test(ultimoParrafo) ? ultimoParrafo : "" });
+      }
+    } else {
+      const { linea } = filasAbiertas[0];
+      paras.push([linea.celdas.map((c) => c.texto).join("  ").trim() || linea.texto, paginas, seccion]);
+    }
+    ultimoParrafo = "";
+    filasAbiertas = [];
+  };
+
+  /** Cierra lo que haya abierto, en orden: primero la tabla (va antes en la
+   *  página), luego el párrafo. */
+  const cerrarBloque = () => {
+    cerrarTabla();
+    cerrarParrafo();
   };
 
   const seccionAlFinalDe = new Map<number, string>();
@@ -747,7 +943,7 @@ export async function parsearPdf(
       if (indice === 0 && lineasTitulo.has(i)) {
         // El párrafo abierto se cierra ANTES de cambiar la sección:
         // pertenece a la anterior.
-        cerrarParrafo();
+        cerrarBloque();
         canonica = "";
         seccion = meta.titulo;
         encabezadoAbierto = null;
@@ -774,14 +970,14 @@ export async function parsearPdf(
           !linea.esFila &&
           paper.esEncabezadoPorFormato(texto, linea.tamano, cuerpo, linea.negrita)
         ) {
-          cerrarParrafo();
+          cerrarBloque();
           canonica = "";
           seccion = texto;
           encabezadoAbierto = linea.tamano;
           return;
         }
       } else {
-        cerrarParrafo();
+        cerrarBloque();
         canonica = detectada;
         seccion = texto;
         encabezadoAbierto = null;
@@ -792,24 +988,40 @@ export async function parsearPdf(
         descartados++;
         return;
       }
-      if (
-        abierto &&
-        abreParrafo(abierto, texto, { anteriorEsFila: abiertoEsFila, lineaEsFila: linea.esFila })
-      ) {
-        cerrarParrafo();
+      if (linea.esFila) {
+        // La fila lleva las celdas que SOBREVIVEN a la limpieza del borde:
+        // `texto` ya no tiene el folio ("... wileyonlinelibrary.com/journal/alz
+        // 1 of 12" en el pie de Wiley), y las celdas originales sí. Sin esto el
+        // "1 of 12" volvía al índice como celda de una tabla (lo cazó la
+        // prueba del artículo real al introducir las tablas).
+        const celdas =
+          texto === linea.texto ? linea.celdas : linea.celdas.filter((c) => c.texto && texto.includes(c.texto));
+        if (!celdas.length) return;
+        let fila: LineaPdf = celdas === linea.celdas ? linea : { ...linea, celdas, texto: celdas.map((c) => c.texto).join("  ") };
+        // Una fila de tabla nunca se pega a la prosa. Lo único que se le une
+        // es el rótulo de su primera celda partido con guion en la línea
+        // anterior ("hippocam-" | "pal volume  3.2  4.1"): el guion es del
+        // maquetador y sin unirlo "hippocampal" no existe en el índice.
+        if (abierto && /[-\u2010\u00ad]$/.test(abierto) && !filasAbiertas.length) {
+          const unidas = fila.celdas.map((c, k) => (k === 0 ? { ...c, texto: unirLineas(abierto, c.texto) } : c));
+          fila = { ...fila, celdas: unidas, texto: unidas.map((c) => c.texto).join("  ") };
+          abierto = "";
+          abiertoPaginas = [];
+        } else {
+          cerrarParrafo();
+        }
+        filasAbiertas.push({ linea: fila, pagina: numeroPagina });
+        return;
       }
-      if (abierto) {
-        abierto = unirLineas(abierto, texto);
-        abiertoEsFila = abiertoEsFila || linea.esFila;
-      } else {
-        abierto = texto;
-        abiertoEsFila = linea.esFila;
-      }
+      // Prosa tras unas filas: la tabla se cierra antes de seguir.
+      cerrarTabla();
+      if (abierto && abreParrafo(abierto, texto)) cerrarParrafo();
+      abierto = abierto ? unirLineas(abierto, texto) : texto;
       if (!abiertoPaginas.includes(numeroPagina)) abiertoPaginas.push(numeroPagina);
     });
     seccionAlFinalDe.set(numeroPagina, seccion);
   });
-  cerrarParrafo();
+  cerrarBloque();
 
   // Páginas escaneadas: el texto sale del OCR de sus imágenes. Cada página
   // queda con su número, colgada de la sección vigente al llegar a ella. Si
@@ -878,6 +1090,28 @@ export async function parsearPdf(
         }),
       );
     }
+  }
+
+  // Las tablas, aparte y como fragmentos `table`: cada bloque lleva la
+  // cabecera de columnas repetida (ver tablaEnBloques), la sección y el rótulo
+  // en su contexto, y se cita por la página en la que está, como el resto del
+  // PDF. Antes cada fila era un párrafo con las celdas separadas por dos
+  // espacios dentro de un fragmento de texto: "74.0 (5.8)" en el segundo
+  // fragmento no decía bajo qué columna estaba.
+  for (const tabla of tablas) {
+    const partes = tablaEnBloques(tabla.filas);
+    partes.forEach((texto, j) => {
+      const chunk = chunkBase(
+        nombre,
+        conContexto(texto, meta.titulo, tabla.seccion, tabla.rotulo),
+        tabla.paginas[0],
+        tabla.paginas,
+        "table",
+        { section: tabla.seccion, meta, citation },
+      );
+      if (partes.length > 1) chunk.metadata = { table_part: j + 1, table_parts: partes.length };
+      chunks.push(chunk);
+    });
   }
   return { chunks, pages: numPaginas, descartados, paginasOcr, avisos };
 }

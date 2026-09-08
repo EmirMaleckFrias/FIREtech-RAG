@@ -136,7 +136,7 @@ en Docker para desarrollar.
 | **Google OAuth** | `auth.ts` ofrece Google si existen `AUTH_GOOGLE_ID` y `AUTH_GOOGLE_SECRET`, pero el frontend no tiene forma de saberlo: `useGoogleDisponible()` devuelve `false`. Falta una query `usuarios.googleDisponible` que publique `googleDisponible()` y las variables en el despliegue. |
 | **Despliegue de producción frente a dev** | Confirmar qué despliegue de Convex es producción, poner su clave de despliegue como `CONVEX_DEPLOY_KEY` en Vercel y sus variables (`OPENAI_API_KEY`, Convex Auth, presupuestos) en ese despliegue. `frontend/.env.example` apunta al despliegue usado durante la migración (`gregarious-pony-327`). Sembrar administradores en cada despliegue. |
 | **Retirar el histórico** | Borrar `backend/`, `api/`, `supabase/`, `infra/`, `data/` y `.python-version` cuando la migración esté verificada y el evaluador portado. |
-| **PDFs a dos columnas** | Resuelto en lo esencial el 4 de septiembre de 2026 (`pdf.ts` detecta el canal vertical y lee columna a columna, medido con cinco artículos reales). Quedan los casos límite de OPERACION.md: maquetas poco habituales sin separar y filas de tabla a todo el ancho partidas en dos mitades. |
+| **PDFs a dos columnas** | Resuelto en lo esencial el 4 de septiembre de 2026 (`pdf.ts` detecta el canal vertical y lee columna a columna, medido con cinco artículos reales) y las filas de tabla a todo el ancho se dejan enteras desde el 8. Queda el caso límite de OPERACION.md: maquetas poco habituales sin separar. |
 | **Ingesta por carpeta** | No hay sustituto del `ingest.py` para cargar un corpus grande de una vez; hoy es la interfaz o las funciones de prueba una a una. |
 
 ## 7. Correcciones de diseño que entraron con el port

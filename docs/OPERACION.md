@@ -288,21 +288,28 @@ exponencial con tope de 20 s).
   reclamado (recién registrado) sigue la regla de los 10 minutos por fecha.
 - **PDFs a dos columnas.** Las líneas se reconstruyen agrupando los items de pdf.js por
   altura, y en una página a dos columnas eso fundía cada línea de la izquierda con la de la
-  derecha (medido el 4 de septiembre de 2026 con cinco artículos reales: los encabezados no
-  se reconocían y en uno ninguna línea del cuerpo llegaba a párrafo). Desde entonces
-  `pdf.ts` busca el canal vertical que ninguna línea cruza y lee columna a columna. Lo que
-  queda: el canal solo se acepta con evidencia clara de texto a dos columnas (para no partir
-  una tabla por la mitad), así que una maqueta poco habitual puede quedarse sin separar; y
-  una fila de tabla a todo el ancho que no pise el canal se parte en dos mitades, cada una
-  con sus celdas (se degrada la estructura, no se pierde el dato). Revisa con
+  derecha (medido el 4 de septiembre de 2026 con cinco artículos reales). `pdf.ts` busca el
+  canal vertical que ninguna línea cruza y lee columna a columna. Una fila de tabla a todo el
+  ancho que no pise el canal (dos o más huecos grandes, con una vecina igual y alguna columna
+  alineada) se deja entera desde el 8 de septiembre de 2026. Lo que queda: el canal solo se
+  acepta con evidencia clara de texto a dos columnas (para no partir una tabla por la mitad),
+  así que una maqueta poco habitual puede quedarse sin separar. Revisa con
   `pruebas:leerDocumento` la muestra de fragmentos de un artículo nuevo antes de darlo por
   bien indexado.
 - **OCR.** Las páginas de PDF sin texto propio y las imágenes (sueltas o dentro de un Word) se
   leen con un modelo de visión por el gateway (`ENABLE_OCR`, `OCR_MODEL`); lo que no se pudo
   leer queda en los `avisos` del documento. Un escaneo de muy mala calidad puede salir con
   texto incompleto: revisa los avisos de la ficha.
-- **Tablas de PDF.** Se reconocen las filas por geometría y se marcan como `table`, pero no se
-  reconstruye la estructura de columnas con cabecera como en Word o Excel.
+- **Tablas de PDF.** Dos o más filas seguidas (reconocidas por geometría) son una tabla propia:
+  fragmentos `table` con las columnas reconstruidas por posición (la celda k de las filas con más
+  celdas es la columna k; una cabecera centrada cae en su columna igual), la cabecera repetida en
+  cada bloque, la celda ausente vacía en su sitio y el rótulo "Table N." y la sección en el
+  contexto, como en Word. Lo que queda: una fila cuyo rótulo ocupa dos líneas sin guion sale como
+  dos filas; una tabla que cruza de página se parte en dos tablas; una cabecera de dos pisos
+  (grupos de columnas encima de los nombres) se lee como dos filas de cabecera solo si la de
+  arriba abarca varias columnas; y la lista de autores de una portada, cuando va separada por
+  huecos grandes ("Autor1 | Autor2 | Autor3"), sale como una tabla pequeña (antes salía como filas
+  sueltas: mismo texto, otra etiqueta).
 - **Filtros en la búsqueda vectorial.** Solo se aplica el filtro más selectivo en el lado
   denso (Convex no admite AND entre campos ahí); con varios filtros muy selectivos el lado
   denso puede devolver menos candidatos válidos que el léxico.

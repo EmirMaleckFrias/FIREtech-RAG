@@ -163,7 +163,15 @@ describe("párrafos reconstruidos a partir de líneas físicas", () => {
 });
 
 describe("tablas dentro del PDF, por geometría", () => {
-  test("una tabla conserva una fila por párrafo y la prosa que la presenta sigue entera", async () => {
+  /** El fragmento de tabla de la sección, y la parte de tabla sin las líneas
+   *  de contexto. */
+  function tablaDe(chunks: ChunkParseado[], seccion: string) {
+    const tablas = chunks.filter((c) => c.chunkType === "table" && c.section === seccion);
+    expect(tablas.length).toBeGreaterThanOrEqual(1);
+    return tablas;
+  }
+
+  test("dos o más filas seguidas son una tabla aparte, con columnas, cabecera y rótulo; la prosa que la presenta sigue entera", async () => {
     const chunks = await parsear([[
       ...PORTADA, ["Results", 12],
       ["Baseline characteristics of the 120 participants are summarized in", 10],
@@ -175,22 +183,28 @@ describe("tablas dentro del PDF, por geometría", () => {
       fila(["Amyloid beta 42", "912 (210)", "640 (180)", "542 (150)", "<0.001"]),
       ["Values are mean (SD) unless stated.", 10],
     ]]);
-    const [resultados] = deSeccion(chunks, "Results");
-    const parrafos = cuerpo(resultados).split("\n\n");
-    for (const f of [
-      "Table 1. Baseline characteristics",
-      "Variable  Control  MCI  AD  p",
-      "Age, years  72.4 (6.1)  72.4 (6.1)  74.0 (5.8)  0.31",
-      "MMSE  28.1 (1.2)  26.0 (2.1)  21.3 (3.4)  <0.001",
-      "Amyloid beta 42  912 (210)  640 (180)  542 (150)  <0.001",
-      "Values are mean (SD) unless stated.",
-    ]) {
-      expect(parrafos, JSON.stringify(parrafos)).toContain(f);
-    }
-    expect(parrafos).toContain(
+    const [texto] = deSeccion(chunks, "Results").filter((c) => c.chunkType === "text");
+    expect(cuerpo(texto).split("\n\n")).toEqual([
       "Baseline characteristics of the 120 participants are summarized in " +
         "Table 1. The three groups did not differ in age or sex distribution.",
+      "Table 1. Baseline characteristics",
+      "Values are mean (SD) unless stated.",
+    ]);
+    const [tabla] = tablaDe(chunks, "Results");
+    // Contexto: título, sección y el rótulo que la presentaba.
+    expect(tabla.text.split("\n\n")[0]).toBe(`${TITULO}\nResults\nTable 1. Baseline characteristics`);
+    expect(cuerpo(tabla)).toBe(
+      [
+        "Variable | Control | MCI | AD | p",
+        "Age, years | 72.4 (6.1) | 72.4 (6.1) | 74.0 (5.8) | 0.31",
+        "MMSE | 28.1 (1.2) | 26.0 (2.1) | 21.3 (3.4) | <0.001",
+        "Amyloid beta 42 | 912 (210) | 640 (180) | 542 (150) | <0.001",
+      ].join("\n"),
     );
+    // Se cita por su página, como el resto del PDF.
+    expect(tabla.page).toBe(1);
+    expect(tabla.sourcePages).toEqual([1]);
+    expect(tabla.metadata).toBeUndefined();
   });
 
   test("una tabla sin números conserva sus cinco filas", async () => {
@@ -204,11 +218,11 @@ describe("tablas dentro del PDF, por geometría", () => {
       fila(["Nakamura 2020", "Trial", "Primary care", "Cognition", "High"]),
       fila(["Rosario 2022", "Cohort", "Hospital", "Function", "Low"]),
     ]]);
-    const [resultados] = deSeccion(chunks, "Results");
-    const parrafos = cuerpo(resultados).split("\n\n");
-    expect(parrafos).toHaveLength(5);
-    expect(parrafos[0]).toBe("Study  Design  Population  Outcome  Risk of bias");
-    expect(parrafos[2]).toBe("Garcia 2021  Case control  Community  Mortality  Some concerns");
+    const [tabla] = tablaDe(chunks, "Results");
+    const filas = cuerpo(tabla).split("\n");
+    expect(filas).toHaveLength(5);
+    expect(filas[0]).toBe("Study | Design | Population | Outcome | Risk of bias");
+    expect(filas[2]).toBe("Garcia 2021 | Case control | Community | Mortality | Some concerns");
   });
 
   test("una tabla de dos columnas también es tabla: las filas se alinean entre sí", async () => {
@@ -218,8 +232,8 @@ describe("tablas dentro del PDF, por geometría", () => {
       { size: 10, segmentos: [{ texto: "Edad" }, { texto: "72.4", x: 300 }] },
       { size: 10, segmentos: [{ texto: "MMSE" }, { texto: "28.1", x: 300 }] },
     ]]);
-    const [resultados] = deSeccion(chunks, "Results");
-    expect(cuerpo(resultados).split("\n\n")).toEqual(["Variable  Control", "Edad  72.4", "MMSE  28.1"]);
+    const [tabla] = tablaDe(chunks, "Results");
+    expect(cuerpo(tabla)).toBe("Variable | Control\nEdad | 72.4\nMMSE | 28.1");
   });
 
   test("la prosa con muchas cifras no se toma por una tabla", async () => {
@@ -234,6 +248,7 @@ describe("tablas dentro del PDF, por geometría", () => {
       ["de donepezilo al dia durante todo el periodo de seguimiento del estudio.", 10],
     ]]);
     const [resultados] = deSeccion(chunks, "Results");
+    expect(chunks.some((c) => c.chunkType === "table")).toBe(false);
     expect(cuerpo(resultados).split("\n\n")).toEqual([
       "We recruited 120 participants aged between 55 and 85 years between " +
         "2018 and 2021. The mean amyloid beta 42 concentration was 542 pg/mL " +
@@ -242,7 +257,10 @@ describe("tablas dentro del PDF, por geometría", () => {
     ]);
   });
 
-  test("una cabecera de columnas en negrita no se convierte en sección", async () => {
+  test("ADVERSARIAL: una cabecera en negrita CENTRADA sobre los datos no abre sección ni desdobla columnas", async () => {
+    // Las celdas de la cabecera empiezan 40 pt más a la derecha que las de
+    // los datos, como una cabecera centrada: agrupar por x las ponía en
+    // columnas propias ("Variable |  | Control |  | AD").
     const chunks = await parsear([[
       ...PORTADA, ["Results", 12],
       ["Baseline characteristics of the participants are shown below by group.", 10],
@@ -252,12 +270,61 @@ describe("tablas dentro del PDF, por geometría", () => {
       ] },
       fila(["Edad", "72.4", "74.0"]),
     ]]);
-    const [resultados] = deSeccion(chunks, "Results");
     expect(chunks.some((c) => c.section.startsWith("Variable"))).toBe(false);
+    const [tabla] = tablaDe(chunks, "Results");
+    expect(cuerpo(tabla)).toBe("Variable | Control | AD\nEdad | 72.4 | 74.0");
+  });
+
+  test("una fila con una celda menos deja la columna vacía EN SU SITIO, no corre los valores", async () => {
+    // "0.03" es la p, no el valor final: en la primera versión del parser de
+    // Word este era exactamente el error que ponía 0.03 bajo "Final".
+    const chunks = await parsear([[
+      ...PORTADA, ["Results", 12],
+      { size: 10, segmentos: [{ texto: "Grupo" }, { texto: "Basal", x: 220 }, { texto: "Final", x: 330 }, { texto: "p", x: 440 }] },
+      { size: 10, segmentos: [{ texto: "Control" }, { texto: "28.1", x: 220 }, { texto: "27.9", x: 330 }, { texto: "0.40", x: 440 }] },
+      { size: 10, segmentos: [{ texto: "AD" }, { texto: "21.3", x: 220 }, { texto: "0.03", x: 440 }] },
+    ]]);
+    const [tabla] = tablaDe(chunks, "Results");
+    expect(cuerpo(tabla).split("\n")).toEqual(["Grupo | Basal | Final | p", "Control | 28.1 | 27.9 | 0.40", "AD | 21.3 |  | 0.03"]);
+  });
+
+  test("una tabla larga sale en varios fragmentos, cada uno con la cabecera y su número de parte", async () => {
+    // Caben unas 40 líneas por página en el PDF sintético (pdf.js descarta lo
+    // que queda fuera de la hoja), así que las filas van anchas para pasar
+    // del presupuesto de un bloque.
+    const filas: LineaFalsa[] = [fila(["Participant ID", "Study group", "Baseline MMSE", "Final MMSE", "Change (CI)", "p value"], 10, 40, 92)];
+    for (let i = 1; i <= 38; i++) {
+      filas.push(fila([
+        `PART-${String(i).padStart(3, "0")}`, i % 2 ? "Control group" : "AD group", `${20 + (i % 9)}.${i % 10} (2.${i % 7})`,
+        `${19 + (i % 7)}.${i % 10} (3.${i % 5})`, `-${i % 5}.${i % 10} (-2.1 to 0.4)`, `0.${String((i * 7) % 100).padStart(2, "0")}`,
+      ], 10, 40, 92));
+    }
+    const chunks = await parsear([[...PORTADA, ["Results", 12], ...filas]]);
+    const tablas = tablaDe(chunks, "Results");
+    expect(tablas.length).toBeGreaterThan(1);
+    tablas.forEach((t, j) => {
+      expect(cuerpo(t).split("\n")[0]).toBe("Participant ID | Study group | Baseline MMSE | Final MMSE | Change (CI) | p value");
+      expect(t.metadata).toEqual({ table_part: j + 1, table_parts: tablas.length });
+    });
+    // Ninguna fila se pierde ni se repite entre las partes.
+    const datos = tablas.flatMap((t) => cuerpo(t).split("\n").slice(1));
+    expect(datos).toHaveLength(38);
+    expect(new Set(datos).size).toBe(38);
+  });
+
+  test("una fila suelta sigue siendo un párrafo con sus celdas separadas por dos espacios", async () => {
+    const chunks = await parsear([[
+      ...PORTADA, ["Results", 12],
+      ["The primary outcome is summarized below for the whole cohort.", 10],
+      fila(["MMSE", "28.1", "21.3"]),
+      ["Secondary outcomes did not differ between groups at any visit.", 10],
+    ]]);
+    expect(chunks.some((c) => c.chunkType === "table")).toBe(false);
+    const [resultados] = deSeccion(chunks, "Results");
     expect(cuerpo(resultados).split("\n\n")).toEqual([
-      "Baseline characteristics of the participants are shown below by group.",
-      "Variable  Control  AD",
-      "Edad  72.4  74.0",
+      "The primary outcome is summarized below for the whole cohort.",
+      "MMSE  28.1  21.3",
+      "Secondary outcomes did not differ between groups at any visit.",
     ]);
   });
 
@@ -273,8 +340,10 @@ describe("tablas dentro del PDF, por geometría", () => {
       fila(["pal volume", "3.2 cm3", "4.1 cm3"]),
       fila(["MMSE", "28", "21"]),
     ]]);
-    // Sin título ni sección no hay líneas de contexto: el texto es el cuerpo.
-    expect(chunks[0].text.split("\n\n")).toEqual(["hippocampal volume  3.2 cm3  4.1 cm3", "MMSE  28  21"]);
+    // Sin título ni sección no hay líneas de contexto: el texto es la tabla.
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].chunkType).toBe("table");
+    expect(chunks[0].text).toBe("hippocampal volume | 3.2 cm3 | 4.1 cm3\nMMSE | 28 | 21");
   });
 
   test("un encabezado con el folio a la derecha no es una fila", async () => {
@@ -629,6 +698,28 @@ describe("dos columnas", () => {
     const todo = texto(chunks);
     expect(todo.indexOf("Left column sentence 7")).toBeLessThan(todo.indexOf("Right column sentence 1"));
     expect(todo).not.toContain("3 of 12");
+  });
+
+  test("ADVERSARIAL: una tabla a todo el ancho en una página a dos columnas no se parte por el canal", async () => {
+    // Antes cada fila salía en dos mitades (la parte izquierda con la
+    // izquierda, la derecha con la derecha), cada una con sus celdas: era el
+    // límite conocido de OPERACION.md.
+    const lineas: LineaFalsa[] = [];
+    for (let i = 1; i <= 7; i++) lineas.push({ size: 10, segmentos: [{ texto: izquierda(i) }, { texto: derecha(i), x: 320 }] });
+    lineas.push({ size: 10, segmentos: [{ texto: "Variable" }, { texto: "Control", x: 200 }, { texto: "MCI", x: 340 }, { texto: "AD", x: 480 }] });
+    lineas.push({ size: 10, segmentos: [{ texto: "Edad" }, { texto: "72.4", x: 200 }, { texto: "72.4", x: 340 }, { texto: "74.0", x: 480 }] });
+    lineas.push({ size: 10, segmentos: [{ texto: "MMSE" }, { texto: "28.1", x: 200 }, { texto: "26.0", x: 340 }, { texto: "21.3", x: 480 }] });
+    for (let i = 8; i <= 12; i++) lineas.push({ size: 10, segmentos: [{ texto: izquierda(i) }, { texto: derecha(i), x: 320 }] });
+    const { paginas } = await extraerLineas(escribirPdf([lineas]));
+    const textos = paginas[0].map((l) => l.texto);
+    expect(textos).toContain("Variable  Control  MCI  AD");
+    expect(textos).toContain("Edad  72.4  72.4  74.0");
+    expect(textos.filter((t) => /^(Variable|Edad|MMSE)\b/.test(t))).toHaveLength(3);
+    // Y las columnas de prosa siguen separadas y en orden de lectura.
+    expect(textos.some((t) => t.includes("Left column") && t.includes("Right column"))).toBe(false);
+    const chunks = await parsear([lineas]);
+    const tabla = chunks.find((c) => c.chunkType === "table");
+    expect(tabla?.text).toContain("Variable | Control | MCI | AD\nEdad | 72.4 | 72.4 | 74.0\nMMSE | 28.1 | 26.0 | 21.3");
   });
 
   test("una página de una columna con una tabla de dos no se parte en columnas", async () => {
