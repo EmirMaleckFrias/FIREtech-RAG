@@ -8,7 +8,7 @@ import {
 import { usePreferencias } from '../lib/preferencias';
 import type { ChatMessage, SourceFocus } from '../types';
 import {
-  IconAlert, IconCheck, IconChevronDown, IconCopy, IconDocument,
+  IconAlert, IconCheck, IconChevronDown, IconCopy,
   IconPanelRight, IconSearch, IconX,
 } from './icons';
 import './SourcesPanel.css';
@@ -151,7 +151,7 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
     }
   };
 
-  const tarjeta = (item: FuenteExplorable, index: number) => {
+  const tarjeta = (item: FuenteExplorable) => {
     const s = item.source;
     const expandida = expandidas.has(item.key);
     const meta = piezasDeMeta(s, [], tituloDeFuente(s)).filter((p) => p.clase !== 'source-meta-plan');
@@ -167,7 +167,6 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
             if (next.has(item.key)) next.delete(item.key); else next.add(item.key);
             return next;
           })}>
-          <span className="fuentes-fragment-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
           <span className="fuentes-card-heading">
             <span className="fuentes-card-location">{s.locator || (s.page !== null ? `Página ${s.page}` : 'Fragmento sin página')}</span>
             <span className="fuentes-badges">
@@ -219,8 +218,7 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
       <div ref={grabberRef} className="sheet-grabber" aria-hidden="true" />
       <div className="sources-inner fuentes-inner">
         <header className="fuentes-header">
-          <span className="fuentes-header-icon"><IconDocument size={20} /></span>
-          <div><h2>Fuentes</h2><p>Explora la evidencia de esta respuesta</p></div>
+          <div><h2>Fuentes</h2>{total > 0 && <p>{grupos.length} {grupos.length === 1 ? 'documento' : 'documentos'} · {total} {total === 1 ? 'fragmento' : 'fragmentos'}</p>}</div>
           <div className="fuentes-header-actions">
             <button type="button" className="icon-btn fuentes-expand" aria-pressed={ampliado}
               title={ampliado ? 'Reducir panel' : 'Ampliar panel'} aria-label={ampliado ? 'Reducir panel' : 'Ampliar panel'}
@@ -232,18 +230,12 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
           {aviso && <p className="fuentes-warning" role="status"><IconAlert size={16} />{aviso}</p>}
           {total === 0 ? (
             <div className="fuentes-empty">
-              <IconDocument size={30} />
-              <h3>{message?.streaming ? 'Reuniendo evidencia' : 'Aquí empieza la verificación'}</h3>
+              <h3>{message?.streaming ? 'Buscando fuentes…' : 'Sin fuentes todavía'}</h3>
               <p>{message?.streaming ? 'Las fuentes aparecerán mientras avanza la búsqueda.' :
                 'Selecciona una cita o abre las fuentes de una respuesta para consultar sus fragmentos.'}</p>
             </div>
           ) : (
             <>
-              <div className="fuentes-summary">
-                <div><strong>{grupos.length}</strong><span>{grupos.length === 1 ? 'documento' : 'documentos'}</span></div>
-                <div><strong>{total}</strong><span>{total === 1 ? 'fragmento' : 'fragmentos'}</span></div>
-                <div><strong>{citadas}</strong><span>con cita asociada</span></div>
-              </div>
               <div className="fuentes-tools">
                 <div className="fuentes-search">
                   <IconSearch size={16} />
@@ -254,25 +246,23 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
                   <button type="button" aria-pressed={filtro === 'todas'} onClick={() => setFiltro('todas')}>Todas <span>{total}</span></button>
                   <button type="button" aria-pressed={filtro === 'citadas'} onClick={() => setFiltro('citadas')}>Citadas <span>{citadas}</span></button>
                 </div>
-                {puntos.length > 0 && <label className="fuentes-point">
+                {puntos.length > 0 && <details className="fuentes-point-disclosure">
+                  <summary>Filtrar por punto{punto ? ' · activo' : ''}</summary>
+                  <label className="fuentes-point">
                   <span>Punto investigado</span>
                   <select value={punto} onChange={(e) => setPunto(e.target.value)}>
                     <option value="">Todos los puntos</option>
                     {puntos.map((p) => <option value={p.id} key={p.id}>{p.texto}</option>)}
                   </select>
-                </label>}
+                </label></details>}
                 {punto && <p className="fuentes-selected-point">{puntos.find((p) => p.id === punto)?.texto}</p>}
               </div>
-              <details className="fuentes-explanation">
-                <summary>¿Qué significa «citada»?</summary>
-                <p>La respuesta menciona ese documento o página. No garantiza que cada fragmento de esa página respalde una afirmación. «Recuperado para» indica el punto que motivó la búsqueda, no una verificación.</p>
-              </details>
-              <div className="fuentes-result-toolbar">
+              {filtrando && <div className="fuentes-result-toolbar">
                 <span role="status">{mostradas} de {total} {total === 1 ? 'fragmento' : 'fragmentos'} · {visibles.length} {visibles.length === 1 ? 'documento' : 'documentos'}</span>
                 {filtrando && <button type="button" onClick={limpiar}>Limpiar filtros</button>}
-              </div>
+              </div>}
               {visibles.length === 0 ? (
-                <div className="fuentes-empty fuentes-no-results"><IconSearch size={24} /><h3>Sin coincidencias</h3>
+                <div className="fuentes-empty fuentes-no-results"><h3>Sin coincidencias</h3>
                   <p>No hay fragmentos que coincidan con estos filtros en esta respuesta.</p>
                   <button type="button" onClick={limpiar}>Mostrar todas las fuentes</button>
                 </div>
@@ -284,7 +274,6 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
                     return <section key={g.key} className="fuentes-group">
                       <button type="button" className="fuentes-group-head" aria-expanded={expandido}
                         onClick={() => setGruposAbiertos((prev) => new Map(prev).set(g.key, !expandido))}>
-                        <span className="fuentes-file-icon"><IconDocument size={17} /></span>
                         <span className="fuentes-group-title">
                           <strong>{tituloDeFuente(source)}</strong>
                           {source.title && source.title !== tituloDeFuente(source)
@@ -299,6 +288,10 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
                   })}
                 </div>
               )}
+              <details className="fuentes-explanation">
+                <summary>Sobre las citas</summary>
+                <p>La respuesta menciona ese documento o página. No garantiza que cada fragmento de esa página respalde una afirmación. «Recuperado para» indica el punto que motivó la búsqueda, no una verificación.</p>
+              </details>
             </>
           )}
           <span className="fuentes-sr-only" role="status">{copia?.estado === 'copiado' ? 'Fragmento y referencia copiados.' : ''}</span>

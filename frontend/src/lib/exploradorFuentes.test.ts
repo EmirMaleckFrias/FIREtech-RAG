@@ -155,14 +155,16 @@ describe('interfaz de Fuentes', () => {
     expect(html).toContain('Página citada');
     expect(html).toContain('no una verificación');
     expect(html).not.toContain('83%');
-    expect(html).toContain('1 de 1 fragmento');
+    expect(html).toContain('1 documento · 1 fragmento');
+    expect(html).not.toContain('fuentes-summary');
+    expect(html).not.toContain('fuentes-fragment-number');
   });
   it('oculta semánticamente el panel cerrado y admite respuestas sin fuentes', () => {
     const html = renderToStaticMarkup(createElement(SourcesPanel, {
       open: false, message: null, focus: null, onClose() {},
     }));
     expect(html).toContain('aria-hidden="true"');
-    expect(html).toContain('Aquí empieza la verificación');
+    expect(html).toContain('Sin fuentes todavía');
   });
 });
 
