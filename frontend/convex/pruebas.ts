@@ -620,3 +620,36 @@ export const sembrarDocumentosDePrueba = internalMutation({
     return { creados };
   },
 });
+
+/** Lanza desde la terminal la propuesta de preguntas de control sobre el
+ *  corpus de una cuenta (lo mismo que el botón "Proponer preguntas" de
+ *  Ajustes > Calidad, sin pasar por el navegador). Para sembrar la primera
+ *  tanda de una cuenta o probar la generación en un despliegue. Devuelve el id
+ *  de la generación; el avance se ve en la pestaña o en la tabla
+ *  `evaluacionGeneraciones`. */
+export const generarCasos = internalMutation({
+  args: { correo: v.string(), objetivo: v.optional(v.number()) },
+  handler: async (ctx, { correo, objetivo }) => {
+    const usuario = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", correo))
+      .unique();
+    if (!usuario) throw new Error(`no hay ninguna cuenta con el correo ${correo}`);
+    const n = Math.max(1, Math.min(60, Math.trunc(objetivo ?? 20)));
+    const generacionId = await ctx.db.insert("evaluacionGeneraciones", {
+      propietario: usuario._id,
+      empezadoEn: Date.now(),
+      estado: "running",
+      objetivo: n,
+      generados: 0,
+      descartados: 0,
+      paso: "Preparando",
+    });
+    await ctx.scheduler.runAfter(0, internal.evaluacion.generar.generar, {
+      propietario: usuario._id,
+      generacionId,
+      objetivo: n,
+    });
+    return { generacionId, objetivo: n };
+  },
+});

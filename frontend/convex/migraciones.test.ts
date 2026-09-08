@@ -133,6 +133,7 @@ describe("reindexarTodo", () => {
       pendientes: 2,
       procesando: 1,
       sinFichero: 1,
+      truncado: false,
     });
   });
 });

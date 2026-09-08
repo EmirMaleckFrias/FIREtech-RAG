@@ -34,6 +34,8 @@ import { ajustes } from "./lib/config";
 export const EN_PARALELO = 2;
 /** Documentos que se miran por paso. */
 const PAGINA = 100;
+/** Tope de documentos que resume `estadoDelIndice` de una vez. */
+const MAX_DOCUMENTOS_ESTADO = 5000;
 /** Cuánto espera un paso que no pudo agendar nada nuevo. */
 const ESPERA_MS = 20_000;
 
@@ -87,23 +89,21 @@ export const estadoDelIndice = internalQuery({
     let procesando = 0;
     let sinFichero = 0;
     let total = 0;
-    // La tabla de documentos es pequeña (decenas o cientos): un recorrido por
-    // páginas cabe de sobra en una query.
+    // La tabla de documentos es pequeña (decenas o cientos): se lee de una vez
+    // con un tope alto. No se pagina en bucle: Convex solo admite UNA consulta
+    // paginada por función (medido en producción el 8 sep 2026: el bucle con
+    // `paginate` lanzaba "ran multiple paginated queries"; convex-test no lo
+    // detecta).
     const version = versionIndiceActual(ajustes().contextoHabilitado);
-    let cursor: string | null = null;
-    for (;;) {
-      const pagina = await ctx.db.query("documents").paginate({ cursor, numItems: PAGINA });
-      for (const d of pagina.page) {
-        total += 1;
-        if (d.status === "processing") procesando += 1;
-        else if (alDia(d, version)) alDiaN += 1;
-        else if (pendiente(d, version)) pendientes += 1;
-        else if (d.status === "ready") sinFichero += 1;
-      }
-      if (pagina.isDone) break;
-      cursor = pagina.continueCursor;
+    const docs = await ctx.db.query("documents").take(MAX_DOCUMENTOS_ESTADO);
+    for (const d of docs) {
+      total += 1;
+      if (d.status === "processing") procesando += 1;
+      else if (alDia(d, version)) alDiaN += 1;
+      else if (pendiente(d, version)) pendientes += 1;
+      else if (d.status === "ready") sinFichero += 1;
     }
-    return { version, total, alDia: alDiaN, pendientes, procesando, sinFichero };
+    return { version, total, alDia: alDiaN, pendientes, procesando, sinFichero, truncado: docs.length === MAX_DOCUMENTOS_ESTADO };
   },
 });
 
