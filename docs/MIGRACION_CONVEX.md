@@ -132,7 +132,7 @@ en Docker para desarrollar.
 
 | Pendiente | Estado y qué implica |
 |---|---|
-| **Evaluador offline** | `backend/evaluar.py` y `backend/app/evaluation.py` siguen en Python y llaman a `POST /api/chat` por SSE en `http://localhost:8000`, que ya no existe. La lógica determinista (cobertura de evidencias, resolución de citas, patrones de hops, contenido obligatorio y prohibido, abstención, `min_faithfulness` leído del verificador) sigue siendo válida. Portarla como script que use `pruebas:prepararPregunta` y `pruebas:leerRespuesta`, o como acción interna de Convex. Los patrones de cita y abstención ya son idénticos a `lib/citas.ts`. |
+| **Evaluador offline** | Portado: `frontend/convex/evaluacion/puntuar.ts` (puntuación, agregado y resumen, con sus pruebas) y `frontend/scripts/evaluar.ts` (runner sobre `pruebas:prepararPregunta` y `pruebas:leerTurno`). Ver OPERACION.md §9. |
 | **Google OAuth** | `auth.ts` ofrece Google si existen `AUTH_GOOGLE_ID` y `AUTH_GOOGLE_SECRET`, pero el frontend no tiene forma de saberlo: `useGoogleDisponible()` devuelve `false`. Falta una query `usuarios.googleDisponible` que publique `googleDisponible()` y las variables en el despliegue. |
 | **Despliegue de producción frente a dev** | Confirmar qué despliegue de Convex es producción, poner su clave de despliegue como `CONVEX_DEPLOY_KEY` en Vercel y sus variables (`OPENAI_API_KEY`, Convex Auth, presupuestos) en ese despliegue. `frontend/.env.example` apunta al despliegue usado durante la migración (`gregarious-pony-327`). Sembrar administradores en cada despliegue. |
 | **Retirar el histórico** | Borrar `backend/`, `api/`, `supabase/`, `infra/`, `data/` y `.python-version` cuando la migración esté verificada y el evaluador portado. |

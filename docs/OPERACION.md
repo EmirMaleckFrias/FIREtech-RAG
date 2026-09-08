@@ -352,6 +352,28 @@ Cada corrida gasta tokens reales del gateway. El coste estimado queda en `metric
 
 ## 9. Pruebas automáticas
 
+### Benchmark de calidad (evaluador)
+
+Mide si el agente recupera las evidencias esperadas, cita cosas que existen, cubre los conceptos
+de búsqueda, dice lo que debe y no dice lo prohibido, se abstiene cuando toca y respeta la
+fidelidad que dictamina el verificador. Es determinista: sin juez probabilístico. Los casos los
+escribe el equipo investigador en `frontend/evals/alzheimer.jsonl` (plantilla y contrato en
+`frontend/evals/README.md`).
+
+```bash
+cd frontend
+npx vite-node scripts/evaluar.ts --dataset evals/alzheimer.jsonl --dry-run          # valida el dataset
+npx vite-node scripts/evaluar.ts --dataset evals/alzheimer.jsonl --correo CUENTA    # corre contra su corpus
+npx vite-node scripts/evaluar.ts --dataset evals/alzheimer.jsonl --correo CUENTA --repeticiones 3 --max-usd 2
+```
+
+Lee `VITE_CONVEX_URL` y `CONVEX_DEPLOY_KEY` de `.env.local`. Crea las preguntas con
+`pruebas:prepararPregunta` en la cuenta indicada y borra cada conversación al terminar
+(`--conservar` para dejarlas). El reporte queda en `frontend/evals/results/` (ignorado por Git);
+el código de salida es 0 solo si el gate de release pasa (cero fallos críticos) y no hubo
+interrupción. Compara siempre con repeticiones: una sola pasada no distingue una mejora del ruido.
+
+
 ```bash
 cd frontend
 npm test              # vitest + convex-test, en memoria, sin red
@@ -366,8 +388,6 @@ el que confirma que funciona.
 
 ## 10. Qué NO hay todavía
 
-- **Evaluación automática contra Convex.** `backend/evaluar.py` sigue apuntando a la API
-  antigua; ver [MIGRACION_CONVEX.md](MIGRACION_CONVEX.md).
 - **Botón de Google** en la pantalla de acceso.
 - **Ingesta por carpeta desde la CLI** (el `ingest.py` anterior). Hoy se sube por la interfaz o
   con las funciones de prueba de la sección 3.

@@ -792,12 +792,16 @@ lee la fidelidad que midió el verificador en runtime en vez de introducir un ju
 casos los escribe y revisa el equipo investigador; el gate de release exige cero fallos
 críticos.
 
-Estado: el evaluador (`backend/evaluar.py`, `backend/app/evaluation.py`, plantilla en
-`backend/evals/`) **sigue en Python y apunta a la API antigua** (`POST /api/chat` por SSE en
-`http://localhost:8000`). No se puede ejecutar contra Convex hasta portarlo. Los patrones de
-cita y de abstención que usa son los mismos que `lib/citas.ts`, a propósito, para que el port
-mida lo mismo que mide producción. Mientras tanto, la forma de estresar el sistema es el arnés
-interno `pruebas.ts` (OPERACION.md).
+Estado: portado a Convex. La puntuación determinista es `convex/evaluacion/puntuar.ts`
+(cobertura de evidencias, resolución de citas, patrones de búsqueda, contenido obligatorio y
+prohibido, abstención, fidelidad leída del verificador; agregado de N repeticiones por mediana
+y mayoría estricta con dispersión; resumen con gate) y usa los patrones de cita y abstención de
+`lib/citas.ts`, los mismos que el verificador en runtime. El runner es
+`frontend/scripts/evaluar.ts`: lanza cada caso con `pruebas:prepararPregunta` contra el corpus
+de la cuenta indicada (`--correo`), espera el turno final con `pruebas:leerTurno`, borra la
+conversación de prueba y escribe el reporte JSON (`schema_version` 3, mismas claves que el
+Python) en `frontend/evals/results/`. Contrato de los casos y uso en `frontend/evals/README.md`.
+El Python (`backend/evaluar.py`) queda como referencia histórica.
 
 ## 17. Notion
 

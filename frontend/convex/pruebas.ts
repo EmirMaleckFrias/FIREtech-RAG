@@ -9,8 +9,9 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { anotarPregunta, borrarDeUsuario, claveVotos, sumar } from "./contadores";
+import { anotarPregunta, borrarDeUsuario, claveSesionesDe, claveVotos, sumar } from "./contadores";
 import { LOTE_CHUNKS } from "./documentos";
+import { borrarMensajesDeSesion } from "./mensajes";
 import type { Doc } from "./_generated/dataModel";
 import { ajustes } from "./lib/config";
 
@@ -123,6 +124,43 @@ export const leerRespuesta = internalQuery({
       meta: metrics.meta ?? {},
       content: m.content,
     };
+  },
+});
+
+/** El turno ENTERO del asistente, para el evaluador (scripts/evaluar.ts):
+ *  respuesta, fuentes, búsquedas, informe del verificador y telemetría, con
+ *  las mismas formas que ve el navegador. `leerRespuesta` es el resumen para
+ *  mirar a ojo; esto es lo que se puntúa. */
+export const leerTurno = internalQuery({
+  args: { messageId: v.id("messages") },
+  handler: async (ctx, args) => {
+    const m = await ctx.db.get(args.messageId);
+    if (!m) return null;
+    return {
+      estado: m.estado ?? null,
+      error: m.error ?? null,
+      content: m.content,
+      sources: (m.sources ?? []) as unknown[],
+      hops: (m.hops ?? []) as unknown[],
+      plan: (m.plan ?? []) as unknown[],
+      verificacion: (m.verificacion ?? null) as unknown,
+      metrics: (m.metrics ?? {}) as Record<string, unknown>,
+    };
+  },
+});
+
+/** Borra una conversación creada por el evaluador, con sus mensajes y su
+ *  feedback, y descuenta sus contadores. Las preguntas del benchmark no deben
+ *  quedarse en la lista de conversaciones de la cuenta cuyo corpus se evaluó. */
+export const borrarSesionDePrueba = internalMutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, { sessionId }) => {
+    const s = await ctx.db.get(sessionId);
+    if (!s) return { estado: "no_existe" as const };
+    await borrarMensajesDeSesion(ctx, sessionId);
+    await ctx.db.delete(sessionId);
+    await sumar(ctx, claveSesionesDe(s.userId), -1);
+    return { estado: "borrada" as const };
   },
 });
 
