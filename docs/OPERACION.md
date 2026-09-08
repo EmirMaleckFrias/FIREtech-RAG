@@ -137,6 +137,28 @@ Guarda: si el documento sigue en `processing` hace menos de **10 minutos**
 documento a la vez. Pasados 10 minutos se considera abandonado (la acción murió a mitad) y se
 puede reintentar. Un documento sin fichero guardado no se puede reindexar: bórralo y súbelo.
 
+### Migrar el índice a la receta actual
+
+Cuando cambia lo que se embebe o lo que se indexa (septiembre de 2026: la frase de contexto
+por fragmento, ver SPEC 14), los documentos ya indexados se buscan peor que los nuevos hasta
+que se reindexan. `ingesta/contexto.ts` lleva `VERSION_INDICE` y cada documento listo guarda la
+suya en `indiceVersion`:
+
+```bash
+npx convex run migraciones:estadoDelIndice     # {version, total, alDia, pendientes, procesando, sinFichero}
+npx convex run migraciones:reindexarTodo       # agenda las ingestas de dos en dos y se reagenda solo
+```
+
+Es una cadena de mutaciones: cada paso mira una página de la tabla, lanza como mucho dos
+ingestas y vuelve a mirar a los 20 segundos, hasta que no queda ninguno pendiente. Lanzarla
+dos veces no duplica nada: con una cadena viva (un paso en los últimos 90 s) la segunda
+invocación responde `yaEnMarcha` y no agenda. Con `ENABLE_CHUNK_CONTEXT=false` la receta
+actual es la "sin contexto": no hay nada que migrar hasta volver a encenderlo. Los
+documentos en `processing` con corrida viva cuentan como en vuelo; los `failed` no se tocan
+(reintentarlos es decisión de la usuaria) y los sin fichero (heredados de Supabase) no se pueden
+reindexar. Cada documento enseña su barra de avance en la biblioteca. Con el corpus de
+septiembre de 2026 (unos 60 documentos, 8000 fragmentos) tarda del orden de media hora.
+
 ### Borrar
 
 Botón en el panel (`documentos.borrar`). La fila y el fichero desaparecen ya; los fragmentos
@@ -310,6 +332,32 @@ exponencial con tope de 20 s).
   arriba abarca varias columnas; y la lista de autores de una portada, cuando va separada por
   huecos grandes ("Autor1 | Autor2 | Autor3"), sale como una tabla pequeña (antes salía como filas
   sueltas: mismo texto, otra etiqueta).
+- **Contexto por fragmento.** La ingesta pide a un modelo pequeño una frase de contexto por
+  fragmento (grupos de 12 por llamada; `ENABLE_CHUNK_CONTEXT`, `CONTEXT_MODEL`,
+  `CONTEXT_REASONING_EFFORT`). Un manual de 5000 fragmentos son unas 400 llamadas más, en
+  paralelo de 8 dentro de la cadena de embebido: la barra tarda más y lo dice. Si el modelo
+  falla en un grupo, esos fragmentos se indexan sin contexto (se buscan como antes de existir
+  el contexto) y la ficha lo avisa; reindexar lo reintenta. Los documentos anteriores a la
+  marca no tienen contexto hasta que se pasa `migraciones:reindexarTodo` (sección 3).
+- **Atribución a otra entidad.** El verificador recibe la pregunta y el apartado de cada
+  frase y marca `entidad_distinta` cuando el fragmento habla de otro fármaco, cohorte o
+  estudio que el atribuido: cuenta como `no_sostenida`, bloquea la publicación y la crítica al
+  redactor pide nombrar a la otra entidad o quitar el dato. Si en un corpus concreto esto
+  bloqueara respuestas legítimas (comparaciones entre fármacos bajo un apartado con el nombre
+  de uno), el informe de atribución lo enseña como "dato de otra entidad" y la telemetría lo
+  cuenta en `verificacion.entidad_distinta`: mira ahí antes de tocar el prompt.
+- **Retracciones.** Cada documento con DOI se comprueba en Crossref al indexarse y una vez por
+  semana (cron `comprobar retracciones`, `retracciones:comprobarTodos`; para uno,
+  `retracciones:comprobarDocumento`). Un artículo retractado no se borra: la ficha lo dice en
+  rojo, la fuente también, y el modelo recibe el aviso con cada fragmento. Si Crossref no
+  responde, la marca anterior se conserva y se reintenta la semana siguiente. Un documento
+  sin DOI (una guía, un contrato, una nota de Notion) no se puede comprobar.
+- **Páginas citadas.** La cita de un fragmento de PDF es la página del visor (la que enseña
+  el lector de PDF), no el número impreso en el pie: en un artículo paginado 1245 a 1256, o en
+  un informe con portada e índice en romanos, difieren, y no hay forma fiable de leer el número
+  impreso de todos los PDF. Desde el 8 sep 2026 un fragmento no cruza de página, así que la
+  página citada es la del dato; los documentos indexados antes se corrigen con la migración del
+  índice (sección 3).
 - **Filtros en la búsqueda vectorial.** Solo se aplica el filtro más selectivo en el lado
   denso (Convex no admite AND entre campos ahí); con varios filtros muy selectivos el lado
   denso puede devolver menos candidatos válidos que el léxico.
@@ -358,6 +406,25 @@ midiendo determinismo, n=5 dio el resultado contrario que n=10.
 Cada corrida gasta tokens reales del gateway. El coste estimado queda en `metrics.cost_usd`.
 
 ## 9. Pruebas automáticas
+
+### Evaluación continua (Ajustes > Calidad)
+
+Cada persona, sobre su propio corpus y sin terminal: "Proponer preguntas" pide al modelo veinte
+casos de control (un dato de un documento, comparación entre documentos, tabla o cifra, algo que
+no está y debe decirlo, y la trampa de otra entidad), que quedan como propuestas con su
+respuesta esperada en llano; ella aprueba las que tienen sentido o las descarta; "Evaluar
+ahora" (o el cron semanal, si hay al menos 5 aprobadas y no hubo corrida en 6 días) las
+responde con el agente real, en conversaciones ocultas que no se listan ni cuentan y se borran
+al puntuarlas, y el historial enseña por corrida cuántas pasan, la fidelidad media, el acierto
+de la búsqueda y los datos de otra entidad. Los módulos son `convex/evaluacion/generar.ts`,
+`correr.ts` y `datos.ts`; la puntuación es la misma de `puntuar.ts` que usa el runner de
+terminal de abajo, con las métricas de recuperación (`retrieval_mrr`, `retrieval_hit_at_5`,
+`context_precision`, `failures_by_stage`) que salen de `metrics.meta.recuperacion`.
+
+Una corrida `running` más de 4 h se cierra como `error` (cron `cerrar evaluaciones colgadas`).
+Las conversaciones ocultas de una corrida interrumpida se borran en el propio `catch`; si
+alguna quedara, `sesiones.listar` no la enseña. Los casos, generaciones, corridas y resultados
+se borran con la cuenta (`usuarios.borrar`).
 
 ### Benchmark de calidad (evaluador)
 

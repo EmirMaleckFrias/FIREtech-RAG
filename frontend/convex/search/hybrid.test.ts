@@ -25,6 +25,7 @@ import {
   describirFiltros,
   filtroVectorial,
   filtrosActivos,
+  fusionarIds,
   fusionarRrf,
   hayFiltros,
   SIN_FILTROS,
@@ -60,6 +61,8 @@ interface Semilla {
   documentId?: string;
   documentType?: string;
   language?: string;
+  /** La frase de contexto escrita al indexar (recuperación contextual). */
+  contexto?: string;
 }
 
 /** La cuenta dueña del corpus sembrado. Cada persona tiene el suyo (ver
@@ -98,6 +101,8 @@ async function sembrarPara(
       ids.push(
         await ctx.db.insert("chunks", {
           text: s.texto,
+          // Como escribe la ingesta: "" cuando no hay contexto (ver pipeline.aEntrada).
+          contexto: s.contexto ?? "",
           embedding: vector({ [s.pico]: 1 }),
           sourceFile: s.sourceFile ?? fileName,
           page: s.page ?? i + 1,
@@ -741,5 +746,86 @@ describe("fragmentos huérfanos", () => {
     const ids2 = await sembrar(t2, TRES);
     const cargado2 = await t2.query(internal.search.hybrid.cargar, { propietario: DUENO, ids: ids2, filtros: {} });
     expect(cargado2).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recuperación contextual: el lado léxico también busca en el contexto
+// ---------------------------------------------------------------------------
+describe("el lado léxico busca en el contexto de cada fragmento", () => {
+  test("un fragmento cuyo texto no lleva el término pero cuyo contexto sí, se encuentra", async () => {
+    const t = convexTest(schema);
+    const [conContexto, sinNada] = await sembrar(t, [
+      // El texto habla de "the impaired group"; el contexto dice qué cohorte es.
+      { texto: "the mean was 542 in the impaired group", pico: 0, contexto: "cohorte castor con deterioro cognitivo leve" },
+      { texto: "nada que ver aquí", pico: 1 },
+    ]);
+    const ids = await t.query(internal.search.hybrid.lexica, { propietario: DUENO, terminos: "castor", n: 50, filtros: {} });
+    expect(ids).toEqual([conContexto]);
+    expect(ids).not.toContain(sinNada);
+    // Y por la búsqueda híbrida entera, con el vector prefiriendo al otro: el
+    // que casa por el contexto entra igual en la fusión.
+    embedFalso(() => vector({ 1: 3, 0: 1 }));
+    const r = await t.action((ctx) => buscarHibrido(ctx, DUENO, "castor", {}, 10));
+    expect(r.recuperacion).toBe("hibrida");
+    expect(r.fragmentos.map((f) => f._id)).toEqual([conContexto, sinNada]);
+    // El contexto viaja con el fragmento (lo leen el calificador y el juez).
+    expect(r.fragmentos[0].contexto).toBe("cohorte castor con deterioro cognitivo leve");
+    expect("contexto" in r.fragmentos[1]).toBe(false);
+  });
+
+  test("casar en el texto Y en el contexto puntúa por encima de casar en uno solo", async () => {
+    const t = convexTest(schema);
+    const [soloTexto, ambos, soloContexto] = await sembrar(t, [
+      { texto: "nutria en el texto", pico: 0 },
+      { texto: "nutria también aquí", pico: 1, contexto: "contexto sobre la nutria" },
+      { texto: "sin el término", pico: 2, contexto: "la nutria del contexto" },
+    ]);
+    const ids = await t.query(internal.search.hybrid.lexica, { propietario: DUENO, terminos: "nutria", n: 50, filtros: {} });
+    expect(ids[0]).toBe(ambos);
+    expect(new Set(ids)).toEqual(new Set([soloTexto, ambos, soloContexto]));
+  });
+
+  test("ADVERSARIAL: el índice del contexto también respeta al propietario y los filtros", async () => {
+    const t = convexTest(schema);
+    const ana = await cuenta(t, "ana@airobotix.net");
+    const bea = await cuenta(t, "bea@airobotix.net");
+    await sembrarPara(t, bea, [{ texto: "texto sin el término", pico: 0, contexto: "contexto con foca" }], "de-bea.pdf");
+    const [deAna] = await sembrarPara(t, ana, [
+      { texto: "texto sin el término", pico: 1, contexto: "contexto con foca", language: "es" },
+      { texto: "otro texto", pico: 2, contexto: "otra foca", language: "en" },
+    ], "de-ana.pdf");
+    expect(await t.query(internal.search.hybrid.lexica, { propietario: ana, terminos: "foca", n: 50, filtros: { language: "es" } })).toEqual([deAna]);
+    expect(await t.query(internal.search.hybrid.lexica, { propietario: ana, terminos: "foca", n: 50, filtros: { language: "fr" } })).toEqual([]);
+  });
+
+  test("fusionarIds premia estar en las dos listas y desempata por id", () => {
+    const x = "x" as Id<"chunks">;
+    const y = "y" as Id<"chunks">;
+    const z = "z" as Id<"chunks">;
+    expect(fusionarIds([[y, x], [z, x]])).toEqual([x, y, z]);
+    expect(fusionarIds([[z], [y]])).toEqual([y, z]);
+    expect(fusionarIds([[], []])).toEqual([]);
+  });
+});
+
+describe("retracciones", () => {
+  test("un fragmento de un artículo retractado llega con la marca; los demás, sin ella", async () => {
+    const t = convexTest(schema);
+    const [retractado, limpio] = await sembrar(t, [
+      { texto: "amiloide en plasma zorro", pico: 0 },
+      { texto: "zorro sano", pico: 1 },
+    ]);
+    // El primero es de un documento que Crossref marcó como retractado.
+    await t.run(async (ctx) => {
+      const ch = (await ctx.db.get(retractado))!;
+      const otro = await ctx.db.insert("documents", {
+        fileName: "lesne.pdf", sha256: "2", pages: 1, chunks: 1, status: "ready", propietario: ch.propietario, ingestadoEn: 1,
+        retraccion: { tipo: "retractado", fecha: "2024-06-24" },
+      });
+      await ctx.db.patch(retractado, { documentRef: otro });
+    });
+    const cargado = await t.query(internal.search.hybrid.cargar, { propietario: DUENO, ids: [retractado, limpio], filtros: {} });
+    expect(cargado.map((f) => [f._id, f.retraccion])).toEqual([[retractado, "retractado"], [limpio, undefined]]);
   });
 });

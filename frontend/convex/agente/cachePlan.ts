@@ -43,7 +43,12 @@ export const leer = internalQuery({
       .first();
     if (!fila) return null;
     if (args.ahora - fila.creadoEn > CADUCIDAD_MS) return null;
-    return { items: fila.items as unknown[], preguntaEn: fila.preguntaEn, clase: fila.clase ?? null };
+    return {
+      items: fila.items as unknown[],
+      preguntaEn: fila.preguntaEn,
+      clase: fila.clase ?? null,
+      variantes: fila.variantes ?? [],
+    };
   },
 });
 
@@ -56,6 +61,7 @@ export const guardar = internalMutation({
     clase: v.optional(v.string()),
     items: v.any(),
     preguntaEn: v.string(),
+    variantes: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const previa = await ctx.db
@@ -65,6 +71,7 @@ export const guardar = internalMutation({
     if (previa) {
       await ctx.db.patch(previa._id, {
         items: args.items, preguntaEn: args.preguntaEn, clase: args.clase,
+        variantes: args.variantes ?? [],
         creadoEn: Date.now(), usos: previa.usos + 1,
       });
       return previa._id;

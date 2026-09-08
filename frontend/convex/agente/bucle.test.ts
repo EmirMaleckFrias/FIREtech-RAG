@@ -446,7 +446,7 @@ describe("camino no documental", () => {
     const metrics = metricasDe(m);
     expect(metrics.meta.clase).toBe("sobre_el_asistente");
     expect(metrics.meta.modo).toBe("normal");
-    expect(metrics.meta.prompt_version).toBe("v4");
+    expect(metrics.meta.prompt_version).toBe("v5");
     expect(metrics.por_componente.agente.rondas).toBe(1);
 
     // Nada del pipeline documental se tocó.
@@ -590,7 +590,7 @@ describe("camino documental, modo normal", () => {
     expect(msgs[6]).toMatchObject({ role: "tool", tool_call_id: "call_plan_e0" });
     expect(String(msgs[6].content)).toContain("PUNTO e0");
     expect(String(msgs[6].content)).toContain("cita: [a.pdf, pág. 3]");
-    expect(msgs).toHaveLength(7);
+    expect(msgs).toHaveLength(8);
     expect(planificar).not.toHaveBeenCalled();
 
     // La barrera recibe la pregunta, el borrador, la evidencia, el mapa y un
@@ -599,7 +599,7 @@ describe("camino documental, modo normal", () => {
     const [pregunta, borrador, mensajes, fragmentos, requerida, mapa, tiempo] = revisar.mock.calls[0];
     expect(pregunta).toBe(PREGUNTA);
     expect(borrador).toBe(RESPUESTA);
-    expect(mensajes).toHaveLength(7);
+    expect(mensajes).toHaveLength(8);
     expect(fragmentos.map((f) => f._id)).toEqual(["c1", "c2"]);
     expect(requerida).toEqual({ e0: planner.ANCLA_EVIDENCE_NEEDED });
     expect(mapa).toEqual({ c1: ["e0"], c2: ["e0"] });
@@ -1180,7 +1180,7 @@ describe("barrera de revisión", () => {
     const m = await correrEn(t, ids, { modo: "extendido" });
 
     expect(revisar).not.toHaveBeenCalled();
-    expect(verificar).toHaveBeenCalledWith(RESPUESTA, expect.any(Array), { e0: planner.ANCLA_EVIDENCE_NEEDED, e1: "especificidad" }, { c1: ["e0"], c2: ["e1"] }, expect.anything());
+    expect(verificar).toHaveBeenCalledWith(RESPUESTA, expect.any(Array), { e0: planner.ANCLA_EVIDENCE_NEEDED, e1: "especificidad" }, { c1: ["e0"], c2: ["e1"] }, expect.anything(), { pregunta: PREGUNTA });
     expect(m.estado).toBe("listo");
     expect(m.content).toBe(RESPUESTA);
     expect(m.verificacion).toMatchObject({ fidelidad: 1 });
@@ -1416,5 +1416,125 @@ describe("repreguntas: se busca la consulta autónoma, se responde la literal", 
     await handlerDirecto(ctx, argsDe(ids));
     const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; query: string }>;
     expect(plan[0].query).toBe(PREGUNTA);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// El inglés del ancla en modo normal, las reformulaciones y la telemetría de
+// recuperación y de entidad
+// ---------------------------------------------------------------------------
+describe("inglés del ancla, reformulaciones y telemetría", () => {
+  test("en modo normal el ancla se busca también con el inglés del clasificador, y se recuerda en la caché", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    const EN = "What is the AUC of p-tau217 for detecting Alzheimer?";
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, consultaEn: EN });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+
+    const m = await correrEn(t, ids);
+
+    expect(planificar).not.toHaveBeenCalled();
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; query: string; queryEn: string }>;
+    expect(plan[0]).toMatchObject({ id: "e0", query: PREGUNTA, queryEn: EN });
+    expect(hopsDe(m)[0].query).toBe(`${PREGUNTA} · en: ${EN}`);
+    expect(m.plan).toEqual([{ id: "e0", query: PREGUNTA, query_en: EN, evidence_needed: planner.ANCLA_EVIDENCE_NEEDED }]);
+    // Repetir la pregunta con el inglés ya en el índice no llama al modelo y
+    // el inglés sobrevive.
+    const filas = await t.run((ctx) => ctx.db.query("planes").collect());
+    expect(filas).toHaveLength(1);
+    expect(filas[0].preguntaEn).toBe(EN);
+  });
+
+  test("con la clase en caché, el inglés del ancla sale de la caché aunque no se llame al clasificador", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    const EN = "What is the AUC of p-tau217?";
+    await t.run(async (ctx) => {
+      const { claveDe } = await import("./cachePlan");
+      await ctx.db.insert("planes", {
+        clave: claveDe(PREGUNTA, "openai/gpt-5.4", "v5"),
+        pregunta: PREGUNTA, modelo: "openai/gpt-5.4", version: "v5", clase: "documental",
+        items: [], preguntaEn: EN, creadoEn: Date.now(), usos: 1,
+      });
+    });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    await correrEn(t, ids);
+    expect(clasificar).not.toHaveBeenCalled();
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; queryEn: string }>;
+    expect(plan[0].queryEn).toBe(EN);
+  });
+
+  test("en modo extendido manda el inglés del planificador; si viene vacío, queda el del clasificador; las reformulaciones viajan al plan", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, consultaEn: "classifier english" });
+    planificar.mockResolvedValue({
+      items: [{ id: "x", query: "especificidad", queryEn: "specificity", evidenceNeeded: "esp", variantes: ["true negative rate"] }],
+      preguntaEn: "planner english",
+      variantesPregunta: ["phosphorylated tau 217 AUC"],
+    });
+    porPunto = { e0: { fragmentos: [frag("c1")] }, e1: { fragmentos: [frag("c2")] } };
+
+    const m = await correrEn(t, ids, { modo: "extendido" });
+
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; queryEn: string; variantes?: string[] }>;
+    expect(plan[0].queryEn).toBe("planner english");
+    expect(plan[0].variantes).toEqual(["phosphorylated tau 217 AUC"]);
+    expect(plan[1].variantes).toEqual(["true negative rate"]);
+    expect(m.plan).toEqual([
+      { id: "e0", query: PREGUNTA, query_en: "planner english", evidence_needed: planner.ANCLA_EVIDENCE_NEEDED, variantes: ["phosphorylated tau 217 AUC"] },
+      { id: "e1", query: "especificidad", query_en: "specificity", evidence_needed: "esp", variantes: ["true negative rate"] },
+    ]);
+    const filas = await t.run((ctx) => ctx.db.query("planes").collect());
+    expect(filas[0].variantes).toEqual(["phosphorylated tau 217 AUC"]);
+
+    // Planificador sin inglés: se conserva el del clasificador.
+    const t2 = nuevaBase();
+    const ids2 = await sembrar(t2);
+    planificar.mockResolvedValue({ items: [], preguntaEn: "" });
+    await correrEn(t2, ids2, { modo: "extendido" });
+    const plan2 = ejecutarPlan.mock.calls[ejecutarPlan.mock.calls.length - 1][2] as Array<{ queryEn: string }>;
+    expect(plan2[0].queryEn).toBe("classifier english");
+  });
+
+  test("ADVERSARIAL: repetir una reformulación del plan como búsqueda extra no se ejecuta", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    planificar.mockResolvedValue({ items: [], preguntaEn: "", variantesPregunta: ["phosphorylated tau 217 AUC"] });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) => resultadoExtra(punto, consulta, [frag("c1")], {}, e));
+    modelo.guiones = [rondaHerramientas([llamadaBuscar("call_v", { semantico: "Phosphorylated tau 217 AUC", punto: "e0" })]), rondaTexto(RESPUESTA)];
+    await correrEn(t, ids, { modo: "extendido" });
+    expect(busqueda).not.toHaveBeenCalled();
+  });
+
+  test("la telemetría lleva los candidatos de cada punto y de cada búsqueda extra, y las atribuciones a otra entidad", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    // El plan falso no calcula candidatos: la clave existe con lista vacía.
+    busqueda.mockImplementation(async (_ctx, _propietario, consulta, e, punto) =>
+      resultadoExtra(punto, consulta, [frag("x1", { page: 9 })], {
+        candidatos: [{ f: "a.pdf", p: 9, loc: "pág. 9" }, { f: "b.pdf", p: 2, sec: "Results", loc: "pág. 2" }],
+      }, e),
+    );
+    modelo.guiones = [rondaHerramientas([llamadaBuscar("call_a", { semantico: "specificity of p-tau217", punto: "e0" })]), rondaTexto(RESPUESTA)];
+    const informe = informeVacio({
+      afirmaciones: [
+        { texto: "Redujo un 30 %", cita: "[a.pdf, pág. 3]", veredicto: "no_sostenida", motivo: "otra entidad", fragmento_id: "", fragmentos: ["c1"], entidad_distinta: true },
+        { texto: "El AUC fue 0,94", cita: "[a.pdf, pág. 3]", veredicto: "sostenida", motivo: "ok", fragmento_id: "", fragmentos: ["c1"] },
+      ],
+      fidelidad: 0.5,
+    });
+    revisar.mockImplementation(async (_p, borrador) => aprobar(borrador, informe));
+
+    const m = await correrEn(t, ids);
+
+    const meta = metricasDe(m).meta;
+    expect(meta.recuperacion).toEqual({
+      e0: [],
+      "extra:2": [{ f: "a.pdf", p: 9, loc: "pág. 9" }, { f: "b.pdf", p: 2, sec: "Results", loc: "pág. 2" }],
+    });
+    expect(meta.verificacion).toMatchObject({ no_sostenidas: 1, entidad_distinta: 1, sostenidas: 1 });
   });
 });

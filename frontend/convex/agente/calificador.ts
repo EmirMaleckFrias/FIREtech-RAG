@@ -42,6 +42,12 @@ export const LOTE = 20;
  *  fallado. */
 export const MOTIVO_SIN_GRADOS = "el calificador no emitió ningún grado";
 
+/** Versión del prompt del calificador. Forma parte de la clave de la caché de
+ *  veredictos (cacheCalificaciones.ts): un cambio del prompt tiene que
+ *  invalidar los veredictos guardados, o la caché seguiría sirviendo los del
+ *  prompt anterior. v2: la comprobación de entidad. */
+export const VERSION_CALIFICADOR = "v2";
+
 export const PROMPT_CALIFICADOR =
   "Eres un evaluador de evidencia para investigación médica. Recibes una " +
   "pregunta, la descripción de la evidencia que se necesita para responderla " +
@@ -58,7 +64,12 @@ export const PROMPT_CALIFICADOR =
   "contenido, o menciona el tema de pasada sin decir nada de él.\n" +
   "Fíjate en la sección: un dato en Resultados o en una tabla vale como " +
   "evidencia; la misma frase en Introducción suele ser contexto de otros " +
-  'trabajos. Ante la duda entre "parcial" y "no", elige "parcial": que ' +
+  "trabajos. Comprueba la ENTIDAD: si la evidencia necesaria es sobre un " +
+  "fármaco, un biomarcador, una población, un estudio o un desenlace y el " +
+  "fragmento aporta el dato para OTRO de la misma clase (otro fármaco, otra " +
+  'cohorte, otro estudio), es como mucho "parcial", nunca "directa", y el ' +
+  "motivo nombra a la otra entidad; la cabecera y el contexto del fragmento " +
+  'dicen de qué habla. Ante la duda entre "parcial" y "no", elige "parcial": que ' +
   "alguien pierda una cifra por un descarte es peor que un fragmento de más. " +
   "Devuelve SOLO un objeto JSON con la forma " +
   '{"fragmentos": [{"i": <índice tal como aparece en la cabecera>, ' +
@@ -73,10 +84,17 @@ export const PROMPT_CALIFICADOR =
  *  "sección vacía". */
 export function cabecera(i: number, ch: Fragmento): string {
   const tipo = ch.chunkType === "table" ? "tabla" : "texto";
-  return (
+  const base =
     `[${i}] fuente: ${fuente(ch)} · seccion: ${ch.section || "desconocida"} ` +
-    `· tipo: ${tipo} · cita: ${cita(ch)}`
-  );
+    `· tipo: ${tipo} · cita: ${cita(ch)}`;
+  // El contexto escrito al indexar dice de qué estudio, población o tabla
+  // habla el fragmento: es lo que permite distinguir "la cifra que se pide"
+  // de "la misma cifra en otra cohorte o para otro fármaco", que sin él solo
+  // se ve si el texto lo nombra. En su propia línea y etiquetado, para que
+  // el modelo no lo confunda con el texto del fragmento.
+  const contexto = (ch.contexto ?? "").trim();
+  const retractado = ch.retraccion ? ` · ARTÍCULO ${ch.retraccion === "preocupacion" ? "CON EXPRESIÓN DE PREOCUPACIÓN" : "RETRACTADO"}` : "";
+  return contexto ? `${base}${retractado}\n(contexto del fragmento: ${contexto})` : `${base}${retractado}`;
 }
 
 /** Lee {"fragmentos": [{"i", "grado", ...}]} con tolerancia por entrada:

@@ -26,7 +26,13 @@ export const listar = query({
       .order("desc")
       // Las últimas MAX_SESIONES_LISTADAS: acotado, como pide la guía.
       .take(MAX_SESIONES_LISTADAS);
-    return filas.map((s) => ({ _id: s._id, titulo: s.titulo, creadoEn: s.creadoEn }));
+    // Las conversaciones OCULTAS son las de la evaluación de calidad
+    // (evaluacion/correr.ts): el agente las responde, pero no son de la
+    // persona y se borran al puntuarlas. Se filtran tras el índice porque son
+    // pocas (una viva por corrida) y duran minutos.
+    return filas
+      .filter((s) => !s.oculta)
+      .map((s) => ({ _id: s._id, titulo: s.titulo, creadoEn: s.creadoEn }));
   },
 });
 

@@ -417,15 +417,25 @@ describe("contexto, solape y secciones", () => {
       [...oraciones.slice(22), ["Results", 12], ["Mean amyloid beta 42 was 542 pg/mL.", 10]],
     ]);
     const deMetodos = deSeccion(chunks, "Methods");
-    expect(deMetodos.length).toBeGreaterThanOrEqual(2);
-    for (let i = 1; i < deMetodos.length; i++) {
-      const cola = solape(deMetodos[i - 1], deMetodos[i]);
-      expect(cola.length).toBeGreaterThan(0);
-      const tokens = cola.reduce((s, p) => s + estTokens(p), 0);
-      expect(tokens).toBeGreaterThanOrEqual(OVERLAP_TOKENS / 2);
-      expect(tokens).toBeLessThanOrEqual(2 * OVERLAP_TOKENS);
-      expect(cola.length).toBeLessThan(cuerpo(deMetodos[i - 1]).split("\n\n").length);
+    expect(deMetodos.length).toBeGreaterThanOrEqual(4);
+    // El solape existe entre fragmentos consecutivos de la MISMA página; entre
+    // páginas no, porque un fragmento ya no cruza de página (la cita lleva la
+    // página del dato). Ningún fragmento de Métodos toca dos páginas.
+    expect(deMetodos.every((c) => c.sourcePages.length === 1)).toBe(true);
+    for (const pagina of [1, 2]) {
+      const dePagina = deMetodos.filter((c) => c.page === pagina);
+      expect(dePagina.length).toBeGreaterThanOrEqual(2);
+      for (let i = 1; i < dePagina.length; i++) {
+        const cola = solape(dePagina[i - 1], dePagina[i]);
+        expect(cola.length).toBeGreaterThan(0);
+        const tokens = cola.reduce((s, p) => s + estTokens(p), 0);
+        expect(tokens).toBeGreaterThanOrEqual(OVERLAP_TOKENS / 2);
+        expect(tokens).toBeLessThanOrEqual(2 * OVERLAP_TOKENS);
+        expect(cola.length).toBeLessThan(cuerpo(dePagina[i - 1]).split("\n\n").length);
+      }
     }
+    const primeroDePagina2 = deMetodos.find((c) => c.page === 2)!;
+    expect(cuerpo(primeroDePagina2)).not.toContain("sentence 021");
     const [resultados] = deSeccion(chunks, "Results");
     expect(resultados.text).not.toContain("recruitment step");
     const todo = texto(chunks);
@@ -745,5 +755,42 @@ describe("dos columnas", () => {
     const textos = paginas[0].map((l) => l.texto);
     expect(textos).toContain("Variable  Control");
     expect(textos).toContain("Sexo femenino  45 (60%)");
+  });
+});
+
+describe("la cita lleva la página donde está el dato", () => {
+  test("ADVERSARIAL: un dato en la página 2 no se cita como página 1 aunque la sección empiece en la 1", async () => {
+    // Dos páginas de la misma sección con poco texto cada una: antes el
+    // empaquetador las juntaba en un fragmento de una sola cita (pág. 1) y el
+    // dato de la 2 se citaba mal.
+    const chunks = await parsear([
+      [...PORTADA, ["Results", 12], ["The baseline cohort included 412 participants from three memory clinics.", 10]],
+      [["The conversion rate to dementia was 31.6% at 24 months in the impaired group.", 10]],
+      [["Plasma p-tau217 showed an AUC of 0.94 for the detection of amyloid positivity.", 10]],
+    ]);
+    const conCifra = chunks.find((c) => c.text.includes("31.6%"));
+    expect(conCifra?.page).toBe(2);
+    expect(conCifra?.sourcePages).toEqual([2]);
+    const conAuc = chunks.find((c) => c.text.includes("AUC of 0.94"));
+    expect(conAuc?.page).toBe(3);
+    expect(conAuc?.sourcePages).toEqual([3]);
+    // Ningún fragmento cruza de página: cada dato se cita donde está.
+    for (const c of chunks) expect(c.sourcePages).toHaveLength(1);
+    // Y las tres piezas siguen siendo de Results, sin una sección inventada.
+    expect(deSeccion(chunks, "Results").length).toBe(3);
+    expect(chunks.every((c) => !c.section.includes("||"))).toBe(true);
+  });
+
+  test("el solape no arrastra la página anterior: el fragmento de la página 2 empieza en la 2", async () => {
+    const relleno = (n: number) =>
+      Array.from({ length: n }, (_, i) => [`Sentence number ${i} of the results section with enough words to count tokens here.`, 10] as [string, number]);
+    const chunks = await parsear([
+      [...PORTADA, ["Results", 12], ...relleno(30)],
+      [["The mortality was 30 % lower in the treated arm at one year.", 10], ...relleno(5)],
+    ]);
+    const conDato = chunks.find((c) => c.text.includes("mortality was 30 %"));
+    expect(conDato?.page).toBe(2);
+    expect(conDato?.sourcePages).toEqual([2]);
+    expect(chunks.filter((c) => c.page === 1).every((c) => !c.text.includes("mortality"))).toBe(true);
   });
 });

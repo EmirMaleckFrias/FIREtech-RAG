@@ -11,6 +11,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import type { PaginationResult } from "convex/server";
 import * as gateway from "../lib/gateway";
 import schema from "../schema";
+import { TAMANO_GRUPO, VERSION_INDICE } from "./contexto";
 import { PERDIO_EL_DOCUMENTO } from "./escritura";
 import { LOTE_EMBEDDINGS, MAX_ERROR_CHARS } from "./lotes";
 import { escribirPdf } from "./pdfFalso.test-util";
@@ -31,8 +32,23 @@ function vectorFalso(i: number): number[] {
 
 const USO = (n: number) => ({ prompt: n * 10, cached: 0, completion: 0, reasoning: 0 });
 
-/** El gateway parcheado: un vector por texto, sin red. */
+/** El contexto por fragmento, parcheado: una frase por índice, para
+ *  cualquier tamaño de grupo (los índices de más se ignoran). */
+function contextoFalso(texto = "contexto de prueba") {
+  return vi.spyOn(gateway, "completionJson").mockImplementation(async () => ({
+    datos: { contextos: Array.from({ length: TAMANO_GRUPO }, (_, i) => ({ i, contexto: `${texto} ${i}` })) },
+    usage: { prompt: 50, cached: 0, completion: 30, reasoning: 0 },
+    modelo: "openai/gpt-5.4-mini",
+    finishReason: "stop",
+    razonamientoRechazado: false,
+  }));
+}
+
+/** El gateway parcheado: un vector por texto y un contexto por fragmento,
+ *  sin red. La ingesta contextualiza antes de embeber, así que las dos
+ *  llamadas van juntas en casi todos los casos. */
 function embedFalso() {
+  contextoFalso();
   return vi.spyOn(gateway, "embed").mockImplementation(async (textos) => ({
     vectores: textos.map((_, i) => vectorFalso(i)),
     usage: USO(textos.length),
@@ -251,6 +267,7 @@ describe("ingestar", () => {
     await chunkAjeno(t, documentId, "version-vieja", "de la versión anterior");
     // El primer lote entra y el segundo falla: lo escrito por esta corrida
     // tiene que desaparecer, y el error largo se recorta.
+    contextoFalso();
     let llamadas = 0;
     vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
       if (++llamadas > 1) throw new Error("gateway 429: " + "x".repeat(2000));
@@ -348,6 +365,7 @@ describe("ingestar: dos corridas sobre el mismo documento", () => {
     // terminar entera (su lectura y su embebido). Es el reindexado que entra
     // a la vez que una ingesta en marcha.
     let segundaLanzada = false;
+    contextoFalso();
     vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
       if (!segundaLanzada) {
         segundaLanzada = true;
@@ -427,6 +445,7 @@ describe("ingestar: sin tope de tamaño, con avance visible", () => {
     const t = convexTest(schema, modules);
     const documentId = await documentoConFichero(t, "datos.csv", csvGrande(250));
     const vistos: Array<{ fase: string; hecho: number; total: number }> = [];
+    contextoFalso();
     vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
       const doc = await t.run((ctx) => ctx.db.get(documentId));
       if (doc?.progreso) vistos.push({ fase: doc.progreso.fase, hecho: doc.progreso.hecho, total: doc.progreso.total });
@@ -467,7 +486,7 @@ describe("ingestar: sin tope de tamaño, con avance visible", () => {
       expect(stats.tokens_embedding).toBe(n * 10);
       expect(stats.pages).toBe(n);
     } finally {
-      configurarTiempoPorAccion(7 * 60_000);
+      configurarTiempoPorAccion(5 * 60_000);
     }
   });
 
@@ -478,6 +497,7 @@ describe("ingestar: sin tope de tamaño, con avance visible", () => {
       const t = convexTest(schema, modules);
       const documentId = await documentoConFichero(t, "datos.csv", csvGrande(LOTE_EMBEDDINGS * 3 * 2));
       let llamadas = 0;
+      contextoFalso();
       vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
         // El segundo grupo (segunda acción) falla.
         if (++llamadas > 3) throw new Error("gateway caído");
@@ -492,7 +512,7 @@ describe("ingestar: sin tope de tamaño, con avance visible", () => {
       expect(await chunksDe(t, documentId)).toEqual([]);
       expect(await pendientesDe(t)).toEqual([]);
     } finally {
-      configurarTiempoPorAccion(7 * 60_000);
+      configurarTiempoPorAccion(5 * 60_000);
     }
   });
 });
@@ -570,5 +590,153 @@ describe("ingestar: aislamiento y avisos", () => {
     expect(chunks.length).toBeGreaterThan(0);
     expect(chunks.every((c) => c.citation === undefined)).toBe(true);
     expect(chunks.every((c) => c.sourceFile === "guia-hta.pdf")).toBe(true);
+  });
+});
+
+describe("ingestar: recuperación contextual", () => {
+  test("cada fragmento se embebe con su contexto delante y lo guarda aparte; el documento queda en la versión del índice", async () => {
+    const t = convexTest(schema, modules);
+    const bytes = csvGrande(30);
+    const documentId = await documentoConFichero(t, "datos.csv", bytes);
+    const embed = embedFalso();
+    const contexto = vi.spyOn(gateway, "completionJson");
+
+    await ingerir(t, documentId);
+
+    // 30 fragmentos: tres grupos de contexto (12 + 12 + 6), un lote de embeddings.
+    expect(contexto).toHaveBeenCalledTimes(3);
+    const mensajes = contexto.mock.calls.map((c) => (c[0].messages as Array<{ content: string }>)[1].content);
+    expect(mensajes[0]).toContain("Documento: datos.csv");
+    expect(mensajes[0]).toContain("índices 0 a 11");
+    expect(mensajes[2]).toContain("índices 0 a 5");
+    // Lo que se embebe lleva el contexto y después el texto; lo que se guarda
+    // los separa: `text` es lo que se cita y se verifica.
+    const textos = embed.mock.calls[0][0];
+    expect(textos[0].startsWith("contexto de prueba 0\n\nid: 1\n")).toBe(true);
+    const chunks = await chunksDe(t, documentId);
+    expect(chunks).toHaveLength(30);
+    expect(chunks.every((c) => typeof c.contexto === "string" && c.contexto.startsWith("contexto de prueba"))).toBe(true);
+    expect(chunks.every((c) => !c.text.includes("contexto de prueba"))).toBe(true);
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("ready");
+    expect(doc?.indiceVersion).toBe(VERSION_INDICE);
+    expect(doc?.avisos).toBeUndefined();
+    const [run] = await t.run((ctx) => ctx.db.query("ingestionRuns").collect());
+    expect((run.stats as Record<string, unknown>).contextos_fallidos).toBe(0);
+    const telemetria = (run.stats as { telemetria: { por_componente: Record<string, { rondas: number }> } }).telemetria;
+    expect(telemetria.por_componente.contexto.rondas).toBe(3);
+  });
+
+  test("ADVERSARIAL: si el modelo de contexto falla, el documento queda LISTO sin contexto y con el aviso, no en failed", async () => {
+    const t = convexTest(schema, modules);
+    const documentId = await documentoConFichero(t, "datos.csv", csvGrande(20));
+    embedFalso();
+    let llamada = 0;
+    vi.spyOn(gateway, "completionJson").mockImplementation(async () => {
+      // El primer grupo (12) falla; el segundo (8) responde.
+      if (++llamada === 1) throw new Error("gateway 503");
+      return {
+        datos: { contextos: Array.from({ length: 8 }, (_, i) => ({ i, contexto: `ok ${i}` })) },
+        usage: { prompt: 1, cached: 0, completion: 1, reasoning: 0 },
+        modelo: "m",
+        finishReason: "stop",
+        razonamientoRechazado: false,
+      };
+    });
+
+    await ingerir(t, documentId);
+
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("ready");
+    expect(doc?.avisos).toEqual({ sinLeer: 0, omitidas: 0, recortados: 0, sinContexto: 12 });
+    expect(doc?.indiceVersion).toBe(VERSION_INDICE);
+    const chunks = await chunksDe(t, documentId);
+    expect(chunks).toHaveLength(20);
+    // Sin contexto se escribe "" (la fila tiene que estar en su índice); al
+    // leerla, `aFragmento` lo convierte en ausencia.
+    expect(chunks.filter((c) => !c.contexto)).toHaveLength(12);
+    expect(chunks.filter((c) => c.contexto?.startsWith("ok "))).toHaveLength(8);
+    const [run] = await t.run((ctx) => ctx.db.query("ingestionRuns").collect());
+    expect(run.status).toBe("completed");
+    expect((run.stats as Record<string, unknown>).contextos_fallidos).toBe(12);
+  });
+
+  test("ADVERSARIAL: los fragmentos sin contexto se acumulan entre relevos y el aviso los suma todos", async () => {
+    const { configurarTiempoPorAccion } = await import("./pipeline");
+    configurarTiempoPorAccion(0); // cada acción hace un grupo y pasa el relevo
+    try {
+      const t = convexTest(schema, modules);
+      const n = LOTE_EMBEDDINGS * 3 * 2; // dos grupos de embebido, dos acciones
+      const documentId = await documentoConFichero(t, "datos.csv", csvGrande(n));
+      embedFalso();
+      // Ningún grupo de contexto responde: todos los fragmentos van sin él.
+      vi.spyOn(gateway, "completionJson").mockRejectedValue(new Error("sin saldo"));
+      await ingerir(t, documentId);
+      const doc = await t.run((ctx) => ctx.db.get(documentId));
+      expect(doc?.status).toBe("ready");
+      expect(doc?.avisos?.sinContexto).toBe(n);
+      const [run] = await t.run((ctx) => ctx.db.query("ingestionRuns").collect());
+      // Dos grupos llenos: cada uno pasa el relevo (el segundo no sabe que
+      // era el último hasta que la tercera acción encuentra la cola vacía).
+      expect((run.stats as Record<string, unknown>).relevos_embebido).toBe(2);
+      expect((run.stats as Record<string, unknown>).contextos_fallidos).toBe(n);
+    } finally {
+      configurarTiempoPorAccion(5 * 60_000);
+    }
+  });
+
+  test("con ENABLE_CHUNK_CONTEXT=false no se llama al modelo y se embebe el texto tal cual", async () => {
+    const t = convexTest(schema, modules);
+    const documentId = await documentoConFichero(t, "datos.csv", csvGrande(5));
+    const embed = embedFalso();
+    const contexto = vi.spyOn(gateway, "completionJson");
+    vi.stubEnv("ENABLE_CHUNK_CONTEXT", "false");
+    try {
+      await ingerir(t, documentId);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(contexto).not.toHaveBeenCalled();
+    expect(embed.mock.calls[0][0][0].startsWith("id: 1\n")).toBe(true);
+    const chunks = await chunksDe(t, documentId);
+    expect(chunks.every((c) => c.contexto === "")).toBe(true);
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("ready");
+    expect(doc?.avisos).toBeUndefined();
+    // Con el contexto apagado la receta es OTRA: al encenderlo, la migración
+    // los reindexa; apagado, no los da por pendientes.
+    expect(doc?.indiceVersion).toBe(`${VERSION_INDICE}-sin-contexto`);
+  });
+});
+
+describe("ingestar: el contexto entre relevos", () => {
+  test("ADVERSARIAL: la primera acción sin contexto y la segunda con él: el aviso cuenta solo los del primer grupo", async () => {
+    const { configurarTiempoPorAccion } = await import("./pipeline");
+    configurarTiempoPorAccion(0);
+    try {
+      const t = convexTest(schema, modules);
+      const n = LOTE_EMBEDDINGS * 3 * 2; // dos grupos, dos acciones
+      const documentId = await documentoConFichero(t, "datos.csv", csvGrande(n));
+      embedFalso();
+      let llamada = 0;
+      vi.spyOn(gateway, "completionJson").mockImplementation(async () => {
+        // Los 24 grupos de contexto de la primera acción fallan; los de la segunda responden.
+        if (++llamada <= 24) throw new Error("gateway 503");
+        return {
+          datos: { contextos: Array.from({ length: TAMANO_GRUPO }, (_, i) => ({ i, contexto: `ok ${i}` })) },
+          usage: { prompt: 1, cached: 0, completion: 1, reasoning: 0 },
+          modelo: "m", finishReason: "stop", razonamientoRechazado: false,
+        };
+      });
+      await ingerir(t, documentId);
+      const doc = await t.run((ctx) => ctx.db.get(documentId));
+      expect(doc?.status).toBe("ready");
+      expect(doc?.avisos?.sinContexto).toBe(LOTE_EMBEDDINGS * 3);
+      const chunks = await chunksDe(t, documentId);
+      expect(chunks.filter((c) => !c.contexto)).toHaveLength(LOTE_EMBEDDINGS * 3);
+      expect(chunks.filter((c) => c.contexto?.startsWith("ok "))).toHaveLength(LOTE_EMBEDDINGS * 3);
+    } finally {
+      configurarTiempoPorAccion(5 * 60_000);
+    }
   });
 });

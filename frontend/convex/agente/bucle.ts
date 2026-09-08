@@ -149,6 +149,10 @@ function registrarVerificacion(
       afirmaciones: informe.afirmaciones.length,
       sostenidas: cuenta(verificador.SOSTENIDA),
       no_sostenidas: cuenta(verificador.NO_SOSTENIDA),
+      // Atribuciones a otra entidad: van dentro de las no sostenidas y además
+      // se cuentan aparte, porque son el fallo que las medidas de fidelidad
+      // clásicas no ven y el evaluador las mide por separado.
+      entidad_distinta: informe.afirmaciones.filter((a) => a.entidad_distinta).length,
       parciales: cuenta(verificador.PARCIAL),
       sin_cita: cuenta(verificador.SIN_CITA),
       sin_verificar: cuenta(verificador.SIN_VERIFICAR),
@@ -224,7 +228,7 @@ export const correr = internalAction({
       //    una repregunta ("y en la otra cohorte?") depende de la conversación.
       const cacheable = args.historial.length === 0;
       const clavePlan = claveDePlan(args.texto, a.modelo, VERSION_PROMPT);
-      let enCache: { items: unknown[]; preguntaEn: string; clase: string | null } | null = null;
+      let enCache: { items: unknown[]; preguntaEn: string; clase: string | null; variantes?: string[] } | null = null;
       if (cacheable) {
         try {
           enCache = await ctx.runQuery(internal.agente.cachePlan.leer, { clave: clavePlan, ahora: Date.now() });
@@ -240,9 +244,11 @@ export const correr = internalAction({
       // devuelve además la pregunta reescrita para que se entienda sola, y
       // ESA es la que se busca; lo que se redacta sigue siendo el texto
       // literal de quien pregunta (ver planner.Clasificacion).
+      // Con la clase en caché, la versión inglesa del ancla también está en
+      // caché (la guardó el planificador o el clasificador de la primera vez).
       const clasificacion: planner.Clasificacion =
         (enCache?.clase ?? null) !== null
-          ? { clase: enCache!.clase as planner.Clase, consulta: args.texto }
+          ? { clase: enCache!.clase as planner.Clase, consulta: args.texto, consultaEn: enCache!.preguntaEn ?? "" }
           : await planner.clasificar(args.texto, args.historial, tel);
       const clase = clasificacion.clase;
       const consulta = clasificacion.consulta;
@@ -265,22 +271,29 @@ export const correr = internalAction({
       await actualizar({ estado: "buscando" });
       if (abandonado) return;
       let items: planner.PuntoPlan[] = [];
-      let preguntaEn = "";
+      // El inglés del ancla sale del clasificador cuando no corre el
+      // planificador (modo normal): antes e0 se buscaba una sola vez, en
+      // español, contra un corpus en inglés. El planificador, si corre, lo
+      // sustituye por el suyo.
+      let preguntaEn = clasificacion.consultaEn ?? "";
+      let variantes: string[] = [];
       if (modo.planifica) {
         if (enCache && Array.isArray(enCache.items) && enCache.items.length) {
           items = enCache.items as planner.PuntoPlan[];
-          preguntaEn = enCache.preguntaEn;
+          preguntaEn = enCache.preguntaEn || preguntaEn;
+          variantes = enCache.variantes ?? [];
           tel.incr("plan_cache_hits");
           void ctx.runMutation(internal.agente.cachePlan.contarUso, { clave: clavePlan }).catch(() => undefined);
         } else {
           const r = await planner.planificar(consulta, args.historial, a.maxConsultasPlan, tel);
           items = r.items;
-          preguntaEn = r.preguntaEn;
+          preguntaEn = r.preguntaEn || preguntaEn;
+          variantes = r.variantesPregunta ?? [];
           if (cacheable && items.length) {
             try {
               await ctx.runMutation(internal.agente.cachePlan.guardar, {
                 clave: clavePlan, pregunta: args.texto, modelo: a.modelo, version: VERSION_PROMPT,
-                clase, items, preguntaEn,
+                clase, items, preguntaEn, variantes,
               });
             } catch (exc) {
               console.warn("no se pudo guardar el plan en caché", exc);
@@ -288,23 +301,25 @@ export const correr = internalAction({
           }
         }
       } else if (cacheable && !enCache) {
-        // En modo normal no hay plan, pero la clase sí vale la pena recordarla.
+        // En modo normal no hay plan, pero la clase y el inglés del ancla sí
+        // vale la pena recordarlos.
         void ctx
           .runMutation(internal.agente.cachePlan.guardar, {
             clave: clavePlan, pregunta: args.texto, modelo: a.modelo, version: VERSION_PROMPT,
-            clase, items: [], preguntaEn: "",
+            clase, items: [], preguntaEn, variantes: [],
           })
           .catch(() => undefined);
       }
-      const plan = planner.conAncla(consulta, preguntaEn, items);
-      await actualizar({
-        plan: plan.map((p) => ({
+      const plan = planner.conAncla(consulta, preguntaEn, items, variantes);
+      const planPublicable = () =>
+        plan.map((p) => ({
           id: p.id,
           query: p.query,
           query_en: p.queryEn,
           evidence_needed: p.evidenceNeeded,
-        })),
-      });
+          ...(p.variantes?.length ? { variantes: p.variantes } : {}),
+        }));
+      await actualizar({ plan: planPublicable() });
 
       // 3. Toda la evidencia del plan, en paralelo, antes del primer turno del
       //    modelo. Aquí es donde la variación entre corridas deja de existir:
@@ -328,10 +343,19 @@ export const correr = internalAction({
       // Los ids y sus grados van a la telemetría para poder MEDIR el
       // determinismo entre corridas (solape de conjuntos) y atribuir la
       // variación que quede al calificador o a la recuperación.
+      // Y los candidatos que trajo cada búsqueda ANTES del calificador: con
+      // ellos el evaluador mide la recuperación por separado (si la evidencia
+      // esperada no estaba entre los candidatos falló la búsqueda; si estaba y
+      // no llegó a las fuentes, falló el calificador). Los hops extra se
+      // añaden bajo "extra:<n>" según llegan.
+      const recuperacion: Record<string, evidencia.CandidatoRecuperado[]> = Object.fromEntries(
+        ev.puntos.map((p) => [p.id, p.candidatos ?? []]),
+      );
       tel.fija({
         huella_evidencia: ev.huella,
         evidencia_ids: [...acumulado.keys()].sort(),
         evidencia_grados: Object.fromEntries([...acumulado.keys()].sort().map((id) => [id, grados[id] ?? ""])),
+        recuperacion,
       });
       const fuentes = () => fuentesPayload(acumulado.values(), mapa, grados);
       await actualizar({ hops, sources: fuentes() });
@@ -360,6 +384,7 @@ export const correr = internalAction({
         plan.flatMap((p) => [
           claveDeLlamada(NOMBRE_BUSCAR, { semantico: p.query }),
           ...(p.queryEn ? [claveDeLlamada(NOMBRE_BUSCAR, { semantico: p.queryEn })] : []),
+          ...(p.variantes ?? []).map((vr) => claveDeLlamada(NOMBRE_BUSCAR, { semantico: vr })),
         ]),
       );
       let contenido = "";
@@ -633,6 +658,8 @@ export const correr = internalAction({
                 ));
                 hopsSinAvance = nuevos ? 0 : hopsSinAvance + 1;
                 Object.assign(hop, hopDePunto(resultado, hop.n, "extra", hop.query), { nuevos, plan_item: hop.plan_item });
+                recuperacion[`extra:${hop.n}`] = resultado.candidatos ?? [];
+                tel.fija({ recuperacion });
                 if (resultado.estado === "sin_resultados") {
                   const revisados = resultado.documentosRevisados.length
                     ? ` Los documentos de los que salían los candidatos eran: ${resultado.documentosRevisados.join("; ")}.`
@@ -671,8 +698,11 @@ export const correr = internalAction({
       let abstencionSegura = false;
       const revisionPrevia = a.habilitarVerificacion && a.habilitarRevisionPrevia;
       if (revisionPrevia) {
+        // La consulta autónoma, no el texto literal: en una repregunta ("¿y en
+        // la otra cohorte?") la literal no nombra la entidad y el juez no
+        // podría comprobarla. Sin historial son la misma cadena.
         const r = await revisor.revisarAntesDePublicar(
-          args.texto, contenido, mensajes, fragmentos, requerida, mapa, restanteS(), tel,
+          consulta, contenido, mensajes, fragmentos, requerida, mapa, restanteS(), tel,
         );
         contenido = r.contenido;
         informe = r.informe;
@@ -718,7 +748,7 @@ export const correr = internalAction({
         }
       } else if (a.habilitarVerificacion && contenido) {
         try {
-          informe = await verificador.verificar(contenido, fragmentos, requerida, mapa, tel);
+          informe = await verificador.verificar(contenido, fragmentos, requerida, mapa, tel, { pregunta: consulta });
         } catch (exc) {
           console.error("La verificación falló; la respuesta se publica sin anotar", exc);
           tel.incr("verificacion_fallida");
@@ -748,9 +778,7 @@ export const correr = internalAction({
         content: contenido,
         sources: fuentes(),
         hops,
-        plan: plan.map((p) => ({
-          id: p.id, query: p.query, query_en: p.queryEn, evidence_needed: p.evidenceNeeded,
-        })),
+        plan: planPublicable(),
         verificacion: informe ?? undefined,
         metrics: tel.resumen(),
         error: undefined,

@@ -155,3 +155,14 @@ describe("recortes: se cuentan y se evitan", () => {
     expect(partes.join(" ").split(/\s+/).filter(Boolean)).toEqual(texto.split(/\s+/).filter(Boolean));
   });
 });
+
+describe("normalizarTexto", () => {
+  test("quita ligaduras, guiones blandos y espacios duros sin tocar cifras ni letras griegas", async () => {
+    const { normalizarTexto, chunkBase } = await import("./chunking");
+    expect(normalizarTexto("ﬁnding ﬂuid eﬃcacy amy­loid 12,5 % Aβ42 10²")).toBe(
+      "finding fluid efficacy amyloid 12,5 % Aβ42 10²",
+    );
+    // Y el fragmento nace ya limpio: es lo que indexa el texto y lo que se cita.
+    expect(chunkBase("a.pdf", "ﬁnding", 1, [1], "text").text).toBe("finding");
+  });
+});

@@ -139,23 +139,29 @@ export const inventario = internalQuery({ /* args: { propietario: Id<"users"> } 
 
 ### `convex/agente/planner.ts`
 ```ts
-export interface PuntoPlan { id: string; query: string; queryEn: string; evidenceNeeded: string }
+export interface PuntoPlan {
+  id: string; query: string; queryEn: string; evidenceNeeded: string;
+  variantes?: string[];   // hasta 2 reformulaciones en inglés (sinónimos, siglas); se buscan también
+}
 /** `{ items: [], preguntaEn: "" }` si falla: el llamador pone el ancla. NO
  *  inyecta ningún checklist. `preguntaEn` es la pregunta entera en inglés,
  *  que el modelo devuelve en el mismo JSON como `pregunta_en`: es lo que
- *  permite que el ancla e0 también se busque en inglés. */
+ *  permite que el ancla e0 también se busque en inglés. `variantesPregunta`
+ *  son las reformulaciones de la pregunta entera (`variantes_pregunta`). */
 export async function planificar(
   pregunta: string, historial: {role: string; content: string}[],
   maxItems: number, tel?: Telemetria,
-): Promise<{ items: PuntoPlan[]; preguntaEn: string }>;
-/** Antepone e0 = la pregunta literal (con `preguntaEn` como queryEn, que
- *  puede ir vacía en modo normal), deduplicando contra los demás y
+): Promise<{ items: PuntoPlan[]; preguntaEn: string; variantesPregunta?: string[] }>;
+/** Antepone e0 = la pregunta literal (con `preguntaEn` como queryEn y
+ *  `variantesPregunta` como variantes), deduplicando contra los demás y
  *  renumerando e1..eN por posición. */
-export function conAncla(pregunta: string, preguntaEn: string, items: PuntoPlan[]): PuntoPlan[];
-/** Clase de la pregunta, ANTES de buscar. Solo `documental` entra al pipeline. */
+export function conAncla(pregunta: string, preguntaEn: string, items: PuntoPlan[], variantesPregunta?: string[]): PuntoPlan[];
+/** Clase de la pregunta, ANTES de buscar, la consulta autónoma con la que
+ *  buscarla y su versión en inglés (`consultaEn`, la queryEn de e0 cuando no
+ *  corre el planificador). Solo `documental` entra al pipeline. */
 export async function clasificar(
   pregunta: string, historial: {role: string; content: string}[], tel?: Telemetria,
-): Promise<"documental" | "sobre_el_asistente" | "conversacional">;
+): Promise<{ clase: "documental" | "sobre_el_asistente" | "conversacional"; consulta: string; consultaEn?: string }>;
 ```
 
 ### `convex/agente/calificador.ts`
@@ -177,9 +183,12 @@ export async function calificarEvidencia(
 
 ### `convex/agente/evidencia.ts`
 ```ts
+export interface CandidatoRecuperado { f: string; p: number; sp?: number[]; sec?: string; loc: string }
 export interface PuntoEvidencia {
   id: string; query: string; queryEn: string; evidenceNeeded: string;
+  variantes?: string[];                 // reformulaciones que también se buscaron
   fragmentos: Fragmento[]; documentosRevisados: string[];
+  candidatos?: CandidatoRecuperado[];   // hasta 20 candidatos fusionados ANTES del calificador (telemetría)
   estado: "cubierto" | "sin_resultados";
   relevanciaVerificada: boolean; recuperacion: ModoRecuperacion; ms: number;
 }
@@ -215,7 +224,11 @@ export const CUBIERTO = "cubierto", EVIDENCIA_NO_USADA = "evidencia_no_usada",
 export interface Afirmacion {
   texto: string; cita: string; veredicto: string; motivo: string;
   fragmento_id: string; fragmentos: string[];   // ids de TODOS los hermanos de la cita
+  entidad_distinta?: boolean;   // el fragmento habla de OTRA entidad; siempre con no_sostenida
+  encabezado?: string;          // apartado de la respuesta bajo el que iba la frase
 }
+// `Fragmento` (lib/citas.ts) lleva además `contexto?` (la frase escrita al indexar, NO
+// evidencia) y `retraccion?` ("retractado" | "retirado" | "preocupacion", según Crossref).
 export interface CoberturaPunto {
   id: string; evidence_needed: string;
   estado: "cubierto" | "parcial" | "evidencia_no_usada" | "sin_resultados";
@@ -233,8 +246,12 @@ export async function verificar(
   evidenciaRequerida?: Record<string, string> | null,
   mapaPlan?: Record<string, string[]> | null,
   tel?: Telemetria,
+  opciones?: { veredictosPrevios?: ReadonlyMap<string, Afirmacion>; pregunta?: string },
 ): Promise<Verificacion>;
 ```
+El juez recibe la `pregunta` y el apartado de cada frase para la comprobación de ENTIDAD:
+`entidad_distinta: true` fuerza `no_sostenida`. Los veredictos se reutilizan entre rondas por
+`claveDeAfirmacion(texto, cita, encabezado)`.
 Reglas que no se negocian: una frase que casa con `PATRONES_ABSTENCION` es una
 declaración de ausencia y **no se audita** (ni con cita al lado ni sin ella) ni
 cuenta como `sin_cita`. Los lotes de `maxAfirmacionesPorLote` van **en

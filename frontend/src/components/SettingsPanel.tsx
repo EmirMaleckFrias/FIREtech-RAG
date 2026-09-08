@@ -1,12 +1,16 @@
-// Slide-over de Ajustes: usuarios, estado del sistema y cuenta propia.
+// Slide-over de Ajustes: cuenta propia, calidad de las respuestas y, para
+// administradores, usuarios y estado del sistema.
 // Misma superficie que DocumentsPanel (slide-over lateral, bottom sheet con
 // asa en móvil, focus trap, Escape cierra) con una fila de pestañas dentro.
 //
 // Decisiones:
-// - Visibilidad por rol: un lector solo tiene "Mi cuenta" y ni siquiera se
-//   monta la pestaña de usuarios ni la de sistema, así que sus queries de
-//   admin (usuarios.listar, estadisticas.sistema) nunca se suscriben desde su
-//   sesión.
+// - Visibilidad por rol: todo el mundo tiene "Mi cuenta" y "Calidad" (la
+//   médica es `lector` y es quien revisa las preguntas de control de SU
+//   corpus); "Usuarios" y "Sistema" son solo de administrador y para un
+//   lector ni siquiera se montan, así que sus queries de admin
+//   (usuarios.listar, estadisticas.sistema) nunca se suscriben desde su
+//   sesión. Antes un lector no veía la fila de pestañas porque solo tenía
+//   una; con dos, la fila se enseña a todos.
 // - Solo se monta el contenido de la pestaña activa, pero sigue montado con
 //   el panel cerrado: reabrir no parpadea y el cierre anima con contenido.
 // - Privacidad: de las conversaciones ajenas solo se muestran CONTADORES
@@ -44,6 +48,7 @@ import { avisarSiEsFatal } from '../lib/auth';
 import { mensajeDeError } from '../lib/errores';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import { AccountSettings } from './AccountSettings';
+import { CalidadTab } from './CalidadTab';
 import { ROLE_LABEL, type AdminStats, type UserAccount, type UserRole } from '../types';
 import {
   IconAlert,
@@ -52,6 +57,7 @@ import {
   IconLock,
   IconSettings,
   IconSearch,
+  IconShieldCheck,
   IconSpinner,
   IconTrash,
   IconUser,
@@ -59,7 +65,10 @@ import {
   IconX,
 } from './icons';
 
-type SettingsTab = 'usuarios' | 'sistema' | 'cuenta';
+type SettingsTab = 'cuenta' | 'calidad' | 'usuarios' | 'sistema';
+
+/** Las pestañas reservadas a administradores. */
+const TABS_ADMIN: readonly SettingsTab[] = ['usuarios', 'sistema'];
 
 const NOTICE_MS = 3_200;
 
@@ -864,11 +873,17 @@ export function SettingsPanel({
   const grabberRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
 
-  // Mi cuenta es la entrada para todos. Al perder permisos, salir de las
-  // pestañas de administración sin suscribir queries reservadas.
+  // Mi cuenta es la entrada para todos. Al perder permisos, salir SOLO de las
+  // pestañas de administración (sin suscribir queries reservadas); quien
+  // estaba en Calidad se queda en Calidad.
   useEffect(() => {
-    if (role !== 'admin') setTab('cuenta');
+    if (role !== 'admin') setTab((actual) => (TABS_ADMIN.includes(actual) ? 'cuenta' : actual));
   }, [role]);
+
+  // Lo que se pinta no espera al efecto: entre el render en que el rol cae y
+  // el efecto que corrige el estado, un lector con `usuarios` guardado vería
+  // un panel vacío durante un frame.
+  const tabVisible: SettingsTab = !isAdmin && TABS_ADMIN.includes(tab) ? 'cuenta' : tab;
 
   // Bottom sheet en móvil: swipe-down sobre el asa cierra el panel.
   useSheetDrag(panelRef, grabberRef, onClose);
@@ -910,8 +925,13 @@ export function SettingsPanel({
 
   const tabs: Array<{ id: SettingsTab; label: string; icon: typeof IconUser }> = [
     { id: 'cuenta', label: 'Mi cuenta', icon: IconUser },
-    { id: 'usuarios', label: 'Usuarios', icon: IconUsers },
-    { id: 'sistema', label: 'Sistema', icon: IconBulb },
+    { id: 'calidad', label: 'Calidad', icon: IconShieldCheck },
+    ...(isAdmin
+      ? [
+          { id: 'usuarios' as const, label: 'Usuarios', icon: IconUsers },
+          { id: 'sistema' as const, label: 'Sistema', icon: IconBulb },
+        ]
+      : []),
   ];
 
   const handleTabKeys = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -954,40 +974,40 @@ export function SettingsPanel({
           </button>
         </div>
 
-        {/* un lector solo tiene "Mi cuenta": sin fila de pestañas */}
-        {isAdmin && (
-          <div className="auth-tabs settings-tabs" role="tablist" aria-label="Secciones de ajustes">
-            {tabs.map((t, index) => (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                id={`settings-tab-${t.id}`}
-                aria-selected={tab === t.id}
-                tabIndex={tab === t.id ? 0 : -1}
-                aria-controls="settings-panel-body"
-                className={`auth-tab ${tab === t.id ? 'auth-tab-active' : ''}`}
-                onClick={() => setTab(t.id)}
-                onKeyDown={(e) => handleTabKeys(e, index)}
-              >
-                <t.icon size={14} />
-                {t.label}
-              </button>
-            ))}
-          </div>
-        )}
+        {/* todos ven la fila: Mi cuenta y Calidad; los administradores además
+            Usuarios y Sistema */}
+        <div className="auth-tabs settings-tabs" role="tablist" aria-label="Secciones de ajustes">
+          {tabs.map((t, index) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              id={`settings-tab-${t.id}`}
+              aria-selected={tabVisible === t.id}
+              tabIndex={tabVisible === t.id ? 0 : -1}
+              aria-controls="settings-panel-body"
+              className={`auth-tab ${tabVisible === t.id ? 'auth-tab-active' : ''}`}
+              onClick={() => setTab(t.id)}
+              onKeyDown={(e) => handleTabKeys(e, index)}
+            >
+              <t.icon size={14} />
+              {t.label}
+            </button>
+          ))}
+        </div>
 
         <div
           className="settings-body"
           id="settings-panel-body"
-          role={isAdmin ? 'tabpanel' : undefined}
-          aria-labelledby={isAdmin ? `settings-tab-${tab}` : undefined}
+          role="tabpanel"
+          aria-labelledby={`settings-tab-${tabVisible}`}
         >
-          {isAdmin && tab === 'usuarios' && (
+          {isAdmin && tabVisible === 'usuarios' && (
             <UsersTab open={open} currentUserId={currentUserId} />
           )}
-          {isAdmin && tab === 'sistema' && <SystemTab />}
-          {(!isAdmin || tab === 'cuenta') && (
+          {isAdmin && tabVisible === 'sistema' && <SystemTab />}
+          {tabVisible === 'calidad' && <CalidadTab open={open} />}
+          {tabVisible === 'cuenta' && (
             <AccountSettings userEmail={userEmail} role={role} onSignOut={onSignOut} />
           )}
         </div>

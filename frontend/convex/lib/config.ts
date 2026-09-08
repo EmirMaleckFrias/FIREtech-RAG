@@ -58,6 +58,13 @@ export interface Ajustes {
   razonamientoCalificador: string;
   razonamientoVerificador: string;
   razonamientoRevisor: string;
+  // Recuperación contextual (ingesta/contexto.ts): si al indexar se escribe
+  // una frase de contexto por fragmento, con qué modelo (vacío = el del
+  // calificador) y con cuánto razonamiento. Apagarla deja la ingesta como
+  // antes de existir; los documentos ya indexados conservan su contexto.
+  contextoHabilitado: boolean;
+  contextoModelo: string;
+  razonamientoContexto: string;
   // Topes del operador. 0 = sin tope propio, o sea que manda el modo.
   maxHops: number;
   presupuestoAgenteS: number;
@@ -157,6 +164,12 @@ export function ajustes(): Ajustes {
     razonamientoCalificador: texto("RERANK_REASONING_EFFORT", "medium"),
     razonamientoVerificador: texto("VERIFIER_REASONING_EFFORT", "medium"),
     razonamientoRevisor: texto("REVISOR_REASONING_EFFORT", "high"),
+    contextoHabilitado: booleano("ENABLE_CHUNK_CONTEXT", true),
+    contextoModelo: texto("CONTEXT_MODEL"),
+    // low: situar un fragmento no es un razonamiento, es una lectura, y con
+    // un manual de 5000 fragmentos son 400 llamadas seguidas cuya latencia se
+    // suma a la barra de la ficha.
+    razonamientoContexto: texto("CONTEXT_REASONING_EFFORT", "low"),
     maxHops: numero("MAX_HOPS", 0),
     presupuestoAgenteS: numero("AGENT_BUDGET_S", 0),
     maxHopsSinAvance: numero("AGENT_MAX_HOPS_SIN_AVANCE", 3),
@@ -246,6 +259,17 @@ export function ajustes(): Ajustes {
 /** Modelo del reranker y del calificador, resuelto. */
 export function modeloRerankResuelto(a: Ajustes): string {
   return a.modeloRerank || a.modelo;
+}
+
+/** Modelo que escribe el contexto de cada fragmento al indexar. Vacío hereda
+ *  el GRANDE (el del redactor), no el del calificador: la calidad del contexto
+ *  decide lo que se recupera durante toda la vida del índice, y las
+ *  comparaciones de 2026 (CRAwLeR) encuentran que el modelo grande sitúa mejor
+ *  los fragmentos que el pequeño. El precio es latencia de ingesta (un manual
+ *  de 5000 fragmentos son unas 400 llamadas más lentas), que la barra enseña;
+ *  el coste no es criterio en este proyecto. `CONTEXT_MODEL` lo cambia. */
+export function modeloContextoResuelto(a: Ajustes): string {
+  return a.contextoModelo || a.modelo;
 }
 
 /** Modelo del verificador, resuelto. Vacío hereda el de rerank. */

@@ -58,6 +58,26 @@ operación diaria (cuentas, documentos, telemetría, variables) en
   Discusión...) viaja con él, pesa en el orden de la evidencia y está en el prompt: un dato en
   Resultados es evidencia del estudio; el mismo enunciado en Discusión es interpretación de
   sus autores.
+- **Recuperación contextual.** Al indexar, un modelo pequeño escribe por cada fragmento una o
+  dos frases que lo sitúan en su documento (de qué estudio, cohorte, fármaco o tabla habla, a
+  qué se refieren sus cifras, con qué siglas y variantes se escribe). Esa frase entra en el
+  embedding y tiene su propio índice de texto, así que un fragmento de Resultados que solo dice
+  "the impaired group" se encuentra por el nombre de la cohorte. El texto que se lee, se cita y
+  se verifica sigue siendo el original: el contexto nunca es evidencia. Cada búsqueda va además
+  en español, en inglés y con hasta dos reformulaciones con sinónimos y siglas.
+- **Comprobación de entidad.** El verificador recibe la pregunta y el apartado de cada frase y
+  marca los datos que son reales pero de OTRO fármaco, cohorte o estudio que el atribuido (el
+  fallo que las comprobaciones de fidelidad clásicas dejan pasar). Bloquean la publicación como
+  cualquier afirmación no sostenida, y la interfaz los enseña como "dato de otra entidad".
+- **Artículos retractados, a la vista.** Cada artículo con DOI se comprueba en Crossref al
+  indexarse y una vez por semana. Si su revista lo retractó, no se borra (se puede preguntar qué
+  decía), pero la ficha y cada fuente que salga de él se pintan en rojo, y el asistente tiene
+  prohibido usarlo como evidencia de un hecho sin decir que está retractado.
+- **Calidad medida sola.** En Ajustes > Calidad cada persona genera preguntas de control sobre
+  sus propios documentos, revisa las que tienen sentido y las aprueba; una corrida semanal (o el
+  botón "Evaluar ahora") las responde con el agente real y las puntúa: evidencia encontrada,
+  citas que resuelven, fidelidad, acierto de la búsqueda y datos de otra entidad, con el
+  historial para ver si el asistente sigue acertando.
 - **Progreso persistente, sin stream.** El agente escribe su avance en la fila del mensaje
   (`pensando`, `buscando`, `redactando`, `revisando`, `listo` o `error`) y el navegador está
   suscrito a la conversación. Una respuesta sobrevive a que se cierre la pestaña.
@@ -214,6 +234,9 @@ otro texto vale falso; vacío deja el default.
 | `OPENAI_MODEL` | `openai/gpt-5.4` | Redactor, planificador y ronda de corrección del revisor. |
 | `RERANK_MODEL` | `openai/gpt-5.4-mini` | Calificador de evidencia y clasificador de la pregunta. Vacío = hereda `OPENAI_MODEL`. |
 | `VERIFIER_MODEL` | vacío | Verificador de atribución. Vacío = hereda `RERANK_MODEL`. |
+| `ENABLE_CHUNK_CONTEXT` | `true` | Frase de contexto por fragmento al indexar (recuperación contextual). En `false` la ingesta embebe el texto tal cual, como antes. |
+| `CONTEXT_MODEL` | vacío | Modelo que escribe el contexto de cada fragmento. Vacío = hereda `RERANK_MODEL`. |
+| `CONTEXT_REASONING_EFFORT` | `low` | Razonamiento del contexto por fragmento. |
 | `EMBEDDING_MODEL` | `openai/text-embedding-3-large` | Embeddings. Cambiarlo obliga a reindexar. |
 | `EMBEDDING_DIMS` | `3072` | Dimensiones que el gateway debe devolver; el índice vectorial está declarado con 3072. |
 | `LLM_TEMPERATURE` | `0` | Temperatura de todas las llamadas. |
@@ -239,7 +262,7 @@ otro texto vale falso; vacío deja el default.
 | `RERANK_TOP_K` | `12` | Se lee, pero hoy ningún módulo la consulta (los fragmentos por punto los fija el modo: 8 y 12). |
 | `SEARCH_TOP_K` | `60` | Candidatos por consulta en cada lado de la búsqueda híbrida. |
 | `ENVIRONMENT` | `production` | Etiqueta del entorno. Se lee, pero hoy ningún módulo la consulta. |
-| `PROMPT_VERSION` | `v4` | Se muestra en Ajustes > Sistema. La telemetría del mensaje lleva la constante `VERSION_PROMPT` de `agente/prompt.ts`. |
+| `PROMPT_VERSION` | `v5` | Se muestra en Ajustes > Sistema. La telemetría del mensaje lleva la constante `VERSION_PROMPT` de `agente/prompt.ts`. |
 | `DOMINIO_PERMITIDO` | `airobotix.net` | Dominio de correo exigido para darse de alta y para entrar. |
 | `UPLOAD_LIMIT_MB` | `100` | Tope por fichero. La subida por URL firmada no limita el tamaño (el POST tiene 2 minutos); el techo real es la ingesta, que carga el fichero en una acción de Node con 512 MiB y 10 minutos. |
 

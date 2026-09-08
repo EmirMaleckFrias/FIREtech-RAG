@@ -5564,6 +5564,15 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
   background: color-mix(in srgb, var(--amber) 16%, transparent);
 }
 
+/* Artículo retractado según Crossref: rojo, y no es un botón (no hay nada que
+   reintentar; el aviso largo va en el title). */
+.ficha-insignia-retractado {
+  border-color: color-mix(in srgb, var(--red) 35%, transparent);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  color: var(--red);
+  font-weight: 600;
+}
+
 .ficha-aviso-detalle {
   color: var(--text-2);
 }

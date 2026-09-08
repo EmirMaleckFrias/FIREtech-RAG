@@ -62,16 +62,20 @@ export const sistema = query({
     const preguntas7d = await leerVarias(ctx, clavesDeLaVentana(ahora, 7));
 
     // Usuarios activos: los que abrieron alguna conversación en la ventana.
-    // Se pregunta por índice y usuario (como mucho una fila leída por cuenta)
-    // en vez de recorrer `sessions`, que crece sin límite.
+    // Se pregunta por índice y usuario (unas pocas filas leídas por cuenta)
+    // en vez de recorrer `sessions`, que crece sin límite. Las conversaciones
+    // OCULTAS de la evaluación de calidad (evaluacion/correr.ts) no cuentan:
+    // las abre el sistema, no la persona, y darían por activa una cuenta que
+    // no ha entrado. Se leen unas pocas por cuenta porque una corrida deja
+    // una oculta a la vez y se borra al puntuarla.
     const cuentas = await ctx.db.query("users").collect();
     let activos = 0;
     for (const u of cuentas) {
-      const reciente = await ctx.db
+      const recientes = await ctx.db
         .query("sessions")
         .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id).gte("creadoEn", desde))
-        .first();
-      if (reciente) activos++;
+        .take(5);
+      if (recientes.some((s) => !s.oculta)) activos++;
     }
 
     return {

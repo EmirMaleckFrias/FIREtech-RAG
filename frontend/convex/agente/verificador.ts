@@ -108,7 +108,10 @@ redacción.
 - "sostenida": el fragmento lo dice literalmente o en una paráfrasis fiel:
   la cifra, la unidad, la población y el sentido (dirección del efecto,
   comparación, signo) son los mismos. Redondear una cifra sin cambiar su
-  magnitud o reordenar la frase no rompe la fidelidad.
+  magnitud o reordenar la frase no rompe la fidelidad; tampoco escribirla con
+  coma decimal donde el fragmento usa punto ("12,5 %" y "12.5%" son la misma
+  cifra), ni traducir al español un término que el fragmento trae en inglés
+  cuando el sentido es el mismo.
 - "parcial": el dato coincide pero la afirmación generaliza más de lo que el
   fragmento permite, o cambia la población, el desenlace o el alcance (por
   ejemplo, el fragmento habla de una cohorte y la afirmación lo extiende a
@@ -136,10 +139,35 @@ trata el asunto, devuélvela "parcial" con motivo "declaración de ausencia,
 no una atribución": no bloquea y no cuenta como atribución confirmada.
 
 Sé estricto con las atribuciones: en investigación médica, aprobar una
-atribución dudosa es el fallo caro.
+atribución dudosa es el fallo caro. Cuando una afirmación venga con la nota de
+qué cifras suyas NO aparecen literalmente en los fragmentos, comprueba una a
+una si es un redondeo o una conversión legítima (12,5 % por 12.5%, 0,9 por
+0.94 no lo es) o una cifra que el fragmento no da: en ese caso la afirmación
+no está sostenida.
+
+ENTIDAD. La respuesta contesta a la PREGUNTA que se te da al principio, y cada
+afirmación puede ir bajo un apartado (un encabezado de la respuesta) que dice
+de qué habla ("Donepezilo", "Cohorte china"). Comprueba de QUIÉN es el dato:
+si la afirmación, por su texto, por su apartado o por la pregunta, atribuye el
+dato a un fármaco, un biomarcador, una población, un estudio o un desenlace, y
+el fragmento lo dice de OTRO (otro fármaco de la misma clase, otra cohorte,
+otro estudio, otro desenlace), el veredicto es "no_sostenida" con
+"entidad_distinta": true y el motivo nombra a los dos ("el fragmento habla de
+rivastigmina, no de donepezilo"). Es el fallo más peligroso que puedes dejar
+pasar: la cifra es real, la cita resuelve, y el dato no es de quien se dice.
+Para devolver entidad_distinta la otra entidad tiene que constar en el TEXTO
+del fragmento o en su cabecera (documento, sección, tabla): el contexto del
+fragmento, que está escrito por un modelo, puede hacerte sospechar pero no
+basta para condenar; si solo lo nombra el contexto, devuelve "parcial" con
+motivo "posible otra entidad según el contexto del fragmento" y
+entidad_distinta false. Cuando la afirmación misma nombra a la otra entidad
+("en el ensayo con rivastigmina, ..."), o cuando la pregunta o el apartado
+comparan varias entidades y el fragmento habla de una de ellas, la
+atribución es correcta y no es entidad distinta. Si ni el fragmento ni su
+cabecera permiten saber de qué entidad hablan, no condenes por esto.
 
 Devuelve solo JSON con esta forma, un objeto por afirmación recibida:
-{"veredictos":[{"i":0,"veredicto":"sostenida","motivo":"por qué, en una frase"}]}`;
+{"veredictos":[{"i":0,"veredicto":"sostenida","motivo":"por qué, en una frase","entidad_distinta":false}]}`;
 
 // Corta un tramo en frases. Una afirmación es el tramo de texto que termina
 // en una cita: es la unidad que el prompt del agente exige ("TODA afirmación
@@ -173,6 +201,19 @@ export interface Afirmacion {
   // misma página o sección). La cobertura por punto se calcula con estos ids,
   // nunca con la cita, porque la cita no es única.
   fragmentos: string[];
+  /** El fragmento citado habla de OTRA entidad (otro fármaco, biomarcador,
+   *  población o estudio) que la que la afirmación, su apartado o la pregunta
+   *  le atribuyen. Va siempre con `no_sostenida`: la cifra puede ser real y la
+   *  cita resolver, y aun así el dato no es de quien se dice. Es el fallo
+   *  que las comprobaciones de fidelidad clásicas no ven ("deceptive
+   *  grounding", medido en 2026 en modelos clínicos hasta en el 87 % de los
+   *  casos), y por eso se marca aparte. */
+  entidad_distinta?: boolean;
+  /** El apartado (encabezado de la respuesta) bajo el que iba la frase, si
+   *  lo había. El juez lo ve para saber de qué entidad habla la afirmación
+   *  cuando la frase sola no lo dice ("redujo la mortalidad un 30 %" bajo
+   *  "Donepezilo"). Forma parte de la clave de reutilización del veredicto. */
+  encabezado?: string;
 }
 
 /** Estado de un punto del plan, calculado por código a partir del mapa. */
@@ -282,6 +323,39 @@ export interface Trozo {
   citas: string[];
   /** Las citas tal cual aparecen en el texto ("[a] [b]"); "" en la cola. */
   cita: string;
+  /** El último encabezado de la respuesta antes de la frase ("Donepezilo"),
+   *  limpio de marcas; "" si no había ninguno. */
+  encabezado: string;
+}
+
+/** El texto de un encabezado Markdown sin sus marcas ("## Donepezilo",
+ *  "**Lo que no está**:" -> "Donepezilo", "Lo que no está"). Sin dos puntos
+ *  dentro, porque va entre comillas en una línea que el juez lee como
+ *  "AFIRMACIÓN (...): texto" y un dos puntos extra la partiría. */
+export function limpiarEncabezado(linea: string): string {
+  return linea
+    .replace(/^\s*#{1,6}\s+/, "")
+    .replace(/\*\*/g, "")
+    .replace(/["«»]/g, "'")
+    .replace(/:/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
+
+/** Los encabezados de la respuesta con su posición, para saber bajo cuál
+ *  cae cada frase. */
+function encabezadosDe(respuesta: string): Array<{ pos: number; texto: string }> {
+  const salida: Array<{ pos: number; texto: string }> = [];
+  let pos = 0;
+  for (const linea of respuesta.split("\n")) {
+    if (ENCABEZADO_MD.test(linea)) {
+      const texto = limpiarEncabezado(linea);
+      if (texto) salida.push({ pos, texto });
+    }
+    pos += linea.length + 1;
+  }
+  return salida;
 }
 
 /** Las frases auditables de un tramo.
@@ -293,6 +367,10 @@ export interface Trozo {
  *  se separa como frase propia antes de cortar, y `tieneAlgoQueJuzgar` la
  *  descarta. */
 function frasesDe(tramo: string): string[] {
+  // Un encabezado no se parte por fin de frase: "**Rivastigmina: ensayo**"
+  // partido en ": " dejaba "ensayo**" como una frase con contenido que se
+  // auditaba contra la cita siguiente (lo cazó el test de apartados). Los
+  // encabezados se separan del resto y se descartan enteros aquí mismo.
   const segmentos: string[] = [];
   let pendiente: string[] = [];
   const cierra = () => {
@@ -302,7 +380,6 @@ function frasesDe(tramo: string): string[] {
   for (const linea of tramo.split("\n")) {
     if (ENCABEZADO_MD.test(linea)) {
       cierra();
-      segmentos.push(linea);
     } else {
       pendiente.push(linea);
     }
@@ -346,11 +423,12 @@ function citasTalCual(respuesta: string, citas: CitaHallada[]): string {
   return grupos.join(" ");
 }
 
-function trozoDe(respuesta: string, texto: string, citas: CitaHallada[]): Trozo {
+function trozoDe(respuesta: string, texto: string, citas: CitaHallada[], encabezado: string): Trozo {
   return {
     texto,
     citas: citas.map((c) => c.texto),
     cita: citas.length ? citasTalCual(respuesta, citas) : "",
+    encabezado,
   };
 }
 
@@ -396,7 +474,17 @@ export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolea
   // Se acumulan textos con sus citas halladas y se convierten en trozos al
   // final, porque una cita consecutiva se añade a TODAS las frases del tramo
   // en curso después de haberlas emitido.
-  const acumulado: Array<{ texto: string; citas: CitaHallada[] }> = [];
+  const acumulado: Array<{ texto: string; citas: CitaHallada[]; encabezado: string }> = [];
+  // Bajo qué encabezado cae una posición: el último que empieza antes.
+  const encabezados = encabezadosDe(respuesta);
+  const encabezadoEn = (pos: number): string => {
+    let actual = "";
+    for (const e of encabezados) {
+      if (e.pos < pos) actual = e.texto;
+      else break;
+    }
+    return actual;
+  };
   let ultimoFin = 0;
   let hayCitas = false;
   // Posiciones en `acumulado` de las frases del tramo en curso.
@@ -408,6 +496,7 @@ export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolea
     hayCitas = true;
     const inicio = m.index ?? 0;
     const hallada: CitaHallada = { texto: m[0], inicio, fin: inicio + m[0].length };
+    const tramoInicio = ultimoFin;
     const tramo = respuesta.slice(ultimoFin, inicio).trim();
     ultimoFin = hallada.fin;
 
@@ -424,37 +513,132 @@ export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolea
     }
 
     indicesTramo = [];
+    // El apartado se resuelve por la POSICIÓN de cada frase, no por la del
+    // tramo: un tramo puede cruzar un encabezado ("## Rivastigmina\nfrase sin
+    // cita.\n## Donepezilo\nfrase con cita [c]"), y la primera frase es de
+    // Rivastigmina aunque la cita que la respalda esté bajo Donepezilo.
+    let cursor = tramoInicio;
     frases.forEach((frase, k) => {
       const esDuena = k === frases.length - 1;
+      const pos = respuesta.indexOf(frase, cursor);
+      const posFrase = pos >= 0 ? pos : inicio;
+      if (pos >= 0) cursor = pos + frase.length;
       // Una cita que iba delante de todo el texto pertenece a la primera
       // frase que la sigue, que pasa a ser dueña de ella.
       const previas = k === 0 ? huerfanas : [];
       if (!esDuena && !previas.length && esAusenciaPura(frase)) return;
       indicesTramo.push(acumulado.length);
-      acumulado.push({ texto: frase, citas: [...previas, hallada] });
+      acumulado.push({ texto: frase, citas: [...previas, hallada], encabezado: encabezadoEn(posFrase + 1) });
     });
     huerfanas = [];
   }
 
   const cola = respuesta.slice(ultimoFin).trim();
   if (hayCitas && cola) {
+    let cursor = ultimoFin;
     for (const frase of frasesDe(cola)) {
+      const pos = respuesta.indexOf(frase, cursor);
+      const encabezado = encabezadoEn((pos >= 0 ? pos : respuesta.length) + 1);
+      if (pos >= 0) cursor = pos + frase.length;
       if (huerfanas.length) {
         // Las citas iban delante de todo el texto: esta es la frase que las contiene.
-        acumulado.push({ texto: frase, citas: huerfanas });
+        acumulado.push({ texto: frase, citas: huerfanas, encabezado });
         huerfanas = [];
         continue;
       }
-      if (!esAusenciaPura(frase)) acumulado.push({ texto: frase, citas: [] });
+      if (!esAusenciaPura(frase)) acumulado.push({ texto: frase, citas: [], encabezado });
     }
   }
   // Respuesta que es solo citas, sin una frase con contenido: no se pierden.
-  if (huerfanas.length) acumulado.push({ texto: respuesta.trim().slice(0, 400), citas: huerfanas });
+  if (huerfanas.length) acumulado.push({ texto: respuesta.trim().slice(0, 400), citas: huerfanas, encabezado: "" });
 
   return {
-    trozos: acumulado.map(({ texto, citas }) => trozoDe(respuesta, texto, citas)),
+    trozos: acumulado.map(({ texto, citas, encabezado }) => trozoDe(respuesta, texto, citas, encabezado)),
     hayCitas,
   };
+}
+
+// --- Cifras e identificadores (determinista) ---------------------------------
+//
+// Los números y los identificadores son lo que peor juzga un modelo: las
+// mediciones de 2026 sitúan las dosis y las cifras de tablas como la categoría
+// con más errores de verificación (25 a 41 % de los fallos en resúmenes de
+// tablas), y un cotejo exacto de cifras correlaciona con el juicio humano
+// (r = 0,94) mucho mejor que cualquier métrica de modelo. Aquí se extraen las
+// cifras de cada afirmación, se normalizan (coma o punto decimal, separadores
+// de miles, punto medio de algunas revistas) y se comprueba si aparecen en los
+// fragmentos citados. Con las CIFRAS el resultado es una pista para el juez
+// (un redondeo o "los 3 estudios" son legítimos y solo el juez lo sabe); con
+// los IDENTIFICADORES (NCT, DOI, variantes rs, PMID) es un veredicto: no
+// admiten redondeo ni paráfrasis, así que uno que no está en el fragmento es
+// una atribución falsa sin necesidad de preguntar a nadie.
+
+const PATRONES_IDENTIFICADOR: RegExp[] = [
+  /\bNCT\d{8}\b/gi,
+  /\b10\.\d{4,9}\/[^\s\]\)"',;]+/g,
+  /\brs\d{3,}\b/gi,
+  /\bPMID:?\s*\d{5,}\b/gi,
+];
+
+/** Los identificadores que nombra un texto, tal cual, sin repetir. */
+export function identificadoresDe(texto: string): string[] {
+  const salida: string[] = [];
+  for (const re of PATRONES_IDENTIFICADOR) {
+    for (const m of texto.matchAll(re)) {
+      const id = m[0].replace(/[.,;:]+$/, "");
+      if (!salida.some((x) => x.toLowerCase() === id.toLowerCase())) salida.push(id);
+    }
+  }
+  return salida;
+}
+
+/** Un texto con sus cifras en una sola forma: punto decimal, sin separadores
+ *  de miles ni espacios dentro del número, sin punto medio. Minúsculas. */
+export function normalizarCifras(texto: string): string {
+  return texto
+    .replace(/(\d)[\u00A0\u202F ](?=\d{3}\b)/g, "$1")
+    .replace(/(\d)[·](?=\d)/g, "$1.")
+    .replace(/(\d),(?=\d)/g, "$1.")
+    .toLowerCase();
+}
+
+/** Las cifras de un texto (sin las de sus citas), ya normalizadas. */
+export function cifrasDe(texto: string): string[] {
+  const sinCitas = texto.replace(nuevaRegexCitas(), " ");
+  const norm = normalizarCifras(sinCitas);
+  const vistas = new Set<string>();
+  for (const m of norm.matchAll(/(?<![\w.])\d+(?:\.\d+)?(?![\w.]*\d)/g)) vistas.add(m[0]);
+  return [...vistas];
+}
+
+/** Las cifras de la afirmación que NO aparecen en ninguno de los textos, con
+ *  límites de número a los dos lados (que "0.94" no se dé por encontrada en
+ *  "10.945"). */
+export function cifrasSinRespaldo(afirmacion: string, textos: string[]): string[] {
+  const cifras = cifrasDe(afirmacion);
+  if (!cifras.length) return [];
+  const normalizados = textos.map(normalizarCifras);
+  const presente = (c: string) => {
+    const re = new RegExp(`(?<![\\d.])${c.replace(/\./g, "\\.")}(?![\\d.]*\\d)`);
+    return normalizados.some((t) => re.test(t));
+  };
+  return cifras.filter((c) => {
+    if (presente(c)) return false;
+    // "1.234" es ambigua: mil doscientos treinta y cuatro en español, uno
+    // coma doscientos en inglés. Si el fragmento trae la otra lectura, la
+    // cifra está.
+    const m = /^(\d{1,3})\.(\d{3})$/.exec(c);
+    if (m && presente(`${m[1]}${m[2]}`)) return false;
+    return true;
+  });
+}
+
+/** Los identificadores de la afirmación que no están en ningún fragmento. */
+export function identificadoresSinRespaldo(afirmacion: string, textos: string[]): string[] {
+  const ids = identificadoresDe(afirmacion.replace(nuevaRegexCitas(), " "));
+  if (!ids.length) return [];
+  const union = textos.join("\n").toLowerCase();
+  return ids.filter((id) => !union.includes(id.toLowerCase()));
 }
 
 // --- Resolución de citas y juez -------------------------------------------
@@ -491,10 +675,17 @@ function indiceDeFragmentos(fragmentos: Fragmento[]): Map<string, Fragmento[]> {
 function cabecera(ch: Fragmento, n: number, total: number): string {
   const seccion = ch.section?.trim() || "sin sección";
   const tipo = ch.chunkType === "table" ? "tabla" : "texto";
-  return (
+  const base =
     `FRAGMENTO ${n} DE ${total} (${cita(ch)}) · fuente: ${fuente(ch)} · ` +
-    `sección: ${seccion} · tipo: ${tipo}`
-  );
+    `sección: ${seccion} · tipo: ${tipo}`;
+  // El contexto escrito al indexar (de qué estudio, población o fármaco
+  // habla el fragmento) es justo lo que el juez necesita para ver una
+  // atribución a otra entidad: "reduced mortality by 30 %" no dice de qué
+  // fármaco, su contexto sí. Va etiquetado como NO evidencia: una frase
+  // generada por un modelo no puede sostener una cifra.
+  const contexto = (ch.contexto ?? "").trim();
+  if (!contexto) return base;
+  return `${base}\n    (contexto del fragmento, escrito al indexar, que NO es evidencia y no sostiene ninguna cifra: ${contexto})`;
 }
 
 interface Pendiente {
@@ -504,7 +695,7 @@ interface Pendiente {
   fragmentos: Fragmento[];
 }
 
-type Fallos = Map<number, { veredicto: string; motivo: string }>;
+type Fallos = Map<number, { veredicto: string; motivo: string; entidadDistinta: boolean }>;
 
 /** Una petición JSON con un lote de afirmaciones que hay que juzgar.
  *
@@ -519,7 +710,7 @@ type Fallos = Map<number, { veredicto: string; motivo: string }>;
  *  pero distinta población" es justo el tipo de comparación que sin razonar
  *  salía a ojo. Si la API rechaza el parámetro, `crearCompletion` reintenta
  *  sin él en vez de perder el lote, y aquí se cuenta en telemetría. */
-async function dictaminar(pendientes: Pendiente[], a: Ajustes, tel: Telemetria): Promise<Fallos> {
+async function dictaminar(pendientes: Pendiente[], a: Ajustes, tel: Telemetria, pregunta = ""): Promise<Fallos> {
   const modelo = modeloVerificadorResuelto(a);
   const t0 = Date.now();
 
@@ -532,15 +723,29 @@ async function dictaminar(pendientes: Pendiente[], a: Ajustes, tel: Telemetria):
     // ninguno de los fragmentos (defecto medido, ver `SISTEMA`).
     const citasDistintas = new Set(fragmentos.map((ch) => claveCita(cita(ch)))).size;
     const etiqueta = citasDistintas > 1 ? ` (evidencia repartida en ${citasDistintas} citas)` : "";
-    return `[${i}] AFIRMACIÓN${etiqueta}: ${af.texto}\n${cuerpo}`;
+    // El apartado bajo el que iba la frase: es lo que dice de qué entidad
+    // habla cuando la frase sola no lo nombra. Sin dos puntos dentro (ver
+    // `limpiarEncabezado`), para que la línea siga siendo "AFIRMACIÓN (...): texto".
+    const apartado = af.encabezado ? ` (bajo el apartado "${af.encabezado}")` : "";
+    // Pista determinista para el juez: qué cifras de la frase no aparecen tal
+    // cual en ningún fragmento. Él decide si es un redondeo legítimo o un dato
+    // que no está.
+    const sinRespaldo = cifrasSinRespaldo(af.texto, fragmentos.map((ch) => ch.text));
+    const pista = sinRespaldo.length
+      ? `\n    (cifras de la afirmación que NO aparecen literalmente en ningún fragmento: ${sinRespaldo.join(", ")})`
+      : "";
+    return `[${i}] AFIRMACIÓN${etiqueta}${apartado}: ${af.texto}${pista}\n${cuerpo}`;
   });
+  // La pregunta va delante: sin ella el juez no puede saber a qué entidad
+  // atribuye el dato una frase que no la nombra.
+  const cabeceraPregunta = pregunta.trim() ? `PREGUNTA DE QUIEN CONSULTA: ${pregunta.trim().slice(0, 600)}\n\n` : "";
 
   const kwargs: Record<string, unknown> = {
     model: modelo,
     temperature: a.temperatura,
     messages: [
       { role: "system", content: SISTEMA },
-      { role: "user", content: bloques.join("\n\n") },
+      { role: "user", content: cabeceraPregunta + bloques.join("\n\n") },
     ],
     ...gateway.razonamiento(a.razonamientoVerificador),
   };
@@ -581,9 +786,14 @@ async function dictaminar(pendientes: Pendiente[], a: Ajustes, tel: Telemetria):
     if (typeof obj.i !== "number" && typeof obj.i !== "string") continue;
     const i = Number(obj.i);
     if (!Number.isInteger(i) || i < 0 || i >= pendientes.length) continue;
-    const veredicto = String(obj.veredicto ?? "").trim().toLowerCase();
+    let veredicto = String(obj.veredicto ?? "").trim().toLowerCase();
     if (!VEREDICTOS_MODELO.has(veredicto)) continue;
-    fallos.set(i, { veredicto, motivo: String(obj.motivo ?? "").trim().slice(0, 200) });
+    // Entidad distinta manda: aunque el juez marque "sostenida" o "parcial"
+    // por la cifra, un dato atribuido a otra entidad es una atribución falsa
+    // y se dictamina como tal.
+    const entidadDistinta = obj.entidad_distinta === true || String(obj.entidad_distinta ?? "").trim().toLowerCase() === "true";
+    if (entidadDistinta) veredicto = NO_SOSTENIDA;
+    fallos.set(i, { veredicto, motivo: String(obj.motivo ?? "").trim().slice(0, 200), entidadDistinta });
   }
   return fallos;
 }
@@ -612,11 +822,12 @@ async function dictaminarEnLotes(
   lote: number,
   a: Ajustes,
   tel: Telemetria,
+  pregunta = "",
 ): Promise<{ fallos: Fallos; nota: string; todosCaidos: boolean }> {
   const trozos: Pendiente[][] = [];
   for (let i = 0; i < pendientes.length; i += lote) trozos.push(pendientes.slice(i, i + lote));
 
-  const resultados = await Promise.allSettled(trozos.map((t) => dictaminar(t, a, tel)));
+  const resultados = await Promise.allSettled(trozos.map((t) => dictaminar(t, a, tel, pregunta)));
 
   const fallos: Fallos = new Map();
   const caidos: string[] = [];
@@ -763,8 +974,12 @@ export function conCobertura(
 /** Clave con la que un veredicto se puede reutilizar: la misma frase con la
  *  misma cita es la misma afirmación, la juzgue quien la juzgue. Espacios
  *  colapsados para que un reformateo del redactor no la haga distinta. */
-export function claveDeAfirmacion(texto: string, cita: string): string {
-  return `${texto.replace(/\s+/g, " ").trim()}|${cita.replace(/\s+/g, " ").trim()}`;
+export function claveDeAfirmacion(texto: string, cita: string, encabezado = ""): string {
+  const base = `${texto.replace(/\s+/g, " ").trim()}|${cita.replace(/\s+/g, " ").trim()}`;
+  // El apartado forma parte del juicio (decide de qué entidad habla la
+  // frase), así que una frase que la corrección mueve a otro apartado se
+  // vuelve a juzgar. Sin apartado, la clave es la de siempre.
+  return encabezado ? `${base}|${encabezado.replace(/\s+/g, " ").trim()}` : base;
 }
 
 /** Los veredictos del modelo de un informe, por clave de afirmación. Solo los
@@ -774,7 +989,7 @@ export function claveDeAfirmacion(texto: string, cita: string): string {
 export function veredictosDe(informe: Verificacion): Map<string, Afirmacion> {
   const salida = new Map<string, Afirmacion>();
   for (const af of informe.afirmaciones) {
-    if (VEREDICTOS_MODELO.has(af.veredicto)) salida.set(claveDeAfirmacion(af.texto, af.cita), af);
+    if (VEREDICTOS_MODELO.has(af.veredicto)) salida.set(claveDeAfirmacion(af.texto, af.cita, af.encabezado ?? ""), af);
   }
   return salida;
 }
@@ -790,6 +1005,11 @@ export interface OpcionesVerificacion {
    *  revisión. La misma frase con la misma cita contra los mismos fragmentos
    *  es la misma pregunta al juez; repetirla es tiempo, no seguridad. */
   veredictosPrevios?: ReadonlyMap<string, Afirmacion>;
+  /** La pregunta de quien consulta. El juez la necesita para la comprobación
+   *  de entidad: una frase que no nombra el fármaco lo atribuye al de la
+   *  pregunta. Sin ella, la comprobación de entidad solo puede apoyarse en el
+   *  texto y el apartado de la frase. */
+  pregunta?: string;
 }
 
 export async function verificar(
@@ -918,12 +1138,32 @@ export async function verificar(
       cita: trozo.cita,
       fragmento_id: cita(hermanos[0]),
       fragmentos: hermanos.map((c) => c._id),
+      ...(trozo.encabezado ? { encabezado: trozo.encabezado } : {}),
     });
-    // Ya juzgada en una ronda anterior con la misma frase y la misma cita:
-    // se reutiliza el veredicto y no se manda al modelo.
-    const previo = previos?.get(claveDeAfirmacion(texto, trozo.cita));
+    // Un identificador (NCT, DOI, variante rs, PMID) que la frase nombra y que
+    // no está en ningún fragmento citado es una atribución falsa sin
+    // discusión: no admite redondeo ni paráfrasis. Veredicto determinista,
+    // sin gastar juez.
+    const idsSinRespaldo = identificadoresSinRespaldo(texto, hermanos.map((c) => c.text));
+    if (idsSinRespaldo.length) {
+      t.incr("identificadores_sin_respaldo", idsSinRespaldo.length);
+      afirmaciones.push({
+        ...af,
+        veredicto: NO_SOSTENIDA,
+        motivo: `${idsSinRespaldo.length === 1 ? "el identificador" : "los identificadores"} ${idsSinRespaldo.join(", ")} no ${idsSinRespaldo.length === 1 ? "aparece" : "aparecen"} en el fragmento citado`,
+      });
+      continue;
+    }
+    // Ya juzgada en una ronda anterior con la misma frase, la misma cita y el
+    // mismo apartado: se reutiliza el veredicto y no se manda al modelo.
+    const previo = previos?.get(claveDeAfirmacion(texto, trozo.cita, trozo.encabezado));
     if (previo && VEREDICTOS_MODELO.has(previo.veredicto)) {
-      afirmaciones.push({ ...af, veredicto: previo.veredicto, motivo: previo.motivo });
+      afirmaciones.push({
+        ...af,
+        veredicto: previo.veredicto,
+        motivo: previo.motivo,
+        ...(previo.entidad_distinta ? { entidad_distinta: true } : {}),
+      });
       reutilizadas += 1;
       continue;
     }
@@ -936,7 +1176,7 @@ export async function verificar(
   let ok = !haySinCita;
   if (pendientes.length) {
     const lote = Math.max(1, Math.floor(a.maxAfirmacionesPorLote) || 1);
-    const resultado = await dictaminarEnLotes(pendientes, lote, a, t);
+    const resultado = await dictaminarEnLotes(pendientes, lote, a, t, opciones.pregunta ?? "");
     nota = resultado.nota;
     if (resultado.todosCaidos) {
       // Se conserva lo determinista (las citas que no resuelven) y se deja
@@ -945,8 +1185,20 @@ export async function verificar(
     }
     pendientes.forEach(({ pos, af }, i) => {
       const fallo = resultado.fallos.get(i);
-      if (fallo) afirmaciones[pos] = { ...af, veredicto: fallo.veredicto, motivo: fallo.motivo };
+      if (fallo) {
+        afirmaciones[pos] = {
+          ...af,
+          veredicto: fallo.veredicto,
+          motivo: fallo.motivo,
+          ...(fallo.entidadDistinta ? { entidad_distinta: true } : {}),
+        };
+      }
     });
+    // Solo las juzgadas en ESTA ronda: las reutilizadas de rondas anteriores
+    // ya se contaron cuando se juzgaron.
+    let entidadesDistintas = 0;
+    for (const fallo of resultado.fallos.values()) if (fallo.entidadDistinta) entidadesDistintas += 1;
+    if (entidadesDistintas) t.incr("entidad_distinta", entidadesDistintas);
   }
 
   const juzgadas = afirmaciones.filter((x) => VEREDICTOS_MODELO.has(x.veredicto));

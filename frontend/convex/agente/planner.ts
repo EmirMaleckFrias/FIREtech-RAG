@@ -35,7 +35,22 @@ export interface PuntoPlan {
    *  distinta (una pregunta que ya está en inglés, o e0 en modo normal). */
   queryEn: string;
   evidenceNeeded: string;
+  /** Reformulaciones en inglés de la misma búsqueda con sinónimos, siglas o
+   *  nombres alternativos ("MCI" y "mild cognitive impairment"; el nombre
+   *  comercial y el principio activo). Se buscan junto a `query` y `queryEn`
+   *  y se fusionan por RRF: la coincidencia de palabras no sabe que dos
+   *  nombres son la misma cosa, y el vector denso los acerca pero no siempre
+   *  lo bastante. Como mucho MAX_VARIANTES. Opcional: los planes anteriores a
+   *  la marca no lo llevan. */
+  variantes?: string[];
 }
+
+/** Reformulaciones por búsqueda. Dos: medido en la literatura de 2026 como
+ *  el punto en que la ganancia de recall deja de compensar el ruido que cada
+ *  lista extra mete en la fusión; y cada una es una búsqueda más. */
+export const MAX_VARIANTES = 2;
+/** Una reformulación más larga que esto no es una consulta. */
+const MAX_VARIANTE_CHARS = 300;
 
 export type Clase = "documental" | "sobre_el_asistente" | "conversacional";
 export const CLASES: readonly Clase[] = [
@@ -67,6 +82,12 @@ Por cada búsqueda devuelve:
   del biomarcador, la escala, el fármaco, la población). El corpus es
   mayoritariamente inglés y la coincidencia de palabras no traduce; si la
   pregunta ya está en inglés, repite la query.
+- "variantes": hasta dos reformulaciones en inglés de la misma búsqueda con
+  los sinónimos, siglas o nombres alternativos que los documentos puedan
+  usar ("MCI" y "mild cognitive impairment"; "p-tau217" y "phosphorylated tau
+  217"; el nombre comercial y el principio activo; "elderly" y "older
+  adults"). Lista vacía si no hay sinónimos que aporten. Nunca repitas
+  query_en ni cambies el sentido.
 - "evidence_needed": el dato concreto que debe encontrarse, con población y
   desenlace cuando aplique (por ejemplo "AUC de p-tau217 plasmático para
   distinguir Alzheimer de otras demencias en la cohorte clínica").
@@ -80,10 +101,12 @@ y escribe consultas completas.
 Devuelve además "pregunta_en": la pregunta entera traducida al inglés con los
 mismos términos técnicos (si es una repregunta, con la referencia ya
 resuelta), para buscarla tal cual en el corpus. Si la pregunta ya está en
-inglés, repítela.
+inglés, repítela. Y "variantes_pregunta": hasta dos reformulaciones en inglés
+de la pregunta entera con sinónimos o siglas, con las mismas reglas que las
+variantes de cada búsqueda.
 
 Devuelve solo JSON con esta forma:
-{"pregunta_en":"...","items":[{"query":"...","query_en":"...","evidence_needed":"..."}]}
+{"pregunta_en":"...","variantes_pregunta":["..."],"items":[{"query":"...","query_en":"...","variantes":["..."],"evidence_needed":"..."}]}
 Usa entre 1 y el máximo indicado. No incluyas dos consultas equivalentes.`;
 
 export const PROMPT_CLASIFICADOR = `Clasificas el último mensaje de una conversación con un asistente de
@@ -110,7 +133,11 @@ los datos concretos del historial, en una o dos frases que lleven las palabras
 clave del tema (la enfermedad, el biomarcador, la población, la cifra). Si el
 mensaje ya se entiende solo, cópialo tal cual. NUNCA añadas un tema que no
 esté en la conversación; si no hay historial, copia el mensaje.
-Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional","consulta":"..."}`;
+Y "consulta_en": esa misma consulta traducida al inglés con los términos
+técnicos en inglés (el biomarcador, la escala, el fármaco, la población),
+porque los documentos suelen estar en inglés y la coincidencia de palabras no
+traduce. Si la consulta ya está en inglés, cópiala.
+Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional","consulta":"...","consulta_en":"..."}`;
 
 /** Forma normalizada de una consulta para detectar equivalentes.
  *
@@ -123,6 +150,25 @@ export function clave(texto: string): string {
 
 function textoDe(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
+}
+
+/** Las reformulaciones que devuelve el modelo, limpias: solo textos, sin
+ *  vacías, sin las que repiten alguna de `excluidas` (la consulta y su
+ *  inglés) ni entre sí, ninguna más larga que una consulta, y como mucho
+ *  MAX_VARIANTES. El orden del modelo se conserva. */
+export function variantesDe(crudo: unknown, excluidas: string[]): string[] {
+  if (!Array.isArray(crudo)) return [];
+  const vistas = new Set(excluidas.map(clave).filter(Boolean));
+  const salida: string[] = [];
+  for (const item of crudo) {
+    const texto = textoDe(item).replace(/\s+/g, " ");
+    const key = clave(texto);
+    if (!texto || texto.length > MAX_VARIANTE_CHARS || vistas.has(key)) continue;
+    vistas.add(key);
+    salida.push(texto);
+    if (salida.length >= MAX_VARIANTES) break;
+  }
+  return salida;
 }
 
 /** Ids por posición (e1..eN). El id que devuelve el modelo se ignora: dos
@@ -163,7 +209,7 @@ export async function planificar(
   historial: { role: string; content: string }[],
   maxItems: number,
   tel?: Telemetria,
-): Promise<{ items: PuntoPlan[]; preguntaEn: string }> {
+): Promise<{ items: PuntoPlan[]; preguntaEn: string; variantesPregunta?: string[] }> {
   const a = ajustes();
   const modelo = a.modelo;
   const t0 = Date.now();
@@ -209,6 +255,7 @@ export async function planificar(
     // decir que se buscó en inglés.
     let preguntaEn = textoDe(r.datos?.pregunta_en);
     if (clave(preguntaEn) === clavePregunta) preguntaEn = "";
+    const variantesPregunta = variantesDe(r.datos?.variantes_pregunta, [pregunta, preguntaEn]);
 
     const items: PuntoPlan[] = [];
     const vistas = new Set<string>([clavePregunta]);
@@ -221,15 +268,17 @@ export async function planificar(
       vistas.add(key);
       let queryEn = textoDe(obj.query_en);
       if (clave(queryEn) === key) queryEn = "";
+      const variantes = variantesDe(obj.variantes, [query, queryEn]);
       items.push({
         id: "",
         query,
         queryEn,
         evidenceNeeded: textoDe(obj.evidence_needed) || EVIDENCE_NEEDED_POR_DEFECTO,
+        ...(variantes.length ? { variantes } : {}),
       });
       if (items.length >= tope) break;
     }
-    return { items: renumerar(items), preguntaEn };
+    return { items: renumerar(items), preguntaEn, variantesPregunta };
   } catch (exc) {
     // El fallo del planificador no tumba la pregunta: el llamador se queda
     // con el ancla (la pregunta literal) y el fallo queda en telemetría.
@@ -259,16 +308,19 @@ export function conAncla(
   pregunta: string,
   preguntaEn: string,
   items: PuntoPlan[],
+  variantesPregunta: string[] = [],
 ): PuntoPlan[] {
   const q = pregunta.trim();
   const claveAncla = clave(q);
   let en = (preguntaEn ?? "").trim();
   if (clave(en) === claveAncla) en = "";
+  const variantes = variantesDe(variantesPregunta, [q, en]);
   const ancla: PuntoPlan = {
     id: ANCLA_ID,
     query: q,
     queryEn: en,
     evidenceNeeded: ANCLA_EVIDENCE_NEEDED,
+    ...(variantes.length ? { variantes } : {}),
   };
   const vistas = new Set<string>([claveAncla]);
   const resto: PuntoPlan[] = [];
@@ -290,6 +342,13 @@ export interface Clasificacion {
    *  literal de quien pregunta. Igual al texto literal cuando no hay
    *  historial o cuando la pregunta ya se entiende sola. */
   consulta: string;
+  /** La consulta en inglés, para que el ancla e0 se busque también así
+   *  cuando NO corre el planificador (modo normal). Medido el 8 sep 2026:
+   *  en modo normal el ancla se buscaba una sola vez, en español, contra un
+   *  corpus en inglés, porque solo el planificador traducía y en normal no
+   *  hay planificador. Vacía si es igual a la consulta o no llegó. Opcional
+   *  por los llamadores que aún no la leen. */
+  consultaEn?: string;
 }
 
 /** Tope de la consulta reformulada: más largo que esto no es una consulta,
@@ -358,6 +417,17 @@ export async function clasificar(
       historial.length > 0 && propuesta !== "" && propuesta.length <= MAX_CONSULTA ? propuesta : literal;
     const reformulada = clave(consulta) !== clave(literal);
     if (reformulada) tel?.incr("consultas_reformuladas");
+    // La versión inglesa se acepta con o sin historial: no cambia lo que se
+    // busca, añade una segunda búsqueda de lo mismo en el idioma del corpus.
+    // Igual a la consulta (ya estaba en inglés) o desmesurada: vacía.
+    // ... salvo si la `consulta` del modelo se RECHAZÓ (una paráfrasis sin
+    // historial): entonces su inglés es la traducción de algo que no se busca.
+    const propuestaRechazada = propuesta !== "" && clave(propuesta) !== clave(consulta);
+    const propuestaEn = textoDe(r.datos?.consulta_en).replace(/\s+/g, " ").trim();
+    const consultaEn =
+      !propuestaRechazada && propuestaEn !== "" && propuestaEn.length <= MAX_CONSULTA && clave(propuestaEn) !== clave(consulta)
+        ? propuestaEn
+        : "";
     tel?.anota("clasificador", r.modelo || modelo, r.usage, {
       ms: Date.now() - t0,
       ok: true,
@@ -367,7 +437,7 @@ export async function clasificar(
         (reformulada ? `; consulta reformulada: ${consulta.slice(0, 120)}` : ""),
     });
     if (r.razonamientoRechazado) tel?.incr("razonamiento_rechazado");
-    return { clase, consulta };
+    return { clase, consulta, consultaEn };
   } catch (exc) {
     tel?.anota("clasificador", modelo, null, {
       ms: Date.now() - t0,
@@ -377,6 +447,6 @@ export async function clasificar(
     console.warn(
       `Clasificador no disponible (${String(exc).slice(0, 160)}); se trata como documental.`,
     );
-    return { clase: "documental", consulta: literal };
+    return { clase: "documental", consulta: literal, consultaEn: "" };
   }
 }

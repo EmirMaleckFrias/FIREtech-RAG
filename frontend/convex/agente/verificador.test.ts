@@ -24,7 +24,12 @@ import {
   _cobertura,
   _tieneAfirmaciones,
   _trocear,
+  cifrasDe,
+  cifrasSinRespaldo,
   claveDeAfirmacion,
+  identificadoresDe,
+  identificadoresSinRespaldo,
+  limpiarEncabezado,
   informeVacio,
   verificar,
   veredictosDe,
@@ -466,8 +471,8 @@ describe("troceo", () => {
     const { trozos, hayCitas } = _trocear("Resultados:\n- Uno [a.pdf, pág. 1].\n; Dos [b.pdf, pág. 2].");
     expect(hayCitas).toBe(true);
     expect(trozos).toEqual([
-      { texto: "- Uno", citas: ["[a.pdf, pág. 1]"], cita: "[a.pdf, pág. 1]" },
-      { texto: "Dos", citas: ["[b.pdf, pág. 2]"], cita: "[b.pdf, pág. 2]" },
+      { texto: "- Uno", citas: ["[a.pdf, pág. 1]"], cita: "[a.pdf, pág. 1]", encabezado: "" },
+      { texto: "Dos", citas: ["[b.pdf, pág. 2]"], cita: "[b.pdf, pág. 2]", encabezado: "" },
     ]);
   });
 });
@@ -1215,5 +1220,156 @@ describe("diagramas", () => {
     // del tramo. Por eso el prompt exige etiquetas cortas y sin punto final.
     expect(trozos.length).toBeGreaterThan(1);
     expect(trozos.every((t) => t.citas.length === 1)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Entidad: el dato es real, la cita resuelve, y no es de quien se dice
+// ---------------------------------------------------------------------------
+describe("atribución a otra entidad", () => {
+  const ch = frag("r1", "Rivastigmine reduced mortality by 30 % in the trial.", "trial.pdf", 4, {
+    contexto: "Ensayo de rivastigmina en demencia leve",
+  });
+
+  test("el juez recibe la pregunta y el apartado de cada frase, y el prompt exige comprobar la entidad", async () => {
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok", entidad_distinta: false }] }));
+    await verificar(`## Donepezilo\n- Redujo la mortalidad un 30 % ${cita(ch)}.`, [ch], null, null, undefined, {
+      pregunta: "¿Cuánto reduce la mortalidad el donepezilo?",
+    });
+    const enviado = ultimoMensaje(espia.mock.calls[0]);
+    expect(enviado.startsWith("PREGUNTA DE QUIEN CONSULTA: ¿Cuánto reduce la mortalidad el donepezilo?")).toBe(true);
+    expect(enviado).toContain('[0] AFIRMACIÓN (bajo el apartado "Donepezilo"): - Redujo la mortalidad un 30 %');
+    // El contexto del fragmento va etiquetado como NO evidencia.
+    expect(enviado).toContain("que NO es evidencia y no sostiene ninguna cifra: Ensayo de rivastigmina");
+    const sistema = (espia.mock.calls[0][0] as { messages: Array<{ content: string }> }).messages[0].content.replace(/\s+/g, " ");
+    expect(sistema).toContain('"entidad_distinta": true');
+    expect(sistema).toContain("el fragmento habla de rivastigmina, no de donepezilo");
+  });
+
+  test("ADVERSARIAL: entidad_distinta manda sobre el veredicto: una 'sostenida' de otra entidad sale no_sostenida y marcada", async () => {
+    espia.mockResolvedValueOnce(
+      respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "el fragmento habla de rivastigmina, no de donepezilo", entidad_distinta: true }] }),
+    );
+    const tel = new Telemetria();
+    const informe = await verificar(`Redujo la mortalidad un 30 % ${cita(ch)}.`, [ch], null, null, tel, {
+      pregunta: "¿Cuánto reduce la mortalidad el donepezilo?",
+    });
+    expect(informe.afirmaciones[0].veredicto).toBe(NO_SOSTENIDA);
+    expect(informe.afirmaciones[0].entidad_distinta).toBe(true);
+    expect(informe.afirmaciones[0].motivo).toContain("rivastigmina");
+    expect(informe.fidelidad).toBe(0);
+    expect(tel.contadores.entidad_distinta).toBe(1);
+    // "true" como texto también cuenta; cualquier otra cosa, no.
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "parcial", motivo: "m", entidad_distinta: "true" }] }));
+    expect((await verificar(`Otra ${cita(ch)}.`, [ch])).afirmaciones[0].veredicto).toBe(NO_SOSTENIDA);
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "parcial", motivo: "m", entidad_distinta: "no" }] }));
+    const sinMarca = await verificar(`Otra ${cita(ch)}.`, [ch]);
+    expect(sinMarca.afirmaciones[0].veredicto).toBe(PARCIAL);
+    expect(sinMarca.afirmaciones[0].entidad_distinta).toBeUndefined();
+  });
+
+  test("_trocear anota bajo qué encabezado cae cada frase, limpio de marcas y sin dos puntos", () => {
+    const { trozos } = _trocear(
+      `## Donepezilo\n- Redujo un 30 % [a.pdf, pág. 1].\n\n**Rivastigmina: ensayo**\nOtra cosa [b.pdf, pág. 2].\nY la cola sin cita.`,
+    );
+    // ADVERSARIAL: el encabezado con ": " dentro no se parte en dos frases
+    // (antes "ensayo**" se auditaba como una afirmación).
+    expect(trozos.map((t) => [t.texto, t.encabezado])).toEqual([
+      ["- Redujo un 30 %", "Donepezilo"],
+      ["Otra cosa", "Rivastigmina ensayo"],
+      ["Y la cola sin cita.", "Rivastigmina ensayo"],
+    ]);
+    expect(limpiarEncabezado("### Cohorte china:")).toBe("Cohorte china");
+    expect(limpiarEncabezado("**Lo que no está**:")).toBe("Lo que no está");
+  });
+
+  test("ADVERSARIAL: la misma frase con la misma cita bajo OTRO apartado no reutiliza el veredicto", async () => {
+    const previos = veredictosDe(
+      informeVacio({
+        afirmaciones: [afirmacion({ texto: "Redujo un 30 %", cita: cita(ch), veredicto: SOSTENIDA, fragmentos: [ch._id], encabezado: "Rivastigmina" })],
+      }),
+    );
+    expect([...previos.keys()]).toEqual([claveDeAfirmacion("Redujo un 30 %", cita(ch), "Rivastigmina")]);
+    espia.mockResolvedValueOnce(
+      respuestaJson({ veredictos: [{ i: 0, veredicto: "no_sostenida", motivo: "otra entidad", entidad_distinta: true }] }),
+    );
+    const r = await verificar(`## Donepezilo\nRedujo un 30 % ${cita(ch)}.`, [ch], null, null, undefined, { veredictosPrevios: previos });
+    // Se volvió a juzgar (una llamada) y salió condenada.
+    expect(espia).toHaveBeenCalledTimes(1);
+    expect(r.afirmaciones[0]).toMatchObject({ veredicto: NO_SOSTENIDA, entidad_distinta: true, encabezado: "Donepezilo" });
+    // Y bajo el mismo apartado sí se reutiliza, con su marca.
+    const previos2 = veredictosDe(r);
+    const r2 = await verificar(`## Donepezilo\nRedujo un 30 % ${cita(ch)}.`, [ch], null, null, undefined, { veredictosPrevios: previos2 });
+    expect(espia).toHaveBeenCalledTimes(1);
+    expect(r2.afirmaciones[0]).toMatchObject({ veredicto: NO_SOSTENIDA, entidad_distinta: true });
+  });
+
+  test("sin pregunta no se inventa una cabecera de pregunta", async () => {
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok" }] }));
+    await verificar(`Frase ${cita(ch)}.`, [ch]);
+    expect(ultimoMensaje(espia.mock.calls[0]).startsWith("[0] AFIRMACIÓN: Frase")).toBe(true);
+  });
+});
+
+describe("apartado por frase, no por tramo", () => {
+  test("ADVERSARIAL: una frase sin cita bajo un apartado, seguida de otro apartado con cita, conserva SU apartado", () => {
+    const { trozos } = _trocear(
+      "## Rivastigmina\nLa rivastigmina redujo la mortalidad un 30 %.\n\n## Donepezilo\nEl donepezilo mejoró el MMSE 2 puntos [guia.pdf, pág. 3].",
+    );
+    expect(trozos.map((t) => [t.texto, t.encabezado])).toEqual([
+      ["La rivastigmina redujo la mortalidad un 30 %.", "Rivastigmina"],
+      ["El donepezilo mejoró el MMSE 2 puntos", "Donepezilo"],
+    ]);
+    const negrita = _trocear("**Donepezilo**\nMejoró el MMSE 2 puntos [guia.pdf, pág. 3].\n**Rivastigmina**\nRedujo la mortalidad [guia.pdf, pág. 4].");
+    expect(negrita.trozos.map((t) => t.encabezado)).toEqual(["Donepezilo", "Rivastigmina"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cifras e identificadores: lo determinista delante del juez
+// ---------------------------------------------------------------------------
+describe("cifras e identificadores", () => {
+  test("cifrasSinRespaldo normaliza coma, punto medio y separadores, y respeta los límites del número", () => {
+    const textos = ["The AUC was 0·94 (95% CI 0.91-0.97) in 1 234 patients; p<0.001; dose 12.5 mg."];
+    expect(cifrasSinRespaldo("El AUC fue 0,94 (IC 95 % 0,91 a 0,97) en 1.234 pacientes con 12,5 mg [a.pdf, pág. 3].", textos)).toEqual([]);
+    // 0.9 no es 0.94, y "10.945" no contiene 0.94 como cifra.
+    expect(cifrasSinRespaldo("El AUC fue 0,9.", textos)).toEqual(["0.9"]);
+    expect(cifrasSinRespaldo("El AUC fue 0,94.", ["value 10.945"])).toEqual(["0.94"]);
+    // Las cifras de la propia cita no cuentan (la página no es un dato).
+    expect(cifrasDe("Dato sin cifras [a.pdf, pág. 33].")).toEqual([]);
+    expect(identificadoresDe("En NCT01234567 y rs429358 (doi:10.1038/s41586-024-07691-8).")).toEqual([
+      "NCT01234567", "10.1038/s41586-024-07691-8", "rs429358",
+    ]);
+    expect(identificadoresSinRespaldo("El ensayo NCT01234567 [a.pdf, pág. 1].", ["Trial NCT01234567 enrolled 300."])).toEqual([]);
+    expect(identificadoresSinRespaldo("El ensayo NCT09999999 [a.pdf, pág. 1].", ["Trial NCT01234567 enrolled 300."])).toEqual(["NCT09999999"]);
+  });
+
+  test("el juez recibe qué cifras de la frase no aparecen literalmente, y solo esas", async () => {
+    const ch = frag("c1", "The conversion rate was 31.6% at 24 months in 412 patients.", "a.pdf", 3);
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "no_sostenida", motivo: "la cifra no está" }] }));
+    await verificar(`La conversión fue del 30 % a los 24 meses en 412 pacientes ${cita(ch)}.`, [ch]);
+    const enviado = ultimoMensaje(espia.mock.calls[0]);
+    expect(enviado).toContain("(cifras de la afirmación que NO aparecen literalmente en ningún fragmento: 30)");
+    expect(enviado).not.toContain("24,");
+    // Con todas las cifras presentes no hay nota.
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok" }] }));
+    await verificar(`La conversión fue del 31,6 % a los 24 meses ${cita(ch)}.`, [ch]);
+    expect(ultimoMensaje(espia.mock.calls[1])).not.toContain("cifras de la afirmación");
+  });
+
+  test("ADVERSARIAL: un identificador que no está en el fragmento citado se condena sin juez; uno que sí está pasa al juez", async () => {
+    const ch = frag("c1", "The trial NCT01234567 enrolled 300 patients.", "a.pdf", 3);
+    const tel = new Telemetria();
+    const informe = await verificar(`El ensayo NCT09999999 incluyó 300 pacientes ${cita(ch)}.`, [ch], null, null, tel);
+    expect(espia).not.toHaveBeenCalled();
+    expect(informe.afirmaciones[0]).toMatchObject({ veredicto: NO_SOSTENIDA });
+    expect(informe.afirmaciones[0].motivo).toContain("NCT09999999");
+    expect(tel.contadores.identificadores_sin_respaldo).toBe(1);
+    expect(informe.fidelidad).toBe(0);
+
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok" }] }));
+    const bien = await verificar(`El ensayo NCT01234567 incluyó 300 pacientes ${cita(ch)}.`, [ch]);
+    expect(espia).toHaveBeenCalledTimes(1);
+    expect(bien.afirmaciones[0].veredicto).toBe(SOSTENIDA);
   });
 });

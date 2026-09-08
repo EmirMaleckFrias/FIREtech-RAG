@@ -638,14 +638,16 @@ describe("mensajes", () => {
     const ev = await evidencia.ejecutarPlan(ctx, DUENO, plan, modo(4), filtros, new Telemetria(), 5000);
     const mensajes = evidencia.mensajesSinteticos(ev, plan);
 
-    expect(mensajes.map((m) => m.role)).toEqual(["assistant", "tool", "tool"]);
+    // Y detrás de los datos, el recordatorio de que son datos.
+    expect(mensajes.map((m) => m.role)).toEqual(["assistant", "tool", "tool", "system"]);
+    expect(mensajes[3].content).toBe(evidencia.RECORDATORIO_DATOS);
     const llamadas = mensajes[0].tool_calls as Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
     expect(llamadas.map((tc) => tc.id)).toEqual(["call_plan_e0", "call_plan_e1"]);
     expect(llamadas.every((tc) => tc.type === "function")).toBe(true);
     expect(llamadas.every((tc) => tc.function.name === "buscar_documentos")).toBe(true);
     expect(JSON.parse(llamadas[1].function.arguments)).toEqual({ semantico: "q1", punto: "e1" });
     expect(mensajes[0].content).toBeNull();
-    expect(mensajes.slice(1).map((m) => m.tool_call_id)).toEqual(["call_plan_e0", "call_plan_e1"]);
+    expect(mensajes.slice(1, 3).map((m) => m.tool_call_id)).toEqual(["call_plan_e0", "call_plan_e1"]);
     // Cabecera de estado + el formato de resultados de siempre.
     const t0 = mensajes[1].content as string;
     expect(t0.startsWith("PUNTO e0 (respuesta directa): cubierto, 1 fragmentos de: a.pdf")).toBe(true);
@@ -677,6 +679,19 @@ describe("mensajes", () => {
     // búsqueda, y la cabecera no la cuenta como tal.
     const igual = await punto(item("e1", "Plasma tau", "d", "plasma  tau"), modo(4));
     expect(evidencia.textoDePunto(igual)).toContain("buscado solo con la formulación original");
+  });
+
+  test("el contexto del fragmento llega al redactor etiquetado como orientación no citable, y el retractado con su aviso", () => {
+    const conContexto = frag("c", { sourceFile: "p.pdf", page: 3, contexto: "Ensayo de rivastigmina en demencia leve" });
+    const texto = evidencia.formatearResultados([conContexto]);
+    expect(texto).toBe(
+      "--- Resultado 1 ---\ncita: [p.pdf, pág. 3]\n(de qué habla este fragmento, orientación no citable: Ensayo de rivastigmina en demencia leve)\ntexto de c",
+    );
+    const retractado = frag("r", { sourceFile: "lesne.pdf", page: 1, retraccion: "retractado" });
+    expect(evidencia.formatearResultados([retractado])).toContain("AVISO: este artículo fue RETRACTADO por su revista");
+    expect(evidencia.formatearResultados([frag("s", { retraccion: "preocupacion" })])).toContain("EXPRESIÓN DE PREOCUPACIÓN");
+    // Sin contexto ni retracción, ni una línea de más.
+    expect(evidencia.formatearResultados([frag("c", { sourceFile: "p.pdf", page: 3 })]).split("\n")).toHaveLength(3);
   });
 
   test("formatearResultados es el formato de siempre", () => {
@@ -810,5 +825,49 @@ describe("búsqueda parcial", () => {
     busqueda.recuperacion = "hibrida";
     const p = await punto(item("e1", "q", "dato"), modo(4));
     expect(evidencia.textoDePunto(p)).not.toMatch(/PARCIAL/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reformulaciones y candidatos para la telemetría
+// ---------------------------------------------------------------------------
+describe("variantes y candidatos", () => {
+  test("las reformulaciones se buscan junto a la consulta y su inglés, sin repetir, en un solo lote", async () => {
+    busqueda.porDefecto = [frag("c1")];
+    const it: PuntoPlan = {
+      ...item("e1", "conversión MCI", "d", "MCI conversion"),
+      variantes: ["mild cognitive impairment conversion", "mci  CONVERSION", "prodromal progression"],
+    };
+    const p = await punto(it, modo(4));
+    expect(busqueda.llamadas).toEqual([["conversión MCI", "MCI conversion", "mild cognitive impairment conversion", "prodromal progression"]]);
+    // Las variantes del punto son las que DE VERDAD añadieron una búsqueda: la
+    // que repetía el inglés no cuenta, y la cabecera no la anuncia.
+    expect(p.variantes).toEqual(["mild cognitive impairment conversion", "prodromal progression"]);
+    expect(evidencia.textoDePunto(p)).toContain("buscado en español e inglés, con 2 reformulaciones más");
+    const una = await punto({ ...item("e2", "q", "d"), variantes: ["one more"] }, modo(4));
+    expect(evidencia.textoDePunto(una)).toContain("buscado solo con la formulación original, con una reformulación más");
+  });
+
+  test("los candidatos de la telemetría son la fusión podada, antes del calificador, en forma corta y con tope", async () => {
+    const lista = Array.from({ length: 25 }, (_, i) =>
+      frag(`c${i}`, { page: i + 1, sourcePages: [i + 1, i + 2], section: i % 2 ? "Results" : "" }),
+    );
+    // Una bibliografía en medio: se poda antes de contar candidatos.
+    lista.splice(3, 0, frag("bib", { section: "References", page: 99 }));
+    busqueda.porDefecto = lista;
+    // El calificador lo tira todo: sin fragmentos entregados, pero los
+    // candidatos siguen en la telemetría (es lo que dice si falló la búsqueda
+    // o la calificación).
+    for (const f of lista) grader.grados[f._id] = "no";
+    const p = await punto(item("e0", "q", "d"), modo(8));
+    expect(p.fragmentos).toEqual([]);
+    expect(p.candidatos).toHaveLength(evidencia.MAX_CANDIDATOS_TELEMETRIA);
+    expect(p.candidatos?.some((c) => c.p === 99)).toBe(false);
+    expect(p.candidatos?.[0]).toEqual({ f: "a.pdf", p: 1, sp: [1, 2], loc: "pág. 1" });
+    expect(p.candidatos?.[1]).toEqual({ f: "a.pdf", p: 2, sp: [2, 3], sec: "Results", loc: "pág. 2" });
+    // Un punto en error no tiene candidatos, pero el campo existe.
+    busqueda.lanzar = new Error("caída");
+    const roto = await punto(item("e1", "q", "d"), modo(4));
+    expect(roto.candidatos).toEqual([]);
   });
 });

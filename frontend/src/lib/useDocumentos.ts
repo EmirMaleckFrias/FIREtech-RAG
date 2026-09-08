@@ -18,7 +18,7 @@ import type { Id } from '../../convex/_generated/dataModel';
 import { avisarSiEsFatal } from './auth';
 import { maxFragmentos } from './biblioteca';
 import { mensajeDeError } from './errores';
-import type { AvisosIngesta, DocumentInfo, DocumentStatus, ProgresoIngesta } from '../types';
+import type { AvisosIngesta, DocumentInfo, DocumentStatus, ProgresoIngesta, RetraccionDocumento } from '../types';
 
 /** Cuánto dura el destello verde de un documento que acaba de quedar listo. */
 export const DESTELLO_MS = 1_800;
@@ -38,8 +38,18 @@ interface DocumentoDoc {
   sha256?: string | null;
   titulo?: string | null;
   citation?: string | null;
-  avisos?: { sinLeer?: number; omitidas?: number; recortados?: number; motivo?: string | null } | null;
+  avisos?: { sinLeer?: number; omitidas?: number; recortados?: number; sinContexto?: number; motivo?: string | null } | null;
   progreso?: unknown;
+  retraccion?: { tipo?: string; fecha?: string | null; avisoDoi?: string | null } | null;
+}
+
+function normalizeRetraccion(r: DocumentoDoc['retraccion']): RetraccionDocumento | null {
+  if (!r || typeof r !== 'object' || typeof r.tipo !== 'string' || !r.tipo) return null;
+  return {
+    tipo: r.tipo,
+    fecha: typeof r.fecha === 'string' && r.fecha ? r.fecha : null,
+    avisoDoi: typeof r.avisoDoi === 'string' && r.avisoDoi ? r.avisoDoi : null,
+  };
 }
 
 function normalizeAvisos(a: DocumentoDoc['avisos']): AvisosIngesta | null {
@@ -49,9 +59,10 @@ function normalizeAvisos(a: DocumentoDoc['avisos']): AvisosIngesta | null {
     sinLeer: n(a.sinLeer),
     omitidas: n(a.omitidas),
     recortados: n(a.recortados),
+    sinContexto: n(a.sinContexto),
     motivo: typeof a.motivo === 'string' && a.motivo.trim() !== '' ? a.motivo : null,
   };
-  return avisos.sinLeer + avisos.omitidas + avisos.recortados > 0 ? avisos : null;
+  return avisos.sinLeer + avisos.omitidas + avisos.recortados + avisos.sinContexto > 0 ? avisos : null;
 }
 
 export function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
@@ -78,6 +89,7 @@ export function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
     titulo: typeof d.titulo === 'string' && d.titulo.trim() !== '' ? d.titulo : null,
     citation: typeof d.citation === 'string' && d.citation.trim() !== '' ? d.citation : null,
     avisos: normalizeAvisos(d.avisos),
+    retraccion: normalizeRetraccion(d.retraccion),
     progreso: normalizeProgreso(d.progreso),
   };
 }

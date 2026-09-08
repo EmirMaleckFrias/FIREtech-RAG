@@ -17,8 +17,10 @@
 }
 .settings-heading p { margin: 4px 0 0; color: var(--text-2); font-size: 12px; line-height: 1.5; }
 .settings-redesign .settings-close { margin-top: 3px; min-width: 36px; min-height: 36px; }
+/* Columnas automáticas y no `repeat(3, 1fr)`: un lector tiene dos pestañas
+   (Mi cuenta, Calidad) y un administrador cuatro. */
 .settings-redesign .settings-tabs {
-  display: grid; grid-template-columns: repeat(3, 1fr);
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
   margin: 0 22px 18px; padding: 4px; gap: 4px;
   background: var(--inset); border: 1px solid var(--border); border-radius: 12px;
 }
@@ -152,6 +154,81 @@
 .settings-redesign .users-search { margin-left: 22px; margin-right: 22px; }
 .settings-redesign .users-list { padding-left: 22px; padding-right: 22px; }
 .settings-redesign .user-icon { color: var(--settings-accent); background: var(--settings-tint); }
+
+/* --- pestaña Calidad: preguntas de control y sus evaluaciones (CalidadTab.tsx).
+   Reutiliza .stats-block, .user-act-btn, .doc-badge, .upload-bar y .user-confirm;
+   aquí solo lo propio. Colores por variables: valen en claro y oscuro. --- */
+.calidad-bloque { gap: 10px; }
+.calidad-bloque > .stats-title { margin: 0; }
+.calidad-fila { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; line-height: 1.5; color: var(--text-2); }
+.calidad-crece { flex: 1; min-width: 0; }
+.calidad-ayuda { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-2); }
+.calidad-progreso { display: flex; flex-direction: column; gap: 6px; }
+.calidad-barra { margin: 0; }
+.calidad-error { padding: 0; }
+.calidad-skeleton { padding: 0; }
+.calidad-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.calidad-caso {
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 13px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg);
+}
+.calidad-caso-cabecera { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.calidad-chip {
+  border-radius: 999px; padding: 1px 8px; font-size: 10.5px; font-weight: 600;
+  letter-spacing: .03em; color: var(--text-2); background: var(--hover); white-space: nowrap;
+}
+.calidad-chip-critico { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+.calidad-pregunta { margin: 0; font-size: 13px; font-weight: 550; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.calidad-caso-compacto .calidad-pregunta { font-weight: 500; font-size: 12.5px; }
+.calidad-etiqueta { font-size: 11px; font-weight: 600; color: var(--text-2); }
+.calidad-textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px; padding: 8px 10px;
+  border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface);
+  color: var(--text); font: inherit; font-size: 13px; line-height: 1.5;
+}
+.calidad-textarea:focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 1px; }
+.calidad-textarea:disabled { opacity: .6; }
+.calidad-meta { display: flex; gap: 10px; flex-wrap: wrap; justify-content: space-between; font-size: 11.5px; line-height: 1.5; color: var(--text-2); }
+.calidad-guardado { color: var(--settings-accent); white-space: nowrap; }
+.calidad-guardado:empty { display: none; }
+.calidad-acciones { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.calidad-acciones .calidad-borrar { margin-left: auto; color: var(--text-3); }
+.calidad-acciones .calidad-borrar:hover { color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.calidad-plegable {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
+  padding: 0; border: 0; background: none; font: inherit; color: var(--text-2); cursor: pointer; text-align: left;
+}
+.calidad-plegable svg { transition: transform .15s ease; }
+.calidad-plegable[aria-expanded='true'] svg { transform: rotate(180deg); }
+.calidad-tabla-marco { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.calidad-tabla { width: 100%; min-width: 470px; border-collapse: collapse; font-size: 12px; }
+.calidad-tabla th {
+  padding: 8px 10px; text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-3); border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.calidad-tabla td { padding: 8px 10px; color: var(--text-2); vertical-align: middle; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.calidad-tabla tbody tr + tr td { border-top: 1px solid var(--border); }
+.calidad-fila-corrida { cursor: pointer; }
+.calidad-fila-corrida:hover td, .calidad-fila-abierta td { background: var(--hover); }
+.calidad-fila-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none;
+  font: inherit; color: var(--text); cursor: pointer; text-align: left;
+}
+.calidad-fila-btn small { display: block; font-size: 10.5px; color: var(--text-3); }
+.calidad-fila-btn svg { flex-shrink: 0; color: var(--text-3); transition: transform .15s ease; }
+.calidad-fila-btn[aria-expanded='true'] svg { transform: rotate(180deg); }
+.calidad-estado-curso { background: var(--hover); color: var(--text-2); }
+.calidad-estado-bien { background: color-mix(in srgb, var(--green) 11%, transparent); color: var(--green); }
+.calidad-estado-fallos { background: color-mix(in srgb, var(--amber) 14%, transparent); color: var(--amber); }
+.calidad-estado-error { background: color-mix(in srgb, var(--red) 9%, transparent); color: var(--red); }
+.calidad-detalle td { white-space: normal; padding: 4px 10px 12px; background: var(--surface); border-top: 0 !important; }
+.calidad-detalle-cuerpo { display: flex; flex-direction: column; gap: 8px; }
+.calidad-resultados { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.calidad-resultado { display: flex; flex-direction: column; gap: 5px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px; }
+.calidad-resultado-falla { border-color: color-mix(in srgb, var(--red) 28%, transparent); }
+.calidad-fallos { margin: 0; padding: 0 0 0 16px; font-size: 12px; line-height: 1.55; color: var(--red); }
+.calidad-respuesta summary { cursor: pointer; font-size: 11.5px; color: var(--settings-accent); }
+.calidad-respuesta p { margin: 6px 0 0; font-size: 12px; line-height: 1.55; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Solo cambia el texto del hilo, no las citas, controles o paneles vecinos. */
 :root[data-lectura='comodo'] .chat .msg-user-bubble,

@@ -30,6 +30,30 @@ export function tipoDeDocumento(nombre: string): string {
   return (m ? m[1].toLowerCase() : "") || "unknown";
 }
 
+/** Lo que los PDF traen y el índice de texto no sabe leer: ligaduras
+ *  tipográficas ("ﬁ" en "ﬁnding", "ﬂ" en "ﬂuid"), guiones blandos (U+00AD,
+ *  invisibles, dentro de palabras cortadas) y espacios duros. El tokenizador
+ *  del índice parte por puntuación y no pliega nada, así que "ﬁnding" no casa
+ *  con "finding" y "amy\u00ADloid" no casa con "amyloid". Se sustituyen aquí,
+ *  en el único sitio donde nace un fragmento. No se aplica NFKC entero a
+ *  propósito: convertiría "10²" en "102" y "½" en "1/2", que en un texto
+ *  científico es cambiar cifras. */
+const LIGADURAS: Array<[RegExp, string]> = [
+  [/\uFB00/g, "ff"],
+  [/\uFB01/g, "fi"],
+  [/\uFB02/g, "fl"],
+  [/\uFB03/g, "ffi"],
+  [/\uFB04/g, "ffl"],
+  [/\uFB05/g, "st"],
+  [/\uFB06/g, "st"],
+];
+
+export function normalizarTexto(texto: string): string {
+  let t = texto.replace(/\u00AD/g, "").replace(/[\u00A0\u202F\u2007]/g, " ");
+  for (const [re, rep] of LIGADURAS) t = t.replace(re, rep);
+  return t;
+}
+
 /** Chunk con TODAS las claves del payload, como `generic._base_chunk`.
  *
  *  `meta` es la identidad del trabajo cuando el documento es un artículo: lo
@@ -44,11 +68,12 @@ export function chunkBase(
   chunkType: "text" | "table",
   opciones: { section?: string; sourceRow?: number; meta?: MetaObra; citation?: string } = {},
 ): ChunkParseado {
+  const limpio = normalizarTexto(texto);
   const chunk: ChunkParseado = {
-    text: texto.slice(0, MAX_CHUNK_CHARS),
+    text: limpio.slice(0, MAX_CHUNK_CHARS),
     // El recorte se DICE: antes era un `slice` mudo y las filas del final de
     // una tabla o una celda larga desaparecían sin que nadie lo supiera.
-    ...(texto.length > MAX_CHUNK_CHARS ? { recortado: true } : {}),
+    ...(limpio.length > MAX_CHUNK_CHARS ? { recortado: true } : {}),
     page,
     sourcePages,
     section: opciones.section ?? "",

@@ -342,3 +342,196 @@ describe("agregarCorridas", () => {
     expect(r.total_cost_usd_all_runs).toBe(0.12);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Métricas de recuperación y etapa del fallo (frente de evaluación continua)
+// ---------------------------------------------------------------------------
+/** Un candidato tal como lo anota el agente en `metrics.meta.recuperacion`. */
+function cand(f: string, p: number, extra: { sp?: number[]; sec?: string; loc?: string } = {}) {
+  return { f, p, loc: extra.loc ?? (p ? `pág. ${p}` : ""), ...(extra.sp ? { sp: extra.sp } : {}), ...(extra.sec !== undefined ? { sec: extra.sec } : {}) };
+}
+
+/** Relleno: candidatos de otro documento que no casan con nada. */
+function ruido(n: number) {
+  return Array.from({ length: n }, (_, i) => cand("ruido.pdf", i + 1));
+}
+
+function conRecuperacion(recuperacion: Record<string, unknown>, base: Resultado = resultado()): Resultado {
+  const meta = (base.metrics?.meta as Record<string, unknown> | undefined) ?? {};
+  return { ...base, metrics: { ...base.metrics, meta: { ...meta, recuperacion } } };
+}
+
+describe("recuperación: MRR, hit@k, precisión del contexto y etapa del fallo", () => {
+  test("el rango de cada evidencia es el mejor entre los puntos, y el MRR y hit@k salen de ahí", () => {
+    // `a` aparece la 7.ª en e0 y la 2.ª en e1: cuenta la 2. `b` es la 1.ª de e2.
+    const r = conRecuperacion({
+      e0: [...ruido(6), cand("a.pdf", 3)],
+      e1: [cand("ruido.pdf", 9), cand("a.pdf", 3, { sp: [3, 4] })],
+      e2: [cand("b.pdf", 0, { sec: "Resultados", loc: "sección: Resultados" })],
+    });
+    const s = puntuarCaso(caso(), r);
+    expect(s.evidence.map((e) => [e.id, e.rank])).toEqual([["a", 2], ["b", 1]]);
+    expect(s.metrics.retrieval_mrr).toBe(0.75);
+    expect(s.metrics.retrieval_hit_at_5).toBe(1);
+    expect(s.metrics.retrieval_hit_at_20).toBe(1);
+    expect(s.passed).toBe(true);
+  });
+
+  test("hit@5 y hit@20 distinguen una evidencia que aparece la octava", () => {
+    const r = conRecuperacion({
+      e0: [...ruido(7), cand("a.pdf", 3)],
+      e1: [cand("b.pdf", 0, { sec: "Results" })],
+    });
+    const s = puntuarCaso(caso(), r);
+    expect(s.metrics.retrieval_hit_at_5).toBe(0.5);
+    expect(s.metrics.retrieval_hit_at_20).toBe(1);
+    expect(s.metrics.retrieval_mrr).toBe(0.5625);
+    // Un candidato pasado el puesto 20 cuenta para el MRR pero no para hit@20.
+    const lejos = puntuarCaso(caso(), conRecuperacion({ e0: [...ruido(24), cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }));
+    expect(lejos.metrics.retrieval_hit_at_20).toBe(0.5);
+    expect(lejos.evidence[0].rank).toBe(25);
+  });
+
+  test("ADVERSARIAL: un candidato del fichero correcto en OTRA página no cuenta, salvo que la traiga en sus páginas de origen", () => {
+    const otraPagina = puntuarCaso(caso(), conRecuperacion({ e0: [cand("a.pdf", 9)], e1: [cand("b.pdf", 0, { sec: "Results" })] }));
+    expect(otraPagina.evidence[0].rank).toBeNull();
+    expect(otraPagina.metrics.retrieval_mrr).toBe(0.5);
+    const enOrigen = puntuarCaso(caso(), conRecuperacion({ e0: [cand("a.pdf", 9, { sp: [2, 3] })], e1: [cand("b.pdf", 0, { sec: "Results" })] }));
+    expect(enOrigen.evidence[0].rank).toBe(1);
+    // Y la sección esperada se exige también al candidato: b.pdf en Métodos no es b.pdf en Resultados.
+    const otraSeccion = puntuarCaso(caso(), conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Methods" })] }));
+    expect(otraSeccion.evidence[1].rank).toBeNull();
+  });
+
+  test("la etapa del fallo se deduce por eliminación: búsqueda, calificación o redacción", () => {
+    // b no está entre los candidatos ni en las fuentes: la perdió la búsqueda.
+    const base = resultado();
+    base.sources = (base.sources ?? []).slice(0, 1);
+    const busqueda = puntuarCaso(caso(), conRecuperacion({ e0: [cand("a.pdf", 3)], e1: ruido(3) }, base));
+    expect(busqueda.evidence[1]).toMatchObject({ found: false, rank: null, failure_stage: "retrieval" });
+    expect(busqueda.failures).toContain("evidencia no recuperada: b");
+    // b estaba entre los candidatos pero no llegó a las fuentes: la descartó el calificador.
+    const calificacion = puntuarCaso(caso(), conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }, base));
+    expect(calificacion.evidence[1]).toMatchObject({ found: false, rank: 1, failure_stage: "grading" });
+    // b llegó a las fuentes pero la respuesta no la citó: la ignoró la redacción. NO es un fallo del caso.
+    const sinCitarB = resultado();
+    sinCitarB.answer = "La cohorte tuvo 42% [a.pdf, pág. 3].";
+    const redaccion = puntuarCaso(caso(), conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }, sinCitarB));
+    expect(redaccion.evidence[1]).toMatchObject({ found: true, cited: false, failure_stage: "generation" });
+    expect(redaccion.evidence[0]).toMatchObject({ found: true, cited: true, failure_stage: null });
+    expect(redaccion.passed).toBe(true);
+    expect(redaccion.failures).toEqual([]);
+  });
+
+  test("sin candidatos informados (mensajes antiguos) las métricas de recuperación quedan null y nada falla", () => {
+    const s = puntuarCaso(caso(), resultado());
+    expect(s.metrics.retrieval_mrr).toBeNull();
+    expect(s.metrics.retrieval_hit_at_5).toBeNull();
+    expect(s.metrics.retrieval_hit_at_20).toBeNull();
+    expect(s.evidence.every((e) => e.rank === null)).toBe(true);
+    expect(s.passed).toBe(true);
+    // Una evidencia que falta sin candidatos no puede achacarse a ninguna etapa.
+    const sinB = resultado();
+    sinB.sources = (sinB.sources ?? []).slice(0, 1);
+    const f = puntuarCaso(caso(), sinB);
+    expect(f.evidence[1]).toMatchObject({ found: false, rank: null, failure_stage: null });
+    expect(f.passed).toBe(false);
+  });
+
+  test("ADVERSARIAL: una `recuperacion` malformada se trata como ausente, y una vacía como cero", () => {
+    const rota = puntuarCaso(caso(), conRecuperacion("esto no es un objeto" as unknown as Record<string, unknown>));
+    expect(rota.metrics.retrieval_mrr).toBeNull();
+    const lista = puntuarCaso(caso(), conRecuperacion({ e0: "no es una lista", e1: [null, 7, cand("a.pdf", 3)] }));
+    expect(lista.evidence[0].rank).toBe(1);
+    expect(lista.evidence[1].rank).toBeNull();
+    const vacia = puntuarCaso(caso(), conRecuperacion({}));
+    expect(vacia.metrics.retrieval_mrr).toBe(0);
+    expect(vacia.metrics.retrieval_hit_at_5).toBe(0);
+    expect(vacia.evidence.every((e) => e.rank === null)).toBe(true);
+    // Y sigue pasando: la recuperación mide, no penaliza.
+    expect(vacia.passed).toBe(true);
+  });
+
+  test("un caso de abstención no exige evidencias: MRR null y precisión del contexto 1", () => {
+    const c = validarCaso({ id: "neg-1", question: "algo ausente", category: "abstencion", evidence: [], expect_abstention: true });
+    const s = puntuarCaso(c, conRecuperacion({ e0: ruido(5) }, { answer: "No encuentro esa información en los documentos.", sources: [], hops: [{}] }));
+    expect(s.metrics.retrieval_mrr).toBeNull();
+    expect(s.metrics.retrieval_hit_at_5).toBeNull();
+    expect(s.metrics.context_precision).toBe(1);
+    expect(s.passed).toBe(true);
+  });
+
+  test("la precisión del contexto es la fracción de fuentes entregadas que el caso esperaba", () => {
+    expect(puntuarCaso(caso(), resultado()).metrics.context_precision).toBe(1);
+    const conRuido = resultado();
+    conRuido.sources = [...(conRuido.sources ?? []), { source_file: "ruido.pdf", page: 1, locator: "pág. 1" }, { source_file: "a.pdf", page: 9, locator: "pág. 9" }];
+    expect(puntuarCaso(caso(), conRuido).metrics.context_precision).toBe(0.5);
+    const sinFuentes = puntuarCaso(caso(), { ...resultado(), sources: [] });
+    expect(sinFuentes.metrics.context_precision).toBe(1);
+    expect(sinFuentes.passed).toBe(false);
+  });
+
+  test("las atribuciones a otra entidad se leen del verificador y valen 0 si faltan", () => {
+    expect(puntuarCaso(caso(), resultado()).metrics.entity_misattributions).toBe(0);
+    const s = puntuarCaso(caso(), conVerificacion({ fidelidad: 0.5, no_sostenidas: 2, entidad_distinta: 1 }));
+    expect(s.metrics.entity_misattributions).toBe(1);
+    expect(s.passed).toBe(false);
+    expect(puntuarCaso(caso(), conVerificacion({ entidad_distinta: "dos" })).metrics.entity_misattributions).toBe(0);
+  });
+
+  test("agregarCorridas mediana las métricas nuevas, deja null lo que ninguna corrida midió y agrega la etapa con coherencia", () => {
+    const rec = (rango: number) => ({ e0: [...ruido(rango - 1), cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] });
+    const [score] = agregar(caso(), [conRecuperacion(rec(1)), conRecuperacion(rec(2)), conRecuperacion(rec(10))]);
+    expect(score.metrics.retrieval_mrr).toBe(0.75);
+    expect(score.metrics.retrieval_hit_at_5).toBe(1);
+    expect(score.dispersion?.retrieval_mrr).toEqual({ min: 0.55, max: 1, n: 3, values: [1, 0.75, 0.55] });
+    expect(score.evidence[0]).toMatchObject({ found: true, rank: 2, cited: true, failure_stage: null });
+    const [antiguas] = agregar(caso(), [resultado(), resultado()]);
+    expect(antiguas.metrics.retrieval_mrr).toBeNull();
+    expect(antiguas.metrics.context_precision).toBe(1);
+    expect(antiguas.dispersion?.retrieval_mrr).toEqual({ min: null, max: null, n: 0, values: [null, null] });
+  });
+
+  test("ADVERSARIAL: la etapa agregada nunca contradice a `found`", () => {
+    // b falta en dos corridas (una por búsqueda, otra por calificación) y aparece citada en una: por mayoría falta.
+    const sinB = resultado();
+    sinB.sources = (sinB.sources ?? []).slice(0, 1);
+    const [falta] = agregar(caso(), [
+      conRecuperacion({ e0: [cand("a.pdf", 3)], e1: ruido(2) }, sinB),
+      conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }, sinB),
+      conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }),
+    ]);
+    const b = falta.evidence.find((e) => e.id === "b")!;
+    expect(b.found).toBe(false);
+    expect(["retrieval", "grading"]).toContain(b.failure_stage);
+    // Al revés: encontrada dos de tres veces, la vez que faltó fue por búsqueda. La etapa no puede ser "retrieval".
+    const [aparece] = agregar(caso(), [
+      conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }),
+      conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }),
+      conRecuperacion({ e0: [cand("a.pdf", 3)], e1: ruido(2) }, sinB),
+    ]);
+    const b2 = aparece.evidence.find((e) => e.id === "b")!;
+    expect(b2.found).toBe(true);
+    expect(b2.failure_stage).toBeNull();
+  });
+
+  test("resumir promedia solo lo medido, suma las atribuciones y cuenta los fallos por etapa", () => {
+    const sinB = resultado();
+    sinB.sources = (sinB.sources ?? []).slice(0, 1);
+    const medido = puntuarCaso(caso({ id: "medido" }), conRecuperacion({ e0: [cand("a.pdf", 3)], e1: ruido(2) }, sinB));
+    const antiguo = puntuarCaso(caso({ id: "antiguo" }), conVerificacion({ entidad_distinta: 2, no_sostenidas: 2, fidelidad: 0.5 }));
+    const sinCitarB = resultado();
+    sinCitarB.answer = "La cohorte tuvo 42% [a.pdf, pág. 3].";
+    const redaccion = puntuarCaso(caso({ id: "redaccion" }), conRecuperacion({ e0: [cand("a.pdf", 3)], e1: [cand("b.pdf", 0, { sec: "Results" })] }, sinCitarB));
+    const r = resumir([medido, antiguo, redaccion], [sinB, resultado(), sinCitarB]);
+    expect(r.mean_retrieval_mrr).toBe(0.75);
+    expect(r.mean_retrieval_hit_at_5).toBe(0.75);
+    expect(r.mean_context_precision).toBe(1);
+    expect(r.entity_misattributions_total).toBe(2);
+    expect(r.failures_by_stage).toEqual({ retrieval: 1, grading: 0, generation: 1 });
+    // Solo abstenciones o solo turnos antiguos: no hay media que dar.
+    const soloAntiguo = resumir([antiguo], [resultado()]);
+    expect(soloAntiguo.mean_retrieval_mrr).toBeNull();
+    expect(soloAntiguo.failures_by_stage).toEqual({ retrieval: 0, grading: 0, generation: 0 });
+  });
+});

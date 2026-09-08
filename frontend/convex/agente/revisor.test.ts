@@ -31,13 +31,19 @@ function juezPorContenido(condena: (texto: string) => boolean, omite: (texto: st
   };
 }
 
+/** El borrador tal como viaja al redactor: dentro del último mensaje de
+ *  usuario, entre sus delimitadores, como texto de OTRO redactor. */
+function borradorEnviado(kwargs: Record<string, unknown>): string {
+  const contenido = ultimoMensaje(kwargs).content;
+  const inicio = contenido.indexOf(revisor.MARCA_BORRADOR);
+  const fin = contenido.indexOf(revisor.FIN_BORRADOR);
+  if (inicio < 0 || fin < 0) return "";
+  return contenido.slice(inicio + revisor.MARCA_BORRADOR.length, fin).trim();
+}
+
 /** Redactor que devuelve el borrador tal cual: no arregla nada. */
 function redactorQueNoCorrige() {
-  return async (kwargs: Record<string, unknown>) => {
-    const mensajes = kwargs.messages as Array<{ role: string; content: string }>;
-    const borrador = mensajes.filter((m) => m.role === "assistant").pop()?.content ?? "";
-    return respuestaTexto(borrador);
-  };
+  return async (kwargs: Record<string, unknown>) => respuestaTexto(borradorEnviado(kwargs));
 }
 
 // --- Utilidades --------------------------------------------------------------
@@ -178,8 +184,11 @@ describe("revisarAntesDePublicar", () => {
     expect(kwargs).not.toHaveProperty("tools");
     const mensajes = kwargs.messages as Array<{ role: string; content: string }>;
     expect(mensajes[0]).toEqual({ role: "user", content: "cuál fue el AUC" });
-    expect(mensajes[mensajes.length - 3].role).toBe("system");
-    expect(mensajes[mensajes.length - 2]).toEqual({ role: "assistant", content: falsa });
+    expect(mensajes[mensajes.length - 2].role).toBe("system");
+    // El borrador NO va como turno `assistant` del propio modelo: va como texto
+    // de otro redactor dentro del mensaje del usuario (ver `_corregir`).
+    expect(mensajes.some((m) => m.role === "assistant")).toBe(false);
+    expect(borradorEnviado(kwargs)).toBe(falsa);
     expect(ultimoMensaje(kwargs).content).toContain("CRÍTICA DEL BORRADOR");
     expect(ultimoMensaje(kwargs).content).toContain("Pregunta original: cuál fue el AUC");
     // telemetría: verificador, revisor, verificador, en ese orden
@@ -224,8 +233,7 @@ describe("revisarAntesDePublicar", () => {
     expect(resultado.usoAbstencionSegura).toBe(false);
     expect(redactor).toHaveBeenCalledTimes(2);
     // la segunda ronda corrige la PRIMERA corrección, no el borrador original
-    const mensajes2 = (redactor.mock.calls[1][0] as Record<string, unknown>).messages as Array<{ role: string; content: string }>;
-    expect(mensajes2.find((m) => m.role === "assistant")?.content).toBe(aMedias);
+    expect(borradorEnviado(redactor.mock.calls[1][0] as Record<string, unknown>)).toBe(aMedias);
     const critica2 = ultimoMensaje(redactor.mock.calls[1][0] as Record<string, unknown>).content;
     expect(critica2).toContain("sigue sin ser 0.94");
     // la primera ronda pide corregir; la última ordena borrar lo que siga sin sostenerse
@@ -1042,5 +1050,45 @@ describe("_critica en la última ronda", () => {
       citas_sin_resolver: ["[x.pdf, pág. 9]"],
     });
     expect(revisor._critica(conAfirmacion).match(/x\.pdf, pág\. 9/g)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Entidad: la crítica dice de quién es el dato y la pregunta llega al juez
+// ---------------------------------------------------------------------------
+describe("atribución a otra entidad", () => {
+  test("la crítica pide atribuir explícitamente o quitar, en vez de 'no_sostenida' a secas", () => {
+    const inf = informe({
+      afirmaciones: [
+        afirmacion({
+          texto: "Redujo la mortalidad un 30 %",
+          cita: "[trial.pdf, pág. 4]",
+          veredicto: verificador.NO_SOSTENIDA,
+          motivo: "el fragmento habla de rivastigmina, no de donepezilo",
+          entidad_distinta: true,
+          fragmentos: ["r1"],
+        }),
+        afirmacion({ texto: "El AUC fue 0.99", cita: "[a.pdf, pág. 1]", veredicto: verificador.NO_SOSTENIDA, motivo: "dice 0.94" }),
+      ],
+    });
+    const critica = revisor._critica(inf);
+    expect(critica).toContain("- atribución a otra entidad: 'Redujo la mortalidad un 30 %' ([trial.pdf, pág. 4]); el fragmento habla de rivastigmina, no de donepezilo.");
+    expect(critica).toContain("nombrándola en la misma frase");
+    expect(critica).not.toContain("- no_sostenida: 'Redujo la mortalidad");
+    // La otra no sostenida sigue como siempre, y la marca de entidad no la contamina.
+    expect(critica).toContain("- no_sostenida: 'El AUC fue 0.99' ([a.pdf, pág. 1]); dice 0.94");
+  });
+
+  test("la pregunta viaja al juez en cada verificación de la barrera", async () => {
+    const ch = frag();
+    const recibidos: string[] = [];
+    juez.mockImplementation(async (kwargs: Record<string, unknown>) => {
+      recibidos.push(ultimoMensaje(kwargs).content);
+      return veredictoJson("sostenida", "coincide");
+    });
+    const resultado = await revisor.revisarAntesDePublicar("¿cuál fue el AUC de p-tau217?", `El AUC fue 0.94 ${cita(ch)}.`, [], [ch]);
+    expect(resultado.usoAbstencionSegura).toBe(false);
+    expect(recibidos).toHaveLength(1);
+    expect(recibidos[0].startsWith("PREGUNTA DE QUIEN CONSULTA: ¿cuál fue el AUC de p-tau217?")).toBe(true);
   });
 });

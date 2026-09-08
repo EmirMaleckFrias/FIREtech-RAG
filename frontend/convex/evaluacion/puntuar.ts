@@ -202,11 +202,33 @@ export interface Resultado {
   [k: string]: unknown;
 }
 
+/** En qué etapa del pipeline se perdió una evidencia esperada:
+ *  - `retrieval`: no estaba entre los candidatos fusionados de ningún punto
+ *    (la búsqueda no la trajo);
+ *  - `grading`: sí estaba entre los candidatos pero el calificador o la cuota
+ *    la dejaron fuera de las fuentes entregadas al modelo;
+ *  - `generation`: llegó a las fuentes y la respuesta no la citó.
+ *  Distinguirlas importa porque el arreglo es distinto en cada caso (índice y
+ *  consultas, calificador, redacción); antes `evidence_recall` solo decía
+ *  "no apareció" y todo se achacaba a la búsqueda. */
+export type EtapaFallo = "retrieval" | "grading" | "generation";
+
 export interface FilaEvidencia {
   id: string;
   description: string;
   found: boolean;
   matched_sources: string[];
+  /** Posición (desde 1) del primer candidato fusionado que casa con alguna
+   *  fuente esperada, la mejor entre los puntos del plan. `null` si ningún
+   *  candidato casó o si el turno no informó candidatos
+   *  (`metrics.meta.recuperacion` ausente en los mensajes antiguos). */
+  rank?: number | null;
+  /** Si alguna cita de la respuesta resuelve contra una fuente que casa con
+   *  esta evidencia. Solo tiene sentido con `found`. */
+  cited?: boolean;
+  /** `null` cuando se encontró y se citó, o cuando no se puede saber (sin
+   *  candidatos informados no se distingue `retrieval` de `grading`). */
+  failure_stage?: EtapaFallo | null;
   /** Solo en el agregado de N corridas. */
   found_rate?: number;
 }
@@ -228,6 +250,19 @@ export interface Metricas {
   faithfulness: number | null;
   unsupported_claims: number;
   unverified_claims: number;
+  /** Media de 1/rank sobre las evidencias esperadas (0 la que no aparece
+   *  entre los candidatos). `null` si el turno no informó candidatos o el
+   *  caso no exige evidencias (abstención). */
+  retrieval_mrr: number | null;
+  /** Fracción de evidencias con rank <= 5 / <= 20. `null` como el MRR. */
+  retrieval_hit_at_5: number | null;
+  retrieval_hit_at_20: number | null;
+  /** Fracción de las fuentes entregadas que casan con alguna evidencia
+   *  esperada; 1 en un caso de abstención o sin fuentes. */
+  context_precision: number | null;
+  /** Afirmaciones que atribuyen a la entidad preguntada un dato de otra
+   *  (`meta.verificacion.entidad_distinta`); 0 si falta. */
+  entity_misattributions: number;
   [k: string]: number | boolean | null;
 }
 
@@ -285,20 +320,99 @@ function citaDeFuente(fuente: Record<string, unknown>): string {
   return nombre && localizador ? `[${nombre}, ${localizador}]` : "";
 }
 
-function fuenteCasa(esperada: FuenteEsperada, fuente: Record<string, unknown>): boolean {
-  if (nombreDeFichero(texto(fuente.source_file)) !== nombreDeFichero(esperada.file)) return false;
-  if (esperada.pages.length) {
-    const paginas = new Set<number>(
-      Array.isArray(fuente.source_pages) ? fuente.source_pages.filter((p): p is number => typeof p === "number") : [],
-    );
-    if (typeof fuente.page === "number") paginas.add(fuente.page);
-    if (!esperada.pages.some((p) => paginas.has(p))) return false;
-  }
-  const seccion = texto(fuente.section);
-  if (esperada.section_patterns.length && !esperada.section_patterns.some((p) => casa(p, seccion))) return false;
-  const localizador = texto(fuente.locator);
-  if (esperada.locator_patterns.length && !esperada.locator_patterns.some((p) => casa(p, localizador))) return false;
+/** Lo que hace falta de una fuente para compararla con una `FuenteEsperada`.
+ *  Las fuentes entregadas (`sources`) y los candidatos de la recuperación
+ *  (`meta.recuperacion`, con claves cortas para no engordar la fila del
+ *  mensaje) se reducen a esta misma vista, así que la regla de "casa" es una
+ *  sola y no puede divergir entre las dos. */
+interface VistaFuente {
+  archivo: string;
+  paginas: Set<number>;
+  seccion: string;
+  localizador: string;
+}
+
+function paginasDe(pagina: unknown, varias: unknown): Set<number> {
+  const paginas = new Set<number>(
+    Array.isArray(varias) ? varias.filter((p): p is number => typeof p === "number") : [],
+  );
+  if (typeof pagina === "number") paginas.add(pagina);
+  return paginas;
+}
+
+function vistaDeFuente(fuente: Record<string, unknown>): VistaFuente {
+  return {
+    archivo: texto(fuente.source_file),
+    paginas: paginasDe(fuente.page, fuente.source_pages),
+    seccion: texto(fuente.section),
+    localizador: texto(fuente.locator),
+  };
+}
+
+/** Un candidato tal como lo anota el agente en `metrics.meta.recuperacion`:
+ *  `f` fichero, `p` página, `sp` páginas de origen, `sec` sección, `loc`
+ *  localizador. Claves cortas a propósito: son hasta 20 por punto del plan y
+ *  viajan en cada mensaje. */
+interface Candidato {
+  f: string;
+  p: number;
+  sp?: number[];
+  sec?: string;
+  loc: string;
+}
+
+function vistaDeCandidato(c: Candidato): VistaFuente {
+  return {
+    archivo: c.f,
+    paginas: paginasDe(c.p, c.sp),
+    seccion: c.sec ?? "",
+    localizador: c.loc,
+  };
+}
+
+function casaVista(esperada: FuenteEsperada, vista: VistaFuente): boolean {
+  if (nombreDeFichero(vista.archivo) !== nombreDeFichero(esperada.file)) return false;
+  if (esperada.pages.length && !esperada.pages.some((p) => vista.paginas.has(p))) return false;
+  if (esperada.section_patterns.length && !esperada.section_patterns.some((p) => casa(p, vista.seccion))) return false;
+  if (esperada.locator_patterns.length && !esperada.locator_patterns.some((p) => casa(p, vista.localizador))) return false;
   return true;
+}
+
+function fuenteCasa(esperada: FuenteEsperada, fuente: Record<string, unknown>): boolean {
+  return casaVista(esperada, vistaDeFuente(fuente));
+}
+
+/** Los candidatos por punto que anotó el agente, saneados, o `null` si el
+ *  turno no los trajo (mensajes anteriores a la marca, o un turno que murió
+ *  antes de buscar). `null` y "un objeto vacío" son cosas distintas: vacío
+ *  significa que se buscó y no hubo candidatos, y eso sí puntúa como 0. */
+function candidatosDe(meta: Record<string, unknown>): Record<string, Candidato[]> | null {
+  const crudo = meta.recuperacion;
+  if (!esObjeto(crudo)) return null;
+  const salida: Record<string, Candidato[]> = {};
+  for (const [punto, lista] of Object.entries(crudo)) {
+    if (!Array.isArray(lista)) continue;
+    salida[punto] = lista.filter(esObjeto).map((c) => ({
+      f: texto(c.f),
+      p: typeof c.p === "number" ? c.p : Number(c.p) || 0,
+      sp: Array.isArray(c.sp) ? c.sp.filter((x): x is number => typeof x === "number") : undefined,
+      sec: typeof c.sec === "string" ? c.sec : undefined,
+      loc: texto(c.loc),
+    }));
+  }
+  return salida;
+}
+
+/** Posición (desde 1) del primer candidato que casa con la evidencia, la
+ *  mejor entre todos los puntos (los hops extra van bajo "extra:<n>" y
+ *  cuentan igual: si la trajo una búsqueda del modelo, se recuperó). */
+function rangoDe(requisito: Evidencia, candidatos: Record<string, Candidato[]>): number | null {
+  let mejor: number | null = null;
+  for (const lista of Object.values(candidatos)) {
+    const i = lista.findIndex((c) => requisito.sources.some((op) => casaVista(op, vistaDeCandidato(c))));
+    if (i >= 0 && (mejor === null || i + 1 < mejor)) mejor = i + 1;
+  }
+  return mejor;
 }
 
 function redondear(x: number, decimales: number): number {
@@ -328,23 +442,66 @@ export function puntuarCaso(caso: Caso, resultado: Resultado): Puntuacion {
     fallos.push([tipo, mensaje ?? tipo, detalle]);
   };
 
+  // Las citas de la respuesta se leen antes de recorrer las evidencias: hacen
+  // falta para decidir si cada evidencia encontrada se CITÓ, no solo si llegó
+  // a las fuentes.
+  const citas = answer.match(nuevaRegexCitas()) ?? [];
+  const citasEnRespuesta = new Set(citas.map((c) => c.toLowerCase()));
+  const meta = esObjeto(resultado.metrics) && esObjeto(resultado.metrics.meta) ? resultado.metrics.meta : {};
+  const candidatos = candidatosDe(meta);
+
   const evidence: FilaEvidencia[] = [];
   for (const requisito of caso.evidence) {
-    const casadas = fuentes
-      .filter((f) => requisito.sources.some((op) => fuenteCasa(op, f)))
-      .map((f) => texto(f.source_file));
+    const fuentesCasadas = fuentes.filter((f) => requisito.sources.some((op) => fuenteCasa(op, f)));
+    const casadas = fuentesCasadas.map((f) => texto(f.source_file));
     const ok = casadas.length > 0;
+    const cited = fuentesCasadas.some((f) => citasEnRespuesta.has(citaDeFuente(f).toLowerCase()));
+    const rank = candidatos === null ? null : rangoDe(requisito, candidatos);
+    // La etapa se deduce por eliminación: si no llegó a las fuentes y tampoco
+    // estaba entre los candidatos, la perdió la búsqueda; si estaba entre los
+    // candidatos, la descartó el calificador; si llegó a las fuentes y no se
+    // citó, la ignoró la redacción. Sin candidatos informados no se puede
+    // separar búsqueda de calificación, y se deja en null antes que adivinar.
+    let failureStage: EtapaFallo | null = null;
+    if (!ok) failureStage = candidatos === null ? null : rank === null ? "retrieval" : "grading";
+    else if (!cited) failureStage = "generation";
     evidence.push({
       id: requisito.id,
       description: requisito.description,
       found: ok,
       matched_sources: [...new Set(casadas)].sort(),
+      rank,
+      cited,
+      failure_stage: failureStage,
     });
     // El id viaja en el TIPO: dos evidencias distintas que faltan son dos
     // hallazgos distintos con su propia frecuencia al agregar.
     if (!ok) anotar(`evidencia no recuperada: ${requisito.id}`);
   }
   const evidenceRecall = evidence.length ? evidence.filter((e) => e.found).length / evidence.length : 1;
+
+  // Métricas de recuperación. Miden la BÚSQUEDA, no la respuesta: un caso
+  // puede pasar con MRR bajo (la evidencia estaba la vigésima y el
+  // calificador la rescató) y fallar con MRR 1 (estaba la primera y la
+  // redacción la ignoró). Null cuando no hay contra qué medir: sin candidatos
+  // informados o sin evidencias exigidas. No penalizan: no generan fallo.
+  const conCandidatos = candidatos !== null && evidence.length > 0;
+  const media = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+  const retrievalMrr = conCandidatos
+    ? redondear(media(evidence.map((e) => (e.rank ? 1 / e.rank : 0))), 4)
+    : null;
+  const hitAt = (k: number) =>
+    conCandidatos ? redondear(evidence.filter((e) => e.rank !== null && e.rank !== undefined && e.rank <= k).length / evidence.length, 4) : null;
+  // Precisión del contexto: de lo que se le puso delante al modelo, cuánto
+  // era lo que el caso esperaba. En abstención o sin fuentes no hay nada que
+  // medir y vale 1, no 0: entregar nada cuando no hay nada es lo correcto.
+  const contextPrecision =
+    caso.expect_abstention || fuentes.length === 0
+      ? 1
+      : redondear(
+          fuentes.filter((f) => caso.evidence.some((e) => e.sources.some((op) => fuenteCasa(op, f)))).length / fuentes.length,
+          4,
+        );
 
   const textoHops = hops.map((h) => (esObjeto(h) ? texto(h.query) : "")).join("\n");
   const patronesHopQueFaltan = caso.hop_patterns.filter((p) => !casa(p, textoHops));
@@ -362,7 +519,6 @@ export function puntuarCaso(caso: Caso, resultado: Resultado): Puntuacion {
   if (caso.expect_abstention && !abstained) anotar("debía abstenerse y no lo hizo");
   if (!caso.expect_abstention && abstained) anotar("se abstuvo en un caso con evidencia esperada");
 
-  const citas = answer.match(nuevaRegexCitas()) ?? [];
   const resolubles = new Set(fuentes.map((f) => citaDeFuente(f).toLowerCase()));
   const noResolubles = citas.filter((c) => !resolubles.has(c.toLowerCase()));
   const citationPrecision = citas.length
@@ -379,11 +535,15 @@ export function puntuarCaso(caso: Caso, resultado: Resultado): Puntuacion {
   // Fidelidad tal como la dictaminó el verificador en la corrida. Ausente =
   // verificación apagada: no se mide ni se penaliza, pero queda como null y
   // no como 1.0.
-  const meta = esObjeto(resultado.metrics) && esObjeto(resultado.metrics.meta) ? resultado.metrics.meta : {};
   const verificacion = esObjeto(meta.verificacion) ? meta.verificacion : {};
   const faithfulness = typeof verificacion.fidelidad === "number" ? verificacion.fidelidad : null;
   const noSostenidas = Number(verificacion.no_sostenidas ?? 0) || 0;
   const sinVerificar = Number(verificacion.sin_verificar ?? 0) || 0;
+  // Atribuciones a otra entidad: el dato es real pero no es de quien la
+  // pregunta dice. Van dentro de `no_sostenidas` (el verificador las fuerza a
+  // ese veredicto), así que no se anota un fallo aparte: se cuentan para que
+  // el resumen diga cuántas de las no sostenidas eran de esta clase.
+  const entidadDistinta = Number(verificacion.entidad_distinta ?? 0) || 0;
   if (noSostenidas) {
     // Una atribución que su propio fragmento no sostiene es un fallo duro,
     // no un punto menos de nota.
@@ -428,6 +588,11 @@ export function puntuarCaso(caso: Caso, resultado: Resultado): Puntuacion {
       faithfulness: faithfulness === null ? null : redondear(faithfulness, 4),
       unsupported_claims: noSostenidas,
       unverified_claims: sinVerificar,
+      retrieval_mrr: retrievalMrr,
+      retrieval_hit_at_5: hitAt(5),
+      retrieval_hit_at_20: hitAt(20),
+      context_precision: contextPrecision,
+      entity_misattributions: entidadDistinta,
     },
   };
 }
@@ -578,13 +743,42 @@ export function agregarCorridas(scores: Puntuacion[], results: Resultado[]): [Pu
 
   const evidenciaPorCorrida = scores.map((s) => new Map(s.evidence.map((e) => [e.id, e])));
   const evidence: FilaEvidencia[] = primera.evidence.map((fila) => {
-    const found = evidenciaPorCorrida.map((m) => Boolean(m.get(fila.id)?.found));
-    const matched = [...new Set(evidenciaPorCorrida.flatMap((m) => m.get(fila.id)?.matched_sources ?? []))].sort();
+    const filas = evidenciaPorCorrida.map((m) => m.get(fila.id));
+    const found = filas.map((f) => Boolean(f?.found));
+    const matched = [...new Set(filas.flatMap((f) => f?.matched_sources ?? []))].sort();
+    const encontrada = mayoriaEstricta(found);
+    // Rango: mediana de las corridas en que apareció entre los candidatos.
+    // Citada: mayoría entre las corridas que lo midieron. La etapa se deduce
+    // del agregado y no se vota suelta: si por mayoría se encontró, la única
+    // etapa posible es la redacción (y solo si por mayoría no se citó); si
+    // por mayoría faltó, la más frecuente entre las corridas en que faltó. Un
+    // voto suelto podía decir "found: true, failure_stage: retrieval", que no
+    // significa nada.
+    const rangos = filas.map((f) => f?.rank).filter((r): r is number => typeof r === "number");
+    const citadas = filas.map((f) => f?.cited).filter((c): c is boolean => typeof c === "boolean");
+    const cited = citadas.length ? mayoriaEstricta(citadas) : undefined;
+    let failureStage: EtapaFallo | null = null;
+    if (encontrada) {
+      failureStage = cited === false ? "generation" : null;
+    } else {
+      const cuentas = new Map<EtapaFallo, number>();
+      for (const f of filas) {
+        if (f && !f.found && (f.failure_stage === "retrieval" || f.failure_stage === "grading")) {
+          cuentas.set(f.failure_stage, (cuentas.get(f.failure_stage) ?? 0) + 1);
+        }
+      }
+      const orden: EtapaFallo[] = ["retrieval", "grading"];
+      failureStage =
+        [...cuentas.entries()].sort((a, b) => b[1] - a[1] || orden.indexOf(a[0]) - orden.indexOf(b[0]))[0]?.[0] ?? null;
+    }
     return {
       ...fila,
-      found: mayoriaEstricta(found),
+      found: encontrada,
       found_rate: redondear(found.filter(Boolean).length / n, 4),
       matched_sources: matched,
+      rank: mediana(rangos, 1),
+      ...(cited === undefined ? {} : { cited }),
+      failure_stage: failureStage,
     };
   });
 
@@ -653,6 +847,17 @@ export interface Resumen {
   mean_faithfulness: number | null;
   faithfulness_measured_cases: number;
   unsupported_claims_total: number;
+  /** Medias de las métricas de recuperación sobre los casos que las midieron
+   *  (null si ninguno: turnos antiguos sin candidatos, o solo abstenciones). */
+  mean_retrieval_mrr: number | null;
+  mean_retrieval_hit_at_5: number | null;
+  mean_retrieval_hit_at_20: number | null;
+  mean_context_precision: number | null;
+  entity_misattributions_total: number;
+  /** Evidencias esperadas perdidas, por la etapa en que se perdieron. Es un
+   *  diagnóstico, no un gate: `generation` cuenta evidencias entregadas y no
+   *  citadas, que no hacen fallar el caso. */
+  failures_by_stage: Record<EtapaFallo, number>;
   total_cost_usd: number;
   total_cost_usd_all_runs: number;
   mean_latency_ms: number;
@@ -689,6 +894,23 @@ export function resumir(scored: Puntuacion[], results: Array<Resultado | Resulta
   }
   const medidos = scored.filter((s) => s.metrics.faithfulness !== null && s.metrics.faithfulness !== undefined);
   const suma = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  // Media de una métrica sobre los casos que la midieron; null si ninguno.
+  // Las filas de un reporte anterior a estas métricas no las llevan y no
+  // deben contar como 0.
+  const mediaMedida = (clave: string): number | null => {
+    const valores = scored
+      .map((s) => s.metrics[clave])
+      .filter((x): x is number => typeof x === "number");
+    return valores.length ? redondear(suma(valores) / valores.length, 4) : null;
+  };
+  const porEtapa: Record<EtapaFallo, number> = { retrieval: 0, grading: 0, generation: 0 };
+  for (const s of scored) {
+    for (const e of s.evidence) {
+      if (e.failure_stage === "retrieval" || e.failure_stage === "grading" || e.failure_stage === "generation") {
+        porEtapa[e.failure_stage] += 1;
+      }
+    }
+  }
   return {
     cases: n,
     passed: scored.filter((s) => s.passed).length,
@@ -705,6 +927,12 @@ export function resumir(scored: Puntuacion[], results: Array<Resultado | Resulta
       : null,
     faithfulness_measured_cases: medidos.length,
     unsupported_claims_total: suma(scored.map((s) => Number(s.metrics.unsupported_claims ?? 0))),
+    mean_retrieval_mrr: mediaMedida("retrieval_mrr"),
+    mean_retrieval_hit_at_5: mediaMedida("retrieval_hit_at_5"),
+    mean_retrieval_hit_at_20: mediaMedida("retrieval_hit_at_20"),
+    mean_context_precision: mediaMedida("context_precision"),
+    entity_misattributions_total: suma(scored.map((s) => Number(s.metrics.entity_misattributions ?? 0) || 0)),
+    failures_by_stage: porEtapa,
     total_cost_usd: redondear(suma(costes), 6),
     total_cost_usd_all_runs: redondear(suma(gastado), 6),
     mean_latency_ms: redondear(suma(latencias) / n, 1),

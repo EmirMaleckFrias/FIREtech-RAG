@@ -15,9 +15,11 @@
 // 3. Las preguntas sobre el asistente y los saludos no llegan a este prompt
 //    con evidencia: el bucle las clasifica ANTES de buscar. La ficha se
 //    conserva por si el clasificador falla hacia "documental".
-import { cita, fuente, localizador, type Fragmento } from "../lib/citas";
+import { avisoRetraccion, cita, fuente, localizador, type Fragmento } from "../lib/citas";
 
-export const VERSION_PROMPT = "v4";
+// v5 (septiembre 2026): regla 14 sobre la entidad. Cambiar la versión invalida
+// la caché del plan, que lleva la versión en su clave.
+export const VERSION_PROMPT = "v5";
 
 export const NOMBRE_BUSCAR = "buscar_documentos";
 export const NOMBRE_INVENTARIO = "listar_documentos";
@@ -38,9 +40,12 @@ resultados ya están recuperados: no decidas tú qué buscar, decide qué dicen.
 escrita tras "cita:": cópiala LITERAL y COMPLETA, con sus corchetes, y no \
 añadas nada fuera de ellos. No todos los documentos tienen páginas, así que \
 unas dicen "pág. 12", otras "sección: Métodos" y otras "fila 30": usa la que \
-traiga el resultado y nunca te inventes un número de página. La línea \
-"(sección del documento: ...)" es contexto para que sepas de dónde sale el \
-fragmento, NO forma parte de la cita: no la copies dentro ni detrás de ella. \
+traiga el resultado y nunca te inventes un número de página. Las líneas \
+"(sección del documento: ...)" y "(de qué habla este fragmento, orientación no \
+citable: ...)" son contexto para que sepas de dónde sale el fragmento y de qué \
+entidad habla, NO forman parte de la cita ni son un dato: no las copies dentro ni \
+detrás de la cita, y ninguna cifra ni afirmación puede salir de ellas, solo del \
+texto del fragmento. \
 Y no repitas la misma cita en cada punto de una lista si todos salen del mismo \
 sitio: cítalo una vez y dilo.
 3. Si algo no aparece en los resultados, dilo con la fórmula literal \
@@ -91,6 +96,20 @@ haces con tus palabras, como se lo explicarías a alguien que acaba de abrir la 
 aplicación. CUIDADO con la frontera: "qué documentos tienes", "cuántos hay" o "de \
 qué tratan" NO son preguntas sobre ti, son preguntas sobre el índice, y esas se \
 responden con la herramienta \`${NOMBRE_INVENTARIO}\`.
+14. ENTIDAD. Cada dato pertenece al fármaco, biomarcador, población, estudio o \
+desenlace del que lo dice su fragmento (su texto, su cabecera y la línea de \
+orientación lo nombran). Si la pregunta es sobre X y la evidencia recuperada habla \
+de Y (otro fármaco de la misma clase, otra cohorte, otro estudio, otro desenlace), \
+NUNCA presentes el dato de Y como si fuera de X, ni bajo un apartado que lleve el \
+nombre de X. La ausencia de X va en "Lo que no está" con la fórmula de la regla 3; \
+el dato de Y, solo si aporta, va en "Evidencia" (o en el cuerpo, si la respuesta no \
+lleva apartados) nombrando a Y en la misma frase, con su cita. Una cifra real \
+atribuida a la entidad equivocada es el error más grave que puedes cometer, y el \
+verificador la rechaza.
+15. Un resultado marcado como RETRACTADO (o con expresión de preocupación de su revista) \
+no vale como evidencia de ningún hecho: no lo uses para responder qué es verdad. Si la \
+pregunta es sobre ese artículo, o si lo mencionas por cualquier motivo, di en la misma \
+frase que está retractado.
 
 METODOLOGÍA DE INVESTIGACIÓN: lee TODOS los resultados antes de escribir, \
 incluidos los del final. Para cada dato anota de qué documento sale, de qué \
@@ -284,6 +303,10 @@ export function formatearResultados(fragmentos: Fragmento[]): string {
     if (ch.section && localizador(ch) !== `sección: ${ch.section}`) {
       lineas.push(`(sección del documento: ${ch.section})`);
     }
+    const contexto = (ch.contexto ?? "").trim();
+    if (contexto) lineas.push(`(de qué habla este fragmento, orientación no citable: ${contexto})`);
+    const aviso = avisoRetraccion(ch.retraccion);
+    if (aviso) lineas.push(aviso);
     lineas.push(ch.text);
     partes.push(lineas.join("\n"));
   });
@@ -321,6 +344,9 @@ export function fuentesPayload(
       fuente: fuente(ch),
       plan_items: mapa[ch._id] ?? [],
       grado: grados[ch._id] ?? "",
+      // "retractado" | "retirado" | "preocupacion" | "": la interfaz lo pinta
+      // en rojo sobre la fuente.
+      retraccion: ch.retraccion ?? "",
     });
   }
   return salida;

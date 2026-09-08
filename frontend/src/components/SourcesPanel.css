@@ -49,6 +49,10 @@
 .fuentes-badges:empty { display: none; }
 .fuentes-badges > span { font-size: 10px; color: var(--text-2); line-height: 1.5; }
 .fuentes-badges > span + span::before { content: '·'; margin-right: 8px; }
+/* Fuente de un artículo retractado (rojo) o con expresión de preocupación de
+   su revista (ámbar), según Crossref. */
+.fuentes-badges > span.fuentes-retractado { color: var(--red); font-weight: 600; }
+.fuentes-badges > span.fuentes-preocupacion { color: var(--amber); font-weight: 600; }
 .fuentes-preview { margin: 0; font-size: 14px; color: var(--text); line-height: 1.8; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .fuentes-meta { margin: 0 0 12px; color: var(--text-2); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .fuentes-snippet { color: var(--text); font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

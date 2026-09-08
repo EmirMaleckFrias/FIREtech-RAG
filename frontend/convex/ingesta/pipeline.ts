@@ -32,7 +32,8 @@ import { PERDIO_EL_DOCUMENTO } from "./escritura";
 import { EMBEDDINGS_A_LA_VEZ, LOTE_BORRADO, LOTE_EMBEDDINGS, LOTE_ESCRITURA, MAX_ERROR_CHARS } from "./lotes";
 import { crearOcr } from "./ocr";
 import { parsearDocumento } from "./parsear";
-import type { AvisosIngesta, ChunkParseado } from "./tipos";
+import { contextualizar, inicioDe, seccionesDe, textoParaEmbeber, versionIndiceActual, type FichaDocumento } from "./contexto";
+import { SIN_AVISOS, type AvisosIngesta, type ChunkParseado } from "./tipos";
 
 function mensajeDe(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc);
@@ -46,6 +47,12 @@ function oNada(valor: string): string | undefined {
 function aEntrada(chunk: ChunkParseado, embedding: number[]) {
   return {
     text: chunk.text,
+    // A diferencia del resto, un contexto ausente se escribe como "" y no se
+    // omite: así toda fila nueva tiene el campo del índice `porContexto`
+    // (una fila sin él no está en ese índice, y el arnés de pruebas además
+    // lanza al recorrerlo). "" no casa con ningún término. `aFragmento` lo
+    // convierte otra vez en ausencia al leer.
+    contexto: (chunk.contexto ?? "").trim(),
     embedding,
     page: chunk.page,
     sourcePages: chunk.sourcePages,
@@ -83,9 +90,10 @@ async function borrarEnLotes(
 }
 
 /** Cuánto trabaja una acción de embebido antes de pasar el relevo a la
- *  siguiente. La acción de Node dura 10 minutos; con 7 de trabajo queda
- *  margen para el grupo en vuelo y el cierre. */
-let tiempoPorAccionMs = 7 * 60_000;
+ *  siguiente. La acción de Node dura 10 minutos; con 5 de trabajo queda
+ *  margen para el grupo en vuelo (que ahora incluye las llamadas de contexto,
+ *  hasta 24 por grupo con reintentos) y el cierre. Eran 7 antes del contexto. */
+let tiempoPorAccionMs = 5 * 60_000;
 export function configurarTiempoPorAccion(ms: number): void {
   tiempoPorAccionMs = Math.max(0, ms);
 }
@@ -105,6 +113,12 @@ const cabeceraDeIngesta = v.object({
   doi: v.optional(v.string()),
   language: v.optional(v.string()),
   documentType: v.optional(v.string()),
+  // La ficha del documento para escribir el contexto de cada fragmento
+  // (ingesta/contexto.ts): sus secciones y su comienzo. Se calculan al leer,
+  // que es cuando están todos los fragmentos a la vista, y viajan a cada
+  // acción de embebido.
+  secciones: v.optional(v.array(v.string())),
+  inicio: v.optional(v.string()),
 });
 
 /**
@@ -219,6 +233,7 @@ export const ingestar = internalAction({
         desde,
         cursor: 0,
         tokens: 0,
+        sinContexto: 0,
         empezadoEn: t0,
         cabecera: {
           pages,
@@ -229,6 +244,8 @@ export const ingestar = internalAction({
           doi: oNada(primero.doi),
           language: oNada(primero.language),
           documentType: primero.documentType,
+          secciones: seccionesDe(chunks),
+          inicio: inicioDe(chunks),
         },
       });
     } catch (exc) {
@@ -238,15 +255,19 @@ export const ingestar = internalAction({
 });
 
 /**
- * Segunda etapa, encadenada: embeber y escribir los fragmentos pendientes.
+ * Segunda etapa, encadenada: contextualizar, embeber y escribir los
+ * fragmentos pendientes.
  *
  * Cada invocación trabaja hasta `tiempoPorAccionMs` y, si queda cola, se
  * reagenda a sí misma con el cursor: así un documento de cualquier tamaño
- * se indexa aunque una sola acción no pueda con él. Los lotes de embeddings
- * van de EMBEDDINGS_A_LA_VEZ en paralelo; las escrituras, en orden. El avance
- * se escribe por grupo, y al vaciar la cola se retira la versión anterior, se
- * marca el documento listo y se cierra la corrida con las cifras del parseo
- * más las del embebido.
+ * se indexa aunque una sola acción no pueda con él. Por cada grupo de la
+ * cola, primero un modelo escribe la frase de contexto de cada fragmento
+ * (ingesta/contexto.ts) y después se embebe contexto + texto; los lotes de
+ * embeddings van de EMBEDDINGS_A_LA_VEZ en paralelo y las escrituras, en
+ * orden. El avance se escribe por grupo, y al vaciar la cola se retira la
+ * versión anterior, se marca el documento listo (con la versión del índice y
+ * los fragmentos que quedaron sin contexto en sus avisos) y se cierra la
+ * corrida con las cifras del parseo más las del embebido.
  */
 export const embeber = internalAction({
   args: {
@@ -256,6 +277,9 @@ export const embeber = internalAction({
     desde: v.number(),
     cursor: v.number(),
     tokens: v.number(),
+    // Fragmentos que quedaron sin contexto en las acciones anteriores de esta
+    // misma cadena; se acumula y acaba en los avisos del documento.
+    sinContexto: v.optional(v.number()),
     empezadoEn: v.number(),
     cabecera: cabeceraDeIngesta,
   },
@@ -265,6 +289,7 @@ export const embeber = internalAction({
     const tAccion = Date.now();
     let cursor = args.cursor;
     let tokens = args.tokens;
+    let sinContexto = args.sinContexto ?? 0;
     const stats: Record<string, unknown> = { fileName: undefined, chunks: args.cabecera.chunks };
     let fileName = "";
     try {
@@ -273,12 +298,27 @@ export const embeber = internalAction({
       if (doc.ingestaRunId !== args.runId) throw new Error(PERDIO_EL_DOCUMENTO);
       fileName = doc.fileName;
       tel.fija({ documento: fileName });
+      const c = args.cabecera;
+      const ficha: FichaDocumento = {
+        fileName,
+        titulo: c.titulo,
+        citation: c.citation,
+        doi: c.doi,
+        language: c.language,
+        documentType: c.documentType,
+        pages: c.pages,
+        secciones: c.secciones,
+        inicio: c.inicio,
+      };
 
       const embeberLote = async (lote: ChunkParseado[]) => {
         const t1 = Date.now();
         let respuesta: Awaited<ReturnType<typeof gateway.embed>>;
         try {
-          respuesta = await gateway.embed(lote.map((c) => c.text), a);
+          // Contexto + texto: es lo que hace que un fragmento de Resultados
+          // que no nombra ni la cohorte ni el biomarcador se parezca a la
+          // pregunta que sí los nombra.
+          respuesta = await gateway.embed(lote.map((ch) => textoParaEmbeber(ch.contexto, ch.text)), a);
         } catch (exc) {
           tel.anota("embeddings", a.modeloEmbedding, null, { ms: Date.now() - t1, ok: false, nota: mensajeDe(exc).slice(0, 120) });
           throw exc;
@@ -295,9 +335,20 @@ export const embeber = internalAction({
           runId: args.runId, desde: cursor, n: LOTE_EMBEDDINGS * EMBEDDINGS_A_LA_VEZ,
         });
         if (!pendientes.length) break;
+        const grupo = pendientes.map((f) => f.chunk as ChunkParseado);
+        // La frase de contexto de cada fragmento, ANTES de embeber: entra en el
+        // vector. Un grupo que el modelo no pudo contextualizar se embebe sin
+        // ella (como antes de existir esto) y se cuenta para los avisos.
+        if (a.contextoHabilitado) {
+          const contextualizado = await contextualizar(ficha, grupo, a, tel);
+          contextualizado.contextos.forEach((contexto, i) => {
+            if (contexto) grupo[i] = { ...grupo[i], contexto };
+          });
+          sinContexto += contextualizado.fallidos;
+        }
         const lotes: ChunkParseado[][] = [];
-        for (let k = 0; k < pendientes.length; k += LOTE_EMBEDDINGS) {
-          lotes.push(pendientes.slice(k, k + LOTE_EMBEDDINGS).map((f) => f.chunk as ChunkParseado));
+        for (let k = 0; k < grupo.length; k += LOTE_EMBEDDINGS) {
+          lotes.push(grupo.slice(k, k + LOTE_EMBEDDINGS));
         }
         const respuestas = await Promise.all(lotes.map(embeberLote));
         for (const [n, lote] of lotes.entries()) {
@@ -327,7 +378,7 @@ export const embeber = internalAction({
           await ctx.runMutation(internal.ingesta.escritura.anotarStats, {
             runId: args.runId, stats: { relevos_embebido: ((await statsDe(ctx, args.runId)).relevos_embebido as number ?? 0) + 1 },
           });
-          await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.embeber, { ...args, cursor, tokens });
+          await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.embeber, { ...args, cursor, tokens, sinContexto });
           return;
         }
       }
@@ -340,7 +391,14 @@ export const embeber = internalAction({
       const retirados = await borrarEnLotes(ctx, {
         documentId: args.documentId, version: args.version, desde: args.desde, modo: "antiguos", runId: args.runId,
       });
-      const c = args.cabecera;
+      // Los fragmentos sin contexto se suman a los avisos del parseo: la
+      // ficha lo dice y reindexar lo reintenta.
+      const avisosLeidos = c.avisos as AvisosIngesta | undefined;
+      const avisos: AvisosIngesta | undefined =
+        sinContexto > 0 ? { ...SIN_AVISOS, ...(avisosLeidos ?? {}), sinContexto } : avisosLeidos;
+      if (sinContexto > 0) {
+        console.warn(`Ingesta de '${fileName}': ${sinContexto} fragmento(s) sin contexto de búsqueda.`);
+      }
       await ctx.runMutation(internal.ingesta.escritura.marcarListo, {
         documentId: args.documentId,
         sha256: args.version,
@@ -351,8 +409,9 @@ export const embeber = internalAction({
         doi: c.doi,
         language: c.language,
         documentType: c.documentType,
-        avisos: c.avisos as AvisosIngesta | undefined,
+        avisos,
         runId: args.runId,
+        indiceVersion: versionIndiceActual(a.contextoHabilitado),
       });
       const previas = await statsDe(ctx, args.runId);
       await ctx.runMutation(internal.ingesta.escritura.cerrarRun, {
@@ -362,11 +421,19 @@ export const embeber = internalAction({
           ...previas,
           chunks_retirados: retirados,
           tokens_embedding: tokens,
+          contextos_fallidos: sinContexto,
           ms: Date.now() - args.empezadoEn,
           telemetria: tel.resumen(),
         },
       });
       console.info(`Ingesta de '${fileName}' completa: ${c.chunks} fragmentos en ${Date.now() - args.empezadoEn} ms.`);
+      // Un artículo con DOI se comprueba en Crossref nada más indexarse: si su
+      // revista lo retractó, la médica lo ve en la ficha antes de preguntar
+      // nada (ver convex/retracciones.ts). Aparte y sin esperar: un fallo de
+      // Crossref no es un fallo de la ingesta.
+      if (c.doi) {
+        await ctx.scheduler.runAfter(0, internal.retracciones.comprobarDocumento, { documentId: args.documentId });
+      }
     } catch (exc) {
       await fallar(ctx, { documentId: args.documentId, runId: args.runId, fileName, exc, stats, t0: args.empezadoEn, tel, version: args.version, desde: args.desde });
     }

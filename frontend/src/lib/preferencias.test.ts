@@ -125,7 +125,11 @@ describe('presentación de Ajustes', () => {
       open: true, onClose: () => {}, role, currentUserId: null,
       userEmail: 'investigacion@example.org', onSignOut: () => {},
     }));
-    expect(html).not.toContain('role="tab"');
+    // Mi cuenta y Calidad para todo el mundo; Usuarios y Sistema, ni montadas.
+    expect(html.match(/role="tab"/g)).toHaveLength(2);
+    expect(html).toContain('id="settings-tab-calidad"');
+    expect(html).not.toContain('id="settings-tab-usuarios"');
+    expect(html).not.toContain('id="settings-tab-sistema"');
     expect(html).not.toContain('Tu equipo de investigación');
     expect(html).toContain('Hazlo tuyo');
   });
@@ -134,7 +138,7 @@ describe('presentación de Ajustes', () => {
       open: true, onClose: () => {}, role: 'admin', currentUserId: null,
       userEmail: 'investigacion@example.org', onSignOut: () => {},
     }));
-    expect(html.match(/role="tab"/g)).toHaveLength(3);
+    expect(html.match(/role="tab"/g)).toHaveLength(4);
     expect(html).toMatch(/id="settings-tab-cuenta" aria-selected="true" tabindex="0"/);
     expect(html).toContain('Administrador');
     expect(html).toContain('Hazlo tuyo');

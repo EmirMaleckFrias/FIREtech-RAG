@@ -147,6 +147,9 @@ export const listar = query({
       notionPageId: d.notionPageId ?? null,
       // El avance de la ingesta en curso, para la barra de la ficha.
       progreso: d.progreso ?? null,
+      // Lo que dice Crossref del artículo (retractado, retirado, expresión de
+      // preocupación), para la insignia roja de la ficha.
+      retraccion: d.retraccion ?? null,
     }));
   },
 });

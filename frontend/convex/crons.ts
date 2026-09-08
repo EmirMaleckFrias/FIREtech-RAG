@@ -60,4 +60,21 @@ crons.interval("sincronizar fuentes conectadas", { minutes: 60 }, internal.crons
 // mensajes.cerrarColgados).
 crons.interval("cerrar turnos colgados", { minutes: 15 }, internal.mensajes.cerrarColgados, {});
 
+// Una vez por semana, Crossref: si la revista retractó alguno de los artículos
+// indexados (ver convex/retracciones.ts). Una retracción llega años después
+// de publicarse el artículo, así que comprobarlo solo al indexar no basta.
+crons.interval("comprobar retracciones", { hours: 168 }, internal.retracciones.comprobarTodos, {});
+
+// Evaluación continua (convex/evaluacion/correr.ts): una vez a la semana, una
+// corrida con las preguntas de control aprobadas de cada cuenta que tenga al
+// menos cinco y no haya evaluado en los últimos seis días. Es un reparto, como
+// el de las sincronizaciones: cada corrida es una cadena de acciones propia y
+// una que se cuelga no frena a las demás.
+crons.interval("evaluar la calidad", { hours: 168 }, internal.evaluacion.correr.repartir, {});
+
+// Y su red: una corrida que siga `running` más de 4 h está muerta (la cadena
+// se cortó sin pasar por su catch) y se cierra como error para que el botón
+// "Evaluar ahora" no quede bloqueado para siempre.
+crons.interval("cerrar evaluaciones colgadas", { minutes: 30 }, internal.evaluacion.correr.cerrarColgadas, {});
+
 export default crons;

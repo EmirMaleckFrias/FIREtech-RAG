@@ -105,6 +105,10 @@ export const cerrarRun = internalMutation({
 
 const chunkEntrada = v.object({
   text: v.string(),
+  // La frase de contexto (ingesta/contexto.ts); ausente si el modelo no la
+  // pudo escribir. Va en su propio campo, no dentro de `text`, porque `text`
+  // es lo que se cita y se verifica.
+  contexto: v.optional(v.string()),
   embedding: v.array(v.float64()),
   page: v.number(),
   sourcePages: v.array(v.number()),
@@ -231,6 +235,9 @@ export const marcarListo = internalMutation({
     documentType: v.optional(v.string()),
     avisos: v.optional(avisosIngesta),
     runId: v.optional(v.id("ingestionRuns")),
+    // Con qué receta se escribieron sus fragmentos (ver `VERSION_INDICE` en
+    // ingesta/contexto.ts): es lo que mira `migraciones.reindexarTodo`.
+    indiceVersion: v.optional(v.string()),
   },
   handler: async (ctx, { documentId, avisos, runId, ...campos }): Promise<boolean> => {
     const doc = runId ? await exigirPropiedad(ctx, documentId, runId) : await ctx.db.get(documentId);

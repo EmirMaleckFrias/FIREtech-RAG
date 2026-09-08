@@ -26,7 +26,7 @@ import type { KeyboardEvent } from 'react';
 import { cifra, fechaCorta, formatoDe, identidadDe, pesoRelativo } from '../lib/biblioteca';
 import { fuenteDe } from '../lib/origenes';
 import { fraccionDeProgreso, textoDeProgreso } from '../lib/progresoIngesta';
-import type { DocumentInfo } from '../types';
+import type { RetraccionDocumento, DocumentInfo } from '../types';
 import { IconAlert, IconCheck, IconRefresh, IconSpinner, IconTrash } from './icons';
 
 interface FichaDocumentoProps {
@@ -57,7 +57,29 @@ export function textoDeAvisos(a: NonNullable<DocumentInfo['avisos']>): string {
   if (a.sinLeer > 0) partes.push(`${cifra(a.sinLeer)} ${a.sinLeer === 1 ? 'página o imagen sin leer' : 'páginas o imágenes sin leer'}`);
   if (a.omitidas > 0) partes.push(`${cifra(a.omitidas)} ${a.omitidas === 1 ? 'imagen no leída por el tope' : 'imágenes no leídas por el tope'}`);
   if (a.recortados > 0) partes.push(`texto recortado en ${cifra(a.recortados)} ${a.recortados === 1 ? 'fragmento' : 'fragmentos'}`);
+  // Sin la frase de contexto, el fragmento se encuentra algo peor. Se dice en
+  // términos de lo que nota la usuaria (la búsqueda), no de cómo se indexa.
+  if (a.sinContexto > 0) {
+    partes.push(
+      `${cifra(a.sinContexto)} ${a.sinContexto === 1 ? 'fragmento se buscará' : 'fragmentos se buscarán'} con menos precisión`,
+    );
+  }
   return partes.join(' · ');
+}
+
+/** "Artículo retractado", "Artículo retirado" o "Expresión de preocupación de
+ *  la revista", con la fecha en la versión larga. Nunca un código ni un DOI:
+ *  quien lee es una médica. */
+export function textoDeRetraccion(r: RetraccionDocumento, larga = false): string {
+  const base =
+    r.tipo === 'retractado'
+      ? 'Artículo retractado'
+      : r.tipo === 'retirado'
+        ? 'Artículo retirado por la revista'
+        : 'Expresión de preocupación de la revista';
+  if (!larga) return base;
+  const fecha = r.fecha ? ` (${r.fecha})` : '';
+  return `${base}${fecha}. Según el registro de la revista, este artículo no vale como evidencia; el asistente lo dirá si lo cita.`;
 }
 
 /** Fecha completa para el `title`: la ficha enseña "hoy", el navegador el
@@ -149,6 +171,20 @@ export function FichaDocumento({
                     <IconAlert size={11} />
                     {textoDeAvisos(doc.avisos)}
                   </button>
+                )}
+                {/* Lo que dice la revista del artículo (Crossref): retractado,
+                    retirado o con expresión de preocupación. Sigue indexado
+                    (se puede preguntar qué decía), pero no vale como evidencia
+                    y hay que verlo antes de preguntar nada. */}
+                {doc.retraccion !== null && (
+                  <span
+                    className={`ficha-insignia ${doc.retraccion.tipo === 'preocupacion' ? 'ficha-insignia-aviso' : 'ficha-insignia-retractado'}`}
+                    role="status"
+                    title={textoDeRetraccion(doc.retraccion, true)}
+                  >
+                    <IconAlert size={11} />
+                    {textoDeRetraccion(doc.retraccion)}
+                  </span>
                 )}
               </>
             ) : doc.status === 'processing' ? (

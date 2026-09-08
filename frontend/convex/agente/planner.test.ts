@@ -95,7 +95,7 @@ describe("planificar", () => {
 
     // Lista vacía válida: no es un fallo, y el inglés del ancla se conserva.
     espia.mockResolvedValueOnce(respuesta({ pregunta_en: "the question", items: [] }));
-    expect(await planificar("la pregunta", [], 3, tel)).toEqual({ items: [], preguntaEn: "the question" });
+    expect(await planificar("la pregunta", [], 3, tel)).toEqual({ items: [], preguntaEn: "the question", variantesPregunta: [] });
 
     // Una ronda por llamada, ni una más: el JSON sin lista NO deja una ronda
     // "ok" y otra en fallo.
@@ -282,6 +282,72 @@ describe("clasificar: la consulta autónoma", () => {
 
   test("si el clasificador falla, la consulta es la literal y la clase documental", async () => {
     espia.mockRejectedValueOnce(new Error("gateway caído"));
-    expect(await clasificar("hazme un diagrama", historial)).toEqual({ clase: "documental", consulta: "hazme un diagrama" });
+    expect(await clasificar("hazme un diagrama", historial)).toEqual({ clase: "documental", consulta: "hazme un diagrama", consultaEn: "" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reformulaciones y el inglés del clasificador
+// ---------------------------------------------------------------------------
+describe("variantes", () => {
+  test("planificar lee las variantes por punto y las de la pregunta: sin repetir, sin vacías, dos como mucho", async () => {
+    espia.mockResolvedValueOnce(
+      respuesta({
+        pregunta_en: "plasma p-tau217 AUC for Alzheimer",
+        variantes_pregunta: [
+          "plasma p-tau217 AUC for Alzheimer", // igual a pregunta_en: fuera
+          "phosphorylated tau 217 diagnostic accuracy",
+          "  ",
+          "x".repeat(400), // desmesurada: fuera
+          "p-tau 217 ROC area under curve",
+          "una tercera que ya no cabe",
+        ],
+        items: [
+          {
+            query: "deterioro cognitivo leve conversión",
+            query_en: "MCI conversion",
+            variantes: ["mild cognitive impairment conversion", "MCI  conversion", 42, "prodromal Alzheimer progression", "sobra"],
+            evidence_needed: "tasa de conversión",
+          },
+          { query: "sin variantes", query_en: "without variants", evidence_needed: "x" },
+        ],
+      }),
+    );
+    const r = await planificar("AUC de p-tau217 en plasma para Alzheimer", [], 3);
+    expect(r.variantesPregunta).toEqual(["phosphorylated tau 217 diagnostic accuracy", "p-tau 217 ROC area under curve"]);
+    expect(r.items[0].variantes).toEqual(["mild cognitive impairment conversion", "prodromal Alzheimer progression"]);
+    expect(r.items[1]).not.toHaveProperty("variantes");
+    // El prompt las pide.
+    const kwargs = espia.mock.calls[0][0] as { messages: Array<{ content: string }> };
+    expect(kwargs.messages[0].content).toContain('"variantes"');
+    expect(kwargs.messages[0].content).toContain('"variantes_pregunta"');
+  });
+
+  test("conAncla pone las reformulaciones de la pregunta en e0, sin la pregunta ni su inglés", () => {
+    const plan = conAncla("AUC de p-tau217", "p-tau217 AUC", [], ["P-TAU217  AUC", "phosphorylated tau 217 AUC", "auc de P-TAU217", "tau AUC", "una más"]);
+    expect(plan[0].variantes).toEqual(["phosphorylated tau 217 AUC", "tau AUC"]);
+    expect(conAncla("q", "", [])[0]).not.toHaveProperty("variantes");
+  });
+
+  test("clasificar devuelve la consulta en inglés, también sin historial, salvo si es la misma o traduce una paráfrasis rechazada", async () => {
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "¿cuál es el AUC de p-tau217?", consulta_en: "What is the AUC of p-tau217?" }));
+    const r = await clasificar("¿cuál es el AUC de p-tau217?", []);
+    expect(r.consulta).toBe("¿cuál es el AUC de p-tau217?");
+    expect(r.consultaEn).toBe("What is the AUC of p-tau217?");
+    // ADVERSARIAL: sin historial la paráfrasis del modelo se rechaza, y su
+    // inglés es la traducción de algo que NO se busca: tampoco se acepta.
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "otra cosa inventada", consulta_en: "something else entirely" }));
+    const rechazada = await clasificar("¿cuál es el AUC de p-tau217?", []);
+    expect(rechazada.consulta).toBe("¿cuál es el AUC de p-tau217?");
+    expect(rechazada.consultaEn).toBe("");
+    const kwargs = espia.mock.calls[0][0] as { messages: Array<{ content: string }> };
+    expect(kwargs.messages[0].content).toContain('"consulta_en"');
+
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "plasma tau AUC", consulta_en: "Plasma  tau AUC" }));
+    expect((await clasificar("plasma tau AUC", [])).consultaEn).toBe("");
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", consulta_en: "x".repeat(601) }));
+    expect((await clasificar("q", [])).consultaEn).toBe("");
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q" }));
+    expect((await clasificar("q", [])).consultaEn).toBe("");
   });
 });

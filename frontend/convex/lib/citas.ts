@@ -33,8 +33,28 @@ export interface Fragmento {
   doi?: string;
   metadata?: unknown;
   environment?: string;
+  /** La frase de contexto escrita al indexar (ingesta/contexto.ts): de qué
+   *  estudio, población o tabla habla el fragmento. Sirve para RECUPERAR y
+   *  para que el calificador y el verificador sepan de qué entidad trata;
+   *  NUNCA es evidencia de una cifra. Ausente en los fragmentos anteriores. */
+  contexto?: string;
+  /** El artículo del que sale fue retractado ("retractado"), retirado
+   *  ("retirado") o lleva una expresión de preocupación de su revista
+   *  ("preocupacion"), según Crossref (convex/retracciones.ts). Se copia del
+   *  documento al cargar el fragmento. Ausente = nada que avisar. */
+  retraccion?: string;
   /** Puntuación de la búsqueda que lo trajo. */
   score?: number;
+}
+
+/** El aviso que acompaña a un fragmento de un artículo retractado, para el
+ *  modelo. Es la misma frase en el redactor y en el calificador. */
+export function avisoRetraccion(tipo: string | undefined): string {
+  if (!tipo) return "";
+  if (tipo === "preocupacion") {
+    return "AVISO: la revista publicó una EXPRESIÓN DE PREOCUPACIÓN sobre este artículo; si usas este dato, dilo en la misma frase.";
+  }
+  return "AVISO: este artículo fue RETRACTADO por su revista y NO vale como evidencia de ningún hecho; si lo mencionas, di en la misma frase que está retractado.";
 }
 
 /** Cómo nombrar el documento en una cita: la referencia corta si la hay.

@@ -172,6 +172,14 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
             <span className="fuentes-badges">
               {item.cita && <span className="fuentes-cited">{item.cita === 'pagina' ? 'Página citada' : 'Documento citado'}</span>}
               {s.chunk_type === 'table' && <span>Tabla</span>}
+              {s.retraccion && (
+                <span
+                  className={s.retraccion === 'preocupacion' ? 'fuentes-preocupacion' : 'fuentes-retractado'}
+                  title="Según el registro de la revista, este artículo no vale como evidencia"
+                >
+                  {s.retraccion === 'preocupacion' ? 'Expresión de preocupación' : 'Retractado'}
+                </span>
+              )}
             </span>
           </span>
           <IconChevronDown size={14} className={expandida ? 'fuentes-chevron-open' : ''} />

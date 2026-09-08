@@ -75,14 +75,19 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
   const sostenidas = cuenta(afirmaciones, 'sostenida');
   const limpio = problemas.length === 0;
 
+  // Las atribuciones a otra entidad son no sostenidas (la cifra existe pero
+  // no es de quien se dice) y se dicen aparte, porque es el fallo que una
+  // médica no puede detectar leyendo: la cita resuelve y el dato es real.
+  const otraEntidad = afirmaciones.filter((a) => a.entidad_distinta).length;
+  const noSostenidasSinEntidad = cuenta(afirmaciones, 'no_sostenida') - otraEntidad;
   const resumenBase = limpio
     ? `${sostenidas} de ${afirmaciones.length} afirmaciones respaldadas por su fuente`
     : [
         cuenta(afirmaciones, 'sin_cita') > 0 && 'la respuesta no cita ninguna fuente',
         cuenta(afirmaciones, 'cita_no_resuelve') > 0 &&
           `${cuenta(afirmaciones, 'cita_no_resuelve')} cita(s) sin fuente recuperada`,
-        cuenta(afirmaciones, 'no_sostenida') > 0 &&
-          `${cuenta(afirmaciones, 'no_sostenida')} no sostenida(s)`,
+        otraEntidad > 0 && `${otraEntidad} dato(s) de otra entidad`,
+        noSostenidasSinEntidad > 0 && `${noSostenidasSinEntidad} no sostenida(s)`,
         cuenta(afirmaciones, 'parcial') > 0 && `${cuenta(afirmaciones, 'parcial')} parcial(es)`,
         cuenta(afirmaciones, 'sin_verificar') > 0 &&
           `${cuenta(afirmaciones, 'sin_verificar')} sin comprobar`,
@@ -113,9 +118,10 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
         <ul className="verif-lista">
           {afirmaciones.map((a, i) => {
             const estilo = ESTILO[a.veredicto];
+            const etiqueta = a.entidad_distinta ? 'Dato de otra entidad' : estilo.etiqueta;
             return (
               <li key={i} className={`verif-item ${estilo.clase}`}>
-                <span className="verif-veredicto">{estilo.etiqueta}</span>
+                <span className="verif-veredicto">{etiqueta}</span>
                 <span className="verif-texto">
                   {a.texto}
                   <span className="verif-cita">{a.cita}</span>

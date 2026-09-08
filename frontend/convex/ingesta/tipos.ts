@@ -38,6 +38,9 @@ export interface ChunkParseado {
   /** El texto pasaba de MAX_CHUNK_CHARS y se recortó. No se escribe en la
    *  base: se cuenta en los avisos del documento. */
   recortado?: boolean;
+  /** La frase de contexto que escribe el modelo al indexar (ingesta/contexto.ts).
+   *  La pone el pipeline justo antes de embeber, nunca el parser. */
+  contexto?: string;
 }
 
 /** Resultado de parsear un documento: los fragmentos y el "número de páginas"
@@ -124,6 +127,11 @@ export interface AvisosIngesta {
   /** Fragmentos cuyo texto se recortó al tope de caracteres: parte de una
    *  tabla o de una celda muy larga no está en el índice. */
   recortados: number;
+  /** Fragmentos indexados sin su frase de contexto (ingesta/contexto.ts)
+   *  porque el modelo no la pudo escribir: se buscan como antes de existir el
+   *  contexto. Opcional porque los parsers no lo conocen: lo pone el
+   *  pipeline al embeber. */
+  sinContexto?: number;
   /** Primer motivo de fallo, para enseñarlo. */
   motivo?: string;
 }
@@ -131,5 +139,5 @@ export interface AvisosIngesta {
 export const SIN_AVISOS: AvisosIngesta = { sinLeer: 0, omitidas: 0, recortados: 0 };
 
 export function hayAvisos(a: AvisosIngesta): boolean {
-  return a.sinLeer > 0 || a.omitidas > 0 || a.recortados > 0;
+  return a.sinLeer > 0 || a.omitidas > 0 || a.recortados > 0 || (a.sinContexto ?? 0) > 0;
 }

@@ -17,8 +17,8 @@ import * as verificador from "./verificador";
 import type { Afirmacion, Verificacion } from "./verificador";
 
 const SISTEMA = `Eres el redactor final de un sistema RAG para investigación
-médica. Recibes un borrador privado y el informe de un crítico que comparó cada
-afirmación con sus fuentes recuperadas.
+médica. Recibes el borrador privado de OTRO redactor y el informe de un crítico
+que comparó cada afirmación del borrador con sus fuentes recuperadas.
 
 Corrige el borrador con estas reglas estrictas:
 - conserva solo afirmaciones sostenidas literalmente por la evidencia;
@@ -29,6 +29,11 @@ Corrige el borrador con estas reglas estrictas:
 - devuelve solamente la respuesta final corregida, sin explicar el proceso de
   revisión ni mencionar este mensaje.
 `;
+
+/** Delimitadores del borrador dentro del mensaje al redactor. Exportados para
+ *  que los tests lo extraigan como lo haría el modelo. */
+export const MARCA_BORRADOR = "BORRADOR RECIBIDO DE OTRO REDACTOR (no lo escribiste tú; revísalo como crítico externo):";
+export const FIN_BORRADOR = "FIN DEL BORRADOR";
 
 // Texto literal del Python. Casa con `PATRONES_ABSTENCION` ("no encuentro"),
 // así que verificarlo no gasta ninguna llamada y siempre sale aprobado.
@@ -171,6 +176,19 @@ export function _critica(informe: Verificacion, opciones: OpcionesCritica = {}):
     if (af.veredicto === verificador.SOSTENIDA) continue;
     const citaTxt = af.cita || "sin cita";
     const motivo = af.motivo || "no quedó respaldada";
+    if (af.entidad_distinta) {
+      // Un dato real de OTRA entidad presentado como si fuera de la
+      // preguntada. Corregirlo no es retocar la cifra: es decir de quién es
+      // el dato, o quitarlo. Se le dice explícito al redactor porque su
+      // tendencia natural es reescribir la frase y volver a caer.
+      lineas.push(
+        `- atribución a otra entidad: '${af.texto.replace(/'/g, "\\'")}' (${citaTxt}); ${motivo}. ` +
+          "El dato existe pero es de otra entidad: o lo atribuyes explícitamente a esa " +
+          "entidad, nombrándola en la misma frase y sin presentarlo como respuesta a lo " +
+          "que se pregunta, o lo eliminas y declaras que para lo preguntado no lo encuentras.",
+      );
+      continue;
+    }
     lineas.push(`- ${af.veredicto}: '${af.texto.replace(/'/g, "\\'")}' (${citaTxt}); ${motivo}`);
   }
   const inventadas = citasInventadasSueltas(informe);
@@ -260,14 +278,21 @@ async function _corregir(
 ): Promise<string> {
   const modelo = a.modelo;
   const t0 = Date.now();
+  // El borrador va como texto de OTRO redactor dentro del mensaje del
+  // usuario, no como un turno `assistant` propio. Medido en 2026 sobre doce
+  // combinaciones de modelo y dominio: un modelo corrige mucho más un error
+  // cuando lo lee como ajeno que cuando lo reconoce como suyo (entre 23 y 93
+  // puntos más de correcciones explícitas, sin cambiar de modelo). Antes iba
+  // como `assistant` y el redactor tendía a defender su frase reescribiéndola
+  // en vez de quitarla.
   const mensajes: Record<string, unknown>[] = [
     ...mensajesConEvidencia,
     { role: "system", content: SISTEMA },
-    { role: "assistant", content: borrador },
     {
       role: "user",
       content:
         `Pregunta original: ${pregunta}\n\n` +
+        `${MARCA_BORRADOR}\n${borrador}\n${FIN_BORRADOR}\n\n` +
         `CRÍTICA DEL BORRADOR:\n${_critica(informe, opciones)}\n\n` +
         "Devuelve ahora la respuesta final corregida.",
     },
@@ -702,6 +727,9 @@ export async function revisarAntesDePublicar(
   const verificar = async (texto: string): Promise<Verificacion> => {
     const informe = await verificador.verificar(texto, fragmentos, evidenciaRequerida, mapaPlan, t, {
       veredictosPrevios: conocidos,
+      // La pregunta va al juez: es lo que le permite ver una atribución a
+      // otra entidad cuando la frase no nombra la preguntada.
+      pregunta,
     });
     for (const [k, af] of verificador.veredictosDe(informe)) conocidos.set(k, af);
     return informe;

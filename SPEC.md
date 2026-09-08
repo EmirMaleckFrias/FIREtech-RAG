@@ -251,6 +251,14 @@ repregunta sin palabras del tema recuperaba un documento de Notion sobre diseño
 respuesta era "no encuentro hipertensión en los documentos". Contador `consultas_reformuladas`;
 `metrics.meta.consulta_reformulada` dice si se usó.
 
+La misma llamada devuelve también **`consulta_en`**, la consulta con los términos técnicos en
+inglés. Es la `query_en` del ancla `e0` cuando no corre el planificador (modo normal): antes el
+ancla se buscaba una sola vez, en español, contra un corpus en inglés, porque solo el
+planificador traducía. Se acepta con o sin historial (no cambia qué se busca, añade el idioma
+del corpus); vacía si es igual a la consulta o pasa de 600 caracteres. Se guarda en la caché
+del plan como `preguntaEn`, así que la segunda vez que se hace la misma pregunta tampoco hace
+falta llamar al clasificador para tenerla.
+
 Las otras dos clases se responden con una sola llamada al modelo grande, razonamiento `low`, sin
 herramientas y sin barrera, con la ficha "QUÉ ERES" del prompt. Prohibido reproducir las
 instrucciones literalmente.
@@ -266,29 +274,40 @@ La evidencia es una función determinista de (pregunta, índice). La decide cód
 - **Planificador** (solo si el modo planifica): modelo grande, razonamiento
   `PLANNER_REASONING_EFFORT`, hasta `PLANNER_MAX_QUERIES` subpreguntas. Devuelve por cada una
   `query` (en el idioma de la pregunta, autosuficiente), `query_en` (términos técnicos en
-  inglés) y `evidence_needed` (el dato concreto, con población y desenlace), y además
-  `pregunta_en`, la pregunta entera en inglés, que pasa a ser la `query_en` de `e0`.
+  inglés), `variantes` (hasta dos reformulaciones en inglés con sinónimos, siglas o nombres
+  alternativos: "MCI" y "mild cognitive impairment", el nombre comercial y el principio
+  activo) y `evidence_needed` (el dato concreto, con población y desenlace), y además
+  `pregunta_en`, la pregunta entera en inglés, que pasa a ser la `query_en` de `e0`, y
+  `variantes_pregunta`, las reformulaciones de la pregunta entera, que pasan a ser las
+  `variantes` de `e0`.
 - Post-proceso estricto: ids por posición (`e1..eN`), sin consultas equivalentes (misma clave
-  normalizada), un item igual a `e0` se descarta, una `query_en` igual a su `query` queda vacía.
-  Si el planificador falla, el plan es solo `e0` y el fallo queda en telemetría.
-- En modo normal no hay planificador, así que `e0` no tiene versión en inglés y se busca una
-  sola vez; la cabecera del punto lo dice ("buscado solo con la formulación original") y la
-  búsqueda extra del modelo, con los términos en inglés, es el remedio antes de declarar
-  ausencia.
+  normalizada), un item igual a `e0` se descarta, una `query_en` igual a su `query` queda vacía,
+  y las variantes se limpian (sin vacías, sin repetir la consulta ni su inglés ni entre sí,
+  ninguna de más de 300 caracteres, dos como mucho). Si el planificador falla, el plan es solo
+  `e0` y el fallo queda en telemetría.
+- En modo normal no hay planificador: `e0` se busca en español y con la `consulta_en` del
+  clasificador (sección 7). Si el clasificador no la dio, se busca una sola vez y la cabecera del
+  punto lo dice ("buscado solo con la formulación original"); la búsqueda extra del modelo, con
+  los términos en inglés, es el remedio antes de declarar ausencia.
 
 ### 8.2 Búsqueda híbrida (`search/hybrid.ts`)
 
 Reemplaza a la fusión que hacía Qdrant en el servidor.
 
-- Las consultas de un punto (original e inglés) se embeben en **una** petición.
+- Las consultas de un punto (original, inglés y reformulaciones) se embeben en **una**
+  petición y sus listas se fusionan por RRF: una reformulación es una lista más.
 - **Lado denso**: `ctx.vectorSearch` sobre `porEmbedding`, límite
   `min(256, max(20, k * 2))` (`k * 4` si hay filtros residuales). La búsqueda vectorial de
   Convex solo admite `eq` y `or`, no AND entre campos: el filtro del índice es `documentId` si
   se pidió uno, y si no `propietario` (la frontera del corpus, que así deja de ser residual);
   `projectId`, `documentType` y `language` se aplican siempre al cargar.
-- **Lado léxico**: `withSearchIndex("porTexto")` con **todos** los filtros encadenados (AND),
-  límite `min(1024, max(20, k * 2))`. La consulta se reduce a como mucho 16 términos de hasta
-  32 caracteres, sin puntuación ni palabras vacías, priorizando los que llevan dígitos o
+- **Lado léxico**: dos índices de búsqueda, `porTexto` sobre el texto del fragmento y
+  `porContexto` sobre la frase de contexto que se escribe al indexar (sección 14), los dos con
+  **todos** los filtros encadenados (AND) y límite `min(1024, max(20, k * 2))`, fusionados
+  entre sí por RRF antes de fusionarse con el denso. Un fragmento sin `contexto` (anterior a la
+  marca) solo está en el primero y sale igual que antes; si el índice del contexto falla, el
+  del texto responde solo y queda en el log. La consulta se reduce a como mucho 16 términos de
+  hasta 32 caracteres, sin puntuación ni palabras vacías, priorizando los que llevan dígitos o
   mayúsculas (p-tau217, APOE4, MMSE), que son los que el vector peor distingue.
 - La unión de candidatos se carga por lotes de 64 **sin el vector**; ahí se aplican los filtros
   residuales.
@@ -305,8 +324,9 @@ Reemplaza a la fusión que hacía Qdrant en el servidor.
 - **Cachés de determinismo.** El plan de una pregunta sin historial se guarda en `planes`
   (clave: versión del prompt, modelo y pregunta normalizada; caduca a los 30 días), los
   vectores de las consultas en `consultasEmbebidas` y los veredictos del calificador en
-  `calificaciones` (clave: modelo, consulta, evidencia necesaria y fragmento; solo se guardan
-  los de una calificación que sí se aplicó). Son lo que hace que la misma pregunta recupere la
+  `calificaciones` (clave: versión del prompt del calificador, modelo, consulta, evidencia
+  necesaria y fragmento; solo se guardan los de una calificación que sí se aplicó). El plan
+  cacheado guarda también `preguntaEn` y las `variantes` de la pregunta. Son lo que hace que la misma pregunta recupere la
   misma evidencia. Se leen con `.first()`, nunca `.unique()`: dos filas con la misma clave son
   inofensivas. Contadores: `embeddings_en_cache`, `calificaciones_en_cache`.
 - Un filtro con un valor que no existe devuelve cero. En las búsquedas extra del modelo, si
@@ -315,20 +335,28 @@ Reemplaza a la fusión que hacía Qdrant en el servidor.
 
 ### 8.3 Ejecución de un punto (`agente/evidencia.ts`)
 
-1. `recuperar`: híbrida de `query` y, si difiere, de `query_en`; las listas se fusionan por
-   RRF. Si una de las dos falla se sigue con la otra; la `recuperacion` del punto es la más
-   degradada de las que respondieron. Si fallan las dos, el punto queda en `error`.
+1. `recuperar`: híbrida de `query`, de `query_en` si difiere y de cada `variante` que difiera
+   de las anteriores; las listas se fusionan por RRF. Si alguna falla se sigue con las otras; la
+   `recuperacion` del punto es la más degradada de las que respondieron. Si fallan todas, el
+   punto queda en `error`.
 2. **Poda** de secciones que nunca son evidencia: bibliografía, referencias, agradecimientos,
    financiación, conflictos de interés.
 3. **Deduplicación** por `_id` y por texto normalizado idéntico. Nunca por solape parcial: dos
-   fragmentos contiguos comparten el párrafo de solape y son dos evidencias.
+   fragmentos contiguos comparten el párrafo de solape y son dos evidencias. Los 20 primeros de
+   esta lista quedan como `candidatos` del punto (fichero, página, páginas, sección y
+   localizador) y viajan a `metrics.meta.recuperacion`: es lo que permite distinguir después un
+   fallo de recuperación (la evidencia esperada no estaba entre los candidatos) de uno de
+   calificación (estaba y no llegó a las fuentes).
 4. **Preselección** de `candidatosPorPunto` con cuota mínima de 3 por documento
    (`CUOTA_CANDIDATOS`), para que un paper largo no expulse al resto antes de que nadie los
    lea. Las tablas nunca se desplazan. Los documentos de los que salen los candidatos quedan
    en `documentosRevisados` (máximo 5).
 5. **Calificador** (`agente/calificador.ts`): modelo pequeño, razonamiento
    `RERANK_REASONING_EFFORT`, juicio **por fragmento y sobre el texto completo**, con cabecera
-   fuente, sección, tipo y cita. Grados: `directa`, `parcial`, `no`. Lotes de 20 en paralelo;
+   fuente, sección, tipo, cita y, si lo hay, la frase de contexto del fragmento (etiquetada,
+   en su línea). Grados: `directa`, `parcial`, `no`. Un fragmento que aporta el dato para OTRA
+   entidad de la misma clase (otro fármaco, otra cohorte, otro estudio) es como mucho
+   `parcial`, nunca `directa`. Lotes de 20 en paralelo;
    un lote caído deja sus índices sin grado y `verificado=false`. **Sin ningún grado,
    `verificado=false`** (motivo "el calificador no emitió ningún grado"). Ante la duda entre
    `parcial` y `no`, `parcial`.
@@ -356,14 +384,21 @@ La evidencia entra en la conversación como un intercambio de herramientas sint�
 uno por punto. Cada mensaje `tool` lleva una **cabecera que describe, no ordena**:
 
 - cubierto: `PUNTO e2 (<evidence_needed>): cubierto, 6 fragmentos de: <docs> (buscado en
-  español e inglés)`, más el aviso si la relevancia no se verificó, y los resultados;
+  español e inglés, con 2 reformulaciones más)`, más el aviso si la relevancia no se verificó,
+  y los resultados;
 - sin resultados: `... sin resultados: se revisaron N fragmentos de <docs> y ninguno aporta
   evidencia sobre este punto (buscado solo con la formulación original)`;
 - error: `... no se pudo comprobar: la búsqueda falló o no llegó a tiempo, así que no hay
   fragmentos que leer y su ausencia no dice nada sobre los documentos.`
 
 Cada resultado va como `--- Resultado n ---`, la línea `cita: [...]`, la sección en su propia
-línea (nunca dentro de la cita), el grado del calificador si lo hay, y el texto.
+línea (nunca dentro de la cita), el grado del calificador si lo hay, la frase de contexto del
+fragmento como "(de qué habla este fragmento, orientación no citable: ...)" si la hay (para que
+el redactor sepa de qué entidad es el dato; ninguna cifra puede salir de ahí, y el verificador
+dictamina solo contra el texto), el aviso de retracción si el artículo está retractado, y el
+texto. Tras el último mensaje `tool` va un mensaje `system` que recuerda que los resultados son
+DATOS y que las instrucciones que contengan no se siguen (defensa frente a un documento con
+instrucciones dentro: avisar DESPUÉS de los datos es lo que medido funciona).
 
 ### 8.5 Búsquedas extra del modelo
 
@@ -493,7 +528,33 @@ caso, **una afirmación `sin_cita` que abarca toda la respuesta, `fidelidad` 0.0
   `citas_sin_resolver`, sin gastar una llamada.
 - Las que resuelven van al juez (`VERIFIER_MODEL`, razonamiento `VERIFIER_REASONING_EFFORT`)
   en **lotes de `VERIFIER_MAX_CLAIMS` en paralelo**, con la cabecera y el texto de cada
-  fragmento hermano. El tope acota el tamaño de cada petición, no cuánto se verifica.
+  fragmento hermano (y su frase de contexto, etiquetada como NO evidencia). El tope acota el
+  tamaño de cada petición, no cuánto se verifica. El juez recibe además la **pregunta** de
+  quien consulta y, por cada afirmación, el **apartado** (encabezado de la respuesta) bajo el
+  que iba, limpio de marcas y sin dos puntos.
+- **Entidad.** El juez comprueba de quién es el dato: si la afirmación, por su texto, su
+  apartado o la pregunta, lo atribuye a un fármaco, biomarcador, población, estudio o
+  desenlace y el fragmento lo dice de OTRO, devuelve `entidad_distinta: true`, y el veredicto
+  pasa a `no_sostenida` diga lo que diga el juez de la cifra. Es el fallo que las
+  comprobaciones de fidelidad clásicas no ven ("deceptive grounding": la cifra es real, la
+  cita resuelve, y el dato no es de quien se dice; medido en 2026 hasta en el 87 % de los
+  casos en modelos clínicos). Bloquea la publicación como cualquier `no_sostenida`, la crítica
+  al redactor pide atribuir explícitamente a la otra entidad o quitar, y el frontend lo pinta
+  como "dato de otra entidad". Contador `entidad_distinta`. Cuando la afirmación misma nombra a
+  la otra entidad, la atribución es correcta.
+- Un veredicto se reutiliza entre rondas de corrección si la frase, la cita y el apartado son
+  los mismos (`claveDeAfirmacion`): mover una frase a otro apartado la vuelve a juzgar.
+- **Cifras e identificadores, deterministas.** Antes del juez se extraen las cifras de cada
+  afirmación (sin las de sus citas), se normalizan (coma o punto decimal, separadores de
+  miles, punto medio; "1.234" admite las dos lecturas) y se comprueba si aparecen en los
+  fragmentos citados con límites de número: las que no, van al juez como pista ("cifras que NO
+  aparecen literalmente: 30") y él decide si es un redondeo legítimo. Los **identificadores**
+  (NCT, DOI, variantes rs, PMID) no admiten redondeo: uno que la frase nombra y ningún fragmento
+  citado contiene es `no_sostenida` sin llamar al juez (contador
+  `identificadores_sin_respaldo`).
+- El contexto del fragmento (escrito por un modelo) puede hacer sospechar de otra entidad pero
+  no basta para condenar: `entidad_distinta` exige que la otra entidad conste en el texto o en
+  la cabecera del fragmento; si solo la nombra el contexto, el veredicto es `parcial`.
 - Un lote caído deja sus afirmaciones `sin_verificar` y la `nota` lo dice; solo si caen
   **todos** queda `ok=false` sin veredictos.
 - `fidelidad` = sostenidas / juzgadas por el juez; `null` si no se juzgó ninguna.
@@ -518,6 +579,12 @@ tenían evidencia. Sin mapa se conserva la lectura antigua, todo o nada.
 Un fragmento traído por dos puntos cubre los dos: se acepta antes que un falso "sin cubrir".
 
 ## 11. Barrera de fidelidad (`agente/revisor.ts`)
+
+El borrador llega al redactor de la corrección como texto de OTRO redactor, dentro del mensaje
+del usuario y entre delimitadores, no como un turno `assistant` propio: medido en 2026 sobre
+doce combinaciones de modelo y dominio, un modelo corrige mucho más un error que lee como ajeno
+que uno que reconoce como suyo (entre 23 y 93 puntos más de correcciones explícitas). La
+crítica va detrás, en el mismo mensaje.
 
 Se ejecuta si `ENABLE_ANSWER_VERIFICATION` y `ENABLE_PRE_RESPONSE_REVIEW` están activas. Si solo
 la primera, el borrador se publica y se anota; si ninguna, se publica sin informe.
@@ -594,13 +661,15 @@ reabrir una conversación.
 
 Claves en snake_case dentro de estos objetos. Tipos en `frontend/src/types.ts`.
 
-**`plan[]`**: `{id, query, query_en, evidence_needed}`. `e0` no se muestra como fila; con plan
-`[e0]` (modo normal) no hay vista por puntos.
+**`plan[]`**: `{id, query, query_en, evidence_needed, variantes?}` (las reformulaciones, solo
+cuando las hay). `e0` no se muestra como fila; con plan `[e0]` (modo normal) no hay vista por
+puntos.
 
 **`sources[]`** (todo lo entregado al modelo, orden estable):
 `source_file, page, project_id, document_id, section, language, document_type, source_pages,
 snippet` (240 caracteres), `score, chunk_type, title, citation, doi, locator, fuente,
-plan_items[], grado` (`directa` | `parcial` | vacío = sin calificar, que no significa "no").
+plan_items[], grado` (`directa` | `parcial` | vacío = sin calificar, que no significa "no"),
+`retraccion` (`retractado` | `retirado` | `preocupacion` | vacío).
 
 **`hops[]`**: `n, query, origen` (`plan` | `extra`), `plan_item` (id del plan o vacío),
 `evidence_needed, resultados, nuevos?, documentos[]` (nombres únicos), `estado` (`cubierto` |
@@ -613,7 +682,7 @@ extra se inserta **antes** de buscar como marcador (`recuperacion: "error"`, `re
 de ese punto. El inventario aparece como hop extra con `query: "inventario de documentos"`.
 
 **`verificacion`**: `afirmaciones[]` (`texto, cita, veredicto, motivo, fragmento_id,
-fragmentos[]`), `evidencia_sin_cubrir[]`, `cobertura[]` (`id, evidence_needed, estado,
+fragmentos[]`, y opcionales `entidad_distinta` y `encabezado`), `evidencia_sin_cubrir[]`, `cobertura[]` (`id, evidence_needed, estado,
 n_fragmentos, documentos[], afirmaciones[]` con índices en `afirmaciones`),
 `citas_sin_resolver[]`, `fidelidad` (número o `null`), `ok`, `nota`.
 
@@ -640,17 +709,21 @@ counters {...}, meta {...}
 ```
 
 Componentes: `clasificador`, `planner`, `embeddings`, `grader` (calificador), `agente`,
-`verificador`, `revisor`. La ingesta guarda su propia telemetría (componente `embeddings`) en
-`ingestionRuns.stats.telemetria`.
+`verificador`, `revisor`. La ingesta guarda su propia telemetría (componentes `embeddings` y
+`contexto`) en `ingestionRuns.stats.telemetria`.
 
 Contadores: `hops_plan`, `puntos_sin_resultados`, `hops_extra`, `hops_con_error`,
 `llamadas_repetidas`, `forced_final`, `razonamiento_rechazado`, `respuestas_revisadas`,
 `abstenciones_seguras`, `puntos_no_usados`, `rondas_sin_usage`, `recuperacion_<modo>`,
-`recuperacion_error`, `lado_denso_caido`, `lado_lexico_caido`, `carga_fragmentos_caida`.
+`recuperacion_error`, `lado_denso_caido`, `lado_lexico_caido`, `carga_fragmentos_caida`,
+`entidad_distinta`, `veredictos_reutilizados`.
 
-`meta`: `prompt_version`, `model`, `modo`, `clase`, `huella_evidencia`, `verificacion`
-(recuento por veredicto, `citas_sin_resolver`, `fidelidad`, `ok`, `revision_previa`,
-`revisiones`, `abstencion_segura`, `cobertura`) y, solo cuando hubo abstención segura,
+`meta`: `prompt_version`, `model`, `modo`, `clase`, `huella_evidencia`, `recuperacion` (por
+punto del plan y por búsqueda extra `extra:<n>`, los hasta 20 candidatos fusionados antes del
+calificador como `{f, p, sp?, sec?, loc}`: fichero, página, páginas, sección y localizador),
+`verificacion` (recuento por veredicto incluido `entidad_distinta`, `citas_sin_resolver`,
+`fidelidad`, `ok`, `revision_previa`, `revisiones`, `abstencion_segura`, `cobertura`) y, solo
+cuando hubo abstención segura,
 `barrera` (`motivo` e `informe_borrador` con las afirmaciones del borrador rechazado, sus
 veredictos, `citas_sin_resolver`, `fidelidad`, `ok`, `nota` y `cobertura`).
 
@@ -680,7 +753,9 @@ upload_limit_mb}}`. `index` sale de `documents` en `ready`; `activity` recorre `
    legible, error (distinguiendo "imagen sin texto" de "el servicio de lectura falló, vuelve a
    intentarlo"). No hay tope de fragmentos por documento: si tarda, se ve el avance.
 3. Los fragmentos se encolan en `fragmentosPendientes` y una cadena de acciones `embeber` los
-   embebe en lotes de 96 (tres lotes en paralelo) y escribe cada lote en mutaciones de como
+   contextualiza y embebe: por cada grupo de la cola, primero un modelo pequeño escribe la
+   **frase de contexto** de cada fragmento (ver más abajo), y después se embebe `contexto +
+   texto` en lotes de 96 (tres lotes en paralelo) y se escribe cada lote en mutaciones de como
    mucho 32 fragmentos (un fragmento lleva 3072 números y los argumentos de una mutación desde
    Node tienen un tope de 5 MiB). Cada acción trabaja unos 7 minutos y pasa el relevo a la
    siguiente con el cursor, así que un documento de cualquier tamaño termina; el avance (fase
@@ -689,12 +764,54 @@ upload_limit_mb}}`. `index` sale de `documents` en `ready`; `activity` recorre `
 4. Solo después de escribir la versión nueva se retira la anterior. Un fallo de embeddings no
    deja al documento sin versión consultable.
 5. Éxito: `ready` con `pages`, `chunks`, `titulo`, `citation`, `doi`, `language`,
-   `documentType` y, si algo quedó sin leer, `avisos` (`{sinLeer, omitidas, recortados,
-   motivo}`: páginas o imágenes cuyo OCR falló, imágenes omitidas por el tope, fragmentos
-   recortados); la corrida en `ingestionRuns` como `completed` con `stats`. Un documento con
+   `documentType`, `indiceVersion` (la receta con la que se escribió el índice) y, si algo quedó
+   sin leer, `avisos` (`{sinLeer, omitidas, recortados, sinContexto, motivo}`: páginas o
+   imágenes cuyo OCR falló, imágenes omitidas por el tope, fragmentos recortados, fragmentos
+   sin su frase de contexto); la corrida en `ingestionRuns` como `completed` con `stats`
+   (incluido `contextos_fallidos`). Un documento con
    avisos se consulta igual, pero la ficha lo dice en ámbar, enseña el motivo y ofrece
    reintentar. Fallo: `failed` con el mensaje (500 caracteres), sin fragmentos a medias de la
    versión nueva, y la corrida `failed`.
+
+**Recuperación contextual** (`ingesta/contexto.ts`). Por cada fragmento, un modelo pequeño
+(`CONTEXT_MODEL`, por defecto el del calificador; razonamiento `CONTEXT_REASONING_EFFORT`,
+`low`) escribe una o dos frases que lo sitúan en su documento: de qué estudio, población,
+intervención, biomarcador o tabla habla, a qué se refieren sus cifras y pronombres, en qué
+sección está, y las siglas y variantes de escritura de sus términos ("Aβ42 (Abeta42, amyloid
+beta 42)"). Se contextualiza por grupos de 12 fragmentos consecutivos por llamada, con la ficha
+del documento (título, cita, secciones, comienzo) delante, y las llamadas del grupo de embebido
+van en paralelo. La frase se guarda en `chunks.contexto`, entra en el embedding (contexto +
+texto) y tiene su propio índice de búsqueda `porContexto`; el texto que lee el redactor y contra
+el que dictamina el verificador sigue siendo `text`: una frase generada por un modelo no puede
+sostener una cifra. Medición publicada de la técnica (Anthropic, 2024): 35 % menos fallos de
+recuperación en los 20 primeros, 49 % con el contexto también en el índice léxico, 67 % con
+reranking detrás. Si el modelo no puede contextualizar un grupo, sus fragmentos se indexan sin
+contexto (como antes de existir), se cuentan en `avisos.sinContexto`, la ficha lo dice
+("N fragmentos se buscarán con menos precisión") y reindexar lo reintenta.
+`ENABLE_CHUNK_CONTEXT=false` lo apaga.
+
+`VERSION_INDICE` (`ingesta/contexto.ts`) marca la receta del índice; `marcarListo` la escribe
+en `documents.indiceVersion`. Cuando la receta cambia, `npx convex run migraciones:reindexarTodo`
+recorre los documentos listos con otra versión y con fichero y agenda su ingesta de dos en dos
+(la ingesta con contexto son cientos de llamadas por documento grande), esperando entre pasos;
+`migraciones:estadoDelIndice` dice cuántos quedan. Cada documento enseña su barra de avance en
+la biblioteca mientras se reindexa.
+
+Al nacer, cada fragmento se limpia de lo que el índice de texto no sabe leer (`normalizarTexto`
+en `chunking.ts`): ligaduras tipográficas ("ﬁ" en "ﬁnding"), guiones blandos y espacios duros.
+No se aplica NFKC entero: convertiría "10²" en "102".
+
+**Retracciones** (`convex/retracciones.ts`). Un artículo con DOI se comprueba en Crossref al
+terminar de indexarse y, todos, una vez por semana (cron `comprobar retracciones`): si su
+revista lo retractó, lo retiró o publicó una expresión de preocupación (`updated-by` en la API
+pública de Crossref, que además incorpora la base de Retraction Watch), queda en
+`documents.retraccion` (`tipo`, `fecha`, `avisoDoi`). Nada se borra: la médica puede querer
+saber qué decía. Lo que cambia es que cada fragmento suyo llega al redactor y al calificador con
+el aviso ("AVISO: este artículo fue RETRACTADO..."), el prompt prohíbe usarlo como evidencia de
+un hecho (regla 15) y obliga a decir que está retractado si se menciona, la fuente se pinta en
+rojo en el panel de fuentes (`sources[].retraccion`) y la ficha del documento lleva la insignia
+"Artículo retractado". La petición a Crossref no lleva ningún correo: se identifica la
+aplicación en el User-Agent. Un fallo de red no toca la marca; una comprobación limpia la borra.
 
 Parseo por formato (los comentarios de cada módulo documentan los fallos medidos que motivaron
 cada regla):
@@ -714,8 +831,13 @@ cada regla):
   negrita que el texto). Título, primer autor, año y DOI salen de la primera página con
   heurísticas; `citation` solo se rellena con autor y año, nunca con el título. La
   bibliografía se descarta por defecto; también las marcas de descarga y las cabeceras y pies
-  que se repiten en el borde de las páginas. `page` es la primera página del fragmento,
-  `source_pages` todas.
+  que se repiten en el borde de las páginas. **Un fragmento nunca cruza de página**: se
+  empaqueta por tramos de sección y de página, y el solape no arrastra la página anterior.
+  Medido el 8 sep 2026 con pruebas externas: con fragmentos que cruzaban dos o tres páginas
+  y la cita por la primera, el asistente citaba "pág. 32" para un dato de la 33, y el
+  verificador le obligaba a citarla así. La única excepción es un párrafo cortado por el salto
+  de página, que lleva las dos en `source_pages` y se cita por la primera, donde empieza.
+  `page` es la página del fragmento, `source_pages` todas las que toca.
 - **DOCX** (`ingesta/docx.ts`): se recorre el XML del paquete en orden de documento; los
   párrafos se agrupan por sección sin mezclar dos secciones en un fragmento; cada tabla es un
   fragmento `table` numerado que hereda la sección y el rótulo que la precede, con celdas
@@ -787,8 +909,15 @@ desde `documents` en `ready`. Conteo exacto, cero LLM.
   panel de debajo.
 - El foco vuelve al cuadro de texto al terminar cada respuesta si estaba suelto. Un fallo al
   guardar una valoración se dice al lado de los pulgares.
-- Ajustes (slide-over, bottom sheet en móvil): Usuarios y Sistema (admin), Mi cuenta (todos;
-  sin cambio de contraseña en esta versión).
+- Ajustes (slide-over, bottom sheet en móvil): Mi cuenta y Calidad (todos), Usuarios y Sistema
+  (admin). Sin cambio de contraseña en esta versión.
+- Calidad (`components/CalidadTab.tsx`, `lib/calidad.ts`): proponer preguntas de control
+  (`evaluacion.datos.generar`, con el avance de la generación), revisar las propuestas
+  (pregunta, respuesta esperada editable, documentos esperados, categoría en palabras;
+  "Correcta" o "Descartar"), "Evaluar ahora" con el avance de la corrida, e historial de
+  corridas con sus cifras y, por corrida, cada pregunta con "Pasa"/"Falla" y los fallos en
+  frases. Nada de claves, identificadores ni patrones del evaluador en pantalla (hay un test
+  que lo comprueba).
 - Errores por código (`ConvexError`), nunca por comparación de cadenas. `acceso_revocado` y
   `no_autenticado` cierran la sesión y explican el motivo.
 - Español, tema claro y oscuro, sin librerías de UI pesadas, PWA instalable.
@@ -798,8 +927,37 @@ desde `documents` en `ready`. Conteo exacto, cero LLM.
 Política: la evaluación offline es determinista (cobertura de evidencias esperadas, resolución
 de citas, conceptos cubiertos por los hops, contenido obligatorio y prohibido, abstención) y
 lee la fidelidad que midió el verificador en runtime en vez de introducir un juez propio. Los
-casos los escribe y revisa el equipo investigador; el gate de release exige cero fallos
-críticos.
+casos los propone un modelo a partir del corpus y los revisa quien lo conoce (la médica, en
+Ajustes > Calidad); el gate de release exige cero fallos críticos.
+
+**Evaluación continua** (`convex/evaluacion/`). Por cada persona y sobre SU corpus:
+
+- `generar.ts` muestrea fragmentos del corpus (sin bibliografía ni agradecimientos) y pide al
+  modelo grande casos de cinco categorías: `single_hop` (un dato de un fragmento), `multi_hop`
+  (dos documentos con una entidad o tema común), `tabla` (fragmentos `table`), `abstencion`
+  (algo plausible que NO está: se comprueba con la búsqueda léxica que sus términos clave no
+  devuelven nada) y `entidad` (la trampa de atribución: dado un fragmento sobre Y, preguntar por
+  una X de la misma clase que no está en el corpus, con abstención esperada). Cada caso se
+  valida con `puntuar.validarCaso` y queda `propuesto` en `evaluacionCasos` con una
+  `respuestaEsperada` en llano y una `clave` estable (`<categoria>-<nnn>`). El avance va en
+  `evaluacionGeneraciones`.
+- `datos.ts` son las funciones públicas de la pestaña (`casos`, `revisar`, `editarRespuesta`,
+  `borrarCaso`, `generar`, `generacionActual`, `evaluarAhora`, `corridas`, `resultadosDe`),
+  todas acotadas al propietario.
+- `correr.ts` responde los casos `aprobado` con el agente REAL: un caso (y una repetición) por
+  acción encadenada, en una conversación **oculta** (`sessions.oculta`) que no se lista, no
+  suma a los contadores y se borra al puntuarla; el turno se sondea hasta su estado final o
+  570 s; un turno en `error` puntúa como fallo y la corrida sigue. El resultado por caso va a
+  `evaluacionResultados` (puntuación agregada con `agregarCorridas` y las corridas crudas
+  recortadas) y el `Resumen` a `evaluacionCorridas`. Cron semanal (`repartir`: una corrida
+  `programada` por persona con al menos 5 casos aprobados y sin corrida en 6 días) y
+  `cerrarColgadas` cada 30 minutos.
+- Métricas de recuperación (`puntuar.ts`), a partir de `metrics.meta.recuperacion`:
+  `retrieval_mrr`, `retrieval_hit_at_5`, `retrieval_hit_at_20`, `context_precision`,
+  `entity_misattributions`, y por evidencia esperada no encontrada la etapa del fallo
+  (`retrieval`: no estaba entre los candidatos; `grading`: estaba y no llegó a las fuentes;
+  `generation`: llegó a las fuentes y la respuesta no la citó). El resumen agrega medias y
+  `failures_by_stage`. Sin `meta.recuperacion` (mensajes antiguos) quedan `null`.
 
 Estado: portado a Convex. La puntuación determinista es `convex/evaluacion/puntuar.ts`
 (cobertura de evidencias, resolución de citas, patrones de búsqueda, contenido obligatorio y

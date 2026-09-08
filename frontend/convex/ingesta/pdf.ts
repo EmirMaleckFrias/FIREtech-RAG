@@ -1081,12 +1081,31 @@ export async function parsearPdf(
     avisos.motivo = avisos.motivo ?? "alguna imagen del PDF tiene un formato que no se pudo leer";
   }
 
-  // Se empaqueta por tramos de sección (ver agruparPorSeccion), con el solape
-  // de empaquetar, y cada chunk lleva delante el título de la obra y su
-  // sección: un fragmento de Resultados tiene que decir que lo es también en
-  // el texto que se embebe, no solo en el payload.
+  // Se empaqueta por tramos de sección Y DE PÁGINA, con el solape de
+  // empaquetar dentro de cada tramo, y cada chunk lleva delante el título de la
+  // obra y su sección: un fragmento de Resultados tiene que decir que lo es
+  // también en el texto que se embebe, no solo en el payload.
+  //
+  // Por página, y no solo por sección, por un fallo medido el 8 sep 2026 con
+  // pruebas externas sobre el despliegue: el asistente citaba "pág. 32" para
+  // un dato que estaba en la 33. La cita de un fragmento lleva su PRIMERA
+  // página, y un fragmento de 400 palabras cruzaba dos o tres páginas (más el
+  // solape, que le pegaba delante los últimos párrafos de la página anterior):
+  // todo dato de las páginas siguientes se citaba con la primera, y el
+  // verificador obligaba a citarla así porque ninguna otra resolvía. Quien
+  // abre el PDF en la página citada y no encuentra el dato deja de confiar en
+  // todas las citas. Ahora un fragmento nunca cruza de página, salvo el único
+  // caso en que el propio párrafo lo hace (una frase cortada por el salto de
+  // página): ese lleva las dos páginas en `sourcePages` y se cita por la
+  // primera, que es donde empieza. La clave de agrupación es "sección|página"
+  // y se deshace al escribir el fragmento.
+  const SEPARADOR_TRAMO = " ||pág|| ";
   const chunks: ChunkParseado[] = [];
-  for (const [sec, grupo] of agruparPorSeccion(paras)) {
+  const porSeccionYPagina = paras.map(
+    ([t, pgs, s]) => [t, pgs, `${s}${SEPARADOR_TRAMO}${pgs[0] ?? 0}`] as [string, number[], string],
+  );
+  for (const [tramo, grupo] of agruparPorSeccion(porSeccionYPagina)) {
+    const sec = tramo.split(SEPARADOR_TRAMO)[0];
     for (const paquete of empaquetar(grupo)) {
       const cuerpoChunk = paquete.map(([t]) => t).join("\n\n").trim();
       if (!cuerpoChunk) continue;

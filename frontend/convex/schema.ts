@@ -71,6 +71,11 @@ export const avisosIngesta = v.object({
   sinLeer: v.number(),
   omitidas: v.number(),
   recortados: v.number(),
+  // Fragmentos indexados SIN su frase de contexto (ingesta/contexto.ts) porque
+  // el modelo no la pudo generar: se buscan igual que antes de existir el
+  // contexto, o sea algo peor. Opcional porque los avisos anteriores no lo
+  // llevan.
+  sinContexto: v.optional(v.number()),
   motivo: v.optional(v.string()),
 });
 
@@ -133,6 +138,10 @@ export default defineSchema({
     titulo: v.string(),
     userId: v.id("users"),
     creadoEn: v.number(),
+    // Conversación creada por la evaluación de calidad (evaluacion/correr.ts):
+    // el agente la responde como cualquier otra, pero no se lista en la barra
+    // lateral ni cuenta como pregunta de la persona, y se borra al puntuarla.
+    oculta: v.optional(v.boolean()),
   }).index("porUsuarioYCreacion", ["userId", "creadoEn"]),
 
   messages: defineTable({
@@ -260,6 +269,29 @@ export default defineSchema({
     // cuándo, con lo que el cliente estima lo que falta. Se limpia al
     // terminar. No hay tope de tamaño por documento: si tarda, se ve.
     progreso: v.optional(progresoIngesta),
+    // Con qué receta de índice se escribieron sus fragmentos (ver
+    // `VERSION_INDICE` en ingesta/contexto.ts). Cuando la receta cambia (por
+    // ejemplo, al añadir la frase de contexto por fragmento), los documentos
+    // con otra versión se reindexan en cadena (migraciones.reindexarTodo) sin
+    // que nadie tenga que volver a subir nada. Ausente = anterior a la marca.
+    indiceVersion: v.optional(v.string()),
+    // Lo que dice Crossref del artículo (convex/retracciones.ts): si su
+    // revista lo retractó, lo retiró o publicó una expresión de preocupación.
+    // Se comprueba al indexar un documento con DOI y una vez por semana. Un
+    // artículo retractado sigue en el índice (la médica puede querer saber
+    // qué decía), pero cada fragmento suyo llega al modelo con el aviso, la
+    // fuente se pinta en rojo y la ficha lo dice.
+    retraccion: v.optional(
+      v.object({
+        // "retractado" | "retirado" | "preocupacion"
+        tipo: v.string(),
+        fecha: v.optional(v.string()),
+        // DOI del aviso de la revista, para enlazarlo.
+        avisoDoi: v.optional(v.string()),
+      }),
+    ),
+    // Cuándo se preguntó a Crossref por última vez (haya o no retracción).
+    retraccionComprobadaEn: v.optional(v.number()),
   })
     // El nombre de archivo identifica el documento DENTRO DEL CORPUS DE UNA
     // PERSONA, no del despliegue: dos usuarias pueden tener cada una su
@@ -466,6 +498,18 @@ export default defineSchema({
   // Los fragmentos indexados: lo que era la colección de Qdrant.
   chunks: defineTable({
     text: v.string(),
+    // Una o dos frases, escritas por un modelo al indexar, que sitúan el
+    // fragmento en su documento: de qué estudio, población, intervención o
+    // biomarcador habla, en qué sección está y a qué se refieren sus cifras
+    // (ver ingesta/contexto.ts). Es la "recuperación contextual": un fragmento
+    // de Resultados que dice "the mean was 542 pg/mL" no menciona ni la
+    // cohorte ni el biomarcador, y sin este contexto solo lo encuentra quien
+    // ya sabe la cifra. El embedding se calcula sobre contexto + texto, y el
+    // lado léxico lo consulta en su propio índice (`porContexto`). NO es
+    // evidencia: el modelo que redacta y el verificador siguen leyendo `text`.
+    // Ausente en los fragmentos anteriores a la marca y en los que el modelo
+    // no pudo contextualizar (avisos.sinContexto).
+    contexto: v.optional(v.string()),
     // 3072 de text-embedding-3-large. El índice vectorial admite hasta 4096.
     embedding: v.array(v.float64()),
     sourceFile: v.string(),
@@ -524,6 +568,27 @@ export default defineSchema({
         "chunkType",
       ],
     })
+    // El lado léxico del CONTEXTO (recuperación contextual, ver `contexto`).
+    // Un segundo índice y no un campo "texto + contexto" indexado en el
+    // primero, por dos motivos: `text` sigue siendo lo que lee el modelo y lo
+    // que se cita, sin una frase generada dentro; y los fragmentos anteriores
+    // a la marca, que no tienen `contexto`, simplemente no están en este
+    // índice y siguen encontrándose por el otro, así que no hay ventana en la
+    // que la búsqueda léxica se quede sin ellos. Las dos listas léxicas se
+    // fusionan por RRF antes de fusionarse con el denso (search/hybrid.ts).
+    .searchIndex("porContexto", {
+      searchField: "contexto",
+      filterFields: [
+        "propietario",
+        "projectId",
+        "documentId",
+        "documentVersion",
+        "documentType",
+        "language",
+        "sourceFile",
+        "chunkType",
+      ],
+    })
     .index("porDocumento", ["documentRef"])
     .index("porPropietarioYArchivo", ["propietario", "sourceFile"]),
 
@@ -545,6 +610,10 @@ export default defineSchema({
     clase: v.optional(v.string()),
     items: v.any(),
     preguntaEn: v.string(),
+    // Reformulaciones de la pregunta entera (planner `variantes_pregunta`),
+    // para buscar el ancla e0 también con sinónimos y siglas. Opcional porque
+    // las entradas anteriores a la marca no lo llevan.
+    variantes: v.optional(v.array(v.string())),
     creadoEn: v.number(),
     usos: v.number(),
   }).index("porClave", ["clave"]),
@@ -610,6 +679,92 @@ export default defineSchema({
     indice: v.number(),
     chunk: v.any(),
   }).index("porRun", ["runId", "indice"]),
+
+  // ---------------------------------------------------------------------
+  // Evaluación continua de la calidad (convex/evaluacion/). Preguntas de
+  // control sobre el corpus de CADA persona, propuestas por un modelo y
+  // revisadas por ella en Ajustes > Calidad; una corrida periódica las
+  // responde con el agente real y las puntúa con la misma lógica determinista
+  // del benchmark (evaluacion/puntuar.ts). Existe porque un RAG que puntúa
+  // bien en la demo se degrada en silencio con el corpus y el modelo, y sin
+  // medir de forma periódica nadie se entera hasta que la usuaria deja de
+  // confiar en él. Todo lleva `propietario`: cada corpus tiene sus preguntas.
+  // ---------------------------------------------------------------------
+  evaluacionCasos: defineTable({
+    propietario: v.id("users"),
+    // Identificador estable del caso dentro del corpus ("single_hop-003").
+    clave: v.string(),
+    pregunta: v.string(),
+    modo: v.union(v.literal("normal"), v.literal("extendido")),
+    // single_hop | multi_hop | tabla | abstencion | entidad.
+    categoria: v.string(),
+    critico: v.boolean(),
+    // Lo que debería decir la respuesta, en llano, para que la revisora lo
+    // juzgue sin leer patrones.
+    respuestaEsperada: v.string(),
+    // El caso completo en el formato de `puntuar.validarCaso` (evidencias
+    // esperadas con fichero y páginas, patrones obligatorios y prohibidos,
+    // abstención). Es lo que se puntúa.
+    definicion: v.any(),
+    estado: v.union(v.literal("propuesto"), v.literal("aprobado"), v.literal("descartado")),
+    origen: v.union(v.literal("generado"), v.literal("manual")),
+    creadoEn: v.number(),
+    revisadoEn: v.optional(v.number()),
+  })
+    .index("porPropietarioYEstado", ["propietario", "estado"])
+    .index("porPropietarioYClave", ["propietario", "clave"]),
+
+  // Una generación de casos en marcha o terminada, para enseñar el avance.
+  evaluacionGeneraciones: defineTable({
+    propietario: v.id("users"),
+    empezadoEn: v.number(),
+    terminadoEn: v.optional(v.number()),
+    estado: v.union(v.literal("running"), v.literal("ok"), v.literal("error")),
+    objetivo: v.number(),
+    generados: v.number(),
+    descartados: v.number(),
+    // Qué está haciendo ahora mismo, en llano ("Leyendo guia.pdf").
+    paso: v.optional(v.string()),
+    error: v.optional(v.string()),
+  }).index("porPropietario", ["propietario"]),
+
+  // Una corrida de la evaluación: todos los casos aprobados del propietario,
+  // respondidos por el agente real y puntuados. `resumen` es el `Resumen` de
+  // puntuar.ts. Las corridas programadas las agenda el cron semanal.
+  evaluacionCorridas: defineTable({
+    propietario: v.id("users"),
+    empezadoEn: v.number(),
+    terminadoEn: v.optional(v.number()),
+    estado: v.union(v.literal("running"), v.literal("ok"), v.literal("error")),
+    disparo: v.union(v.literal("manual"), v.literal("programada")),
+    casosTotal: v.number(),
+    casosHechos: v.number(),
+    casoActual: v.optional(v.string()),
+    repeticiones: v.number(),
+    resumen: v.optional(v.any()),
+    error: v.optional(v.string()),
+    versionPrompt: v.string(),
+    modelo: v.string(),
+  }).index("porPropietarioYEmpezado", ["propietario", "empezadoEn"]),
+
+  // El resultado de un caso dentro de una corrida: la puntuación agregada de
+  // sus repeticiones y las corridas crudas recortadas (respuesta, fuentes,
+  // fallos), para poder ver POR QUÉ falló sin conservar la conversación.
+  evaluacionResultados: defineTable({
+    corridaId: v.id("evaluacionCorridas"),
+    propietario: v.id("users"),
+    casoId: v.id("evaluacionCasos"),
+    clave: v.string(),
+    pregunta: v.string(),
+    categoria: v.string(),
+    critico: v.boolean(),
+    puntuacion: v.any(),
+    resultado: v.any(),
+    corridas: v.any(),
+    creadoEn: v.number(),
+  })
+    .index("porCorrida", ["corridaId"])
+    .index("porPropietario", ["propietario"]),
 
   ingestionRuns: defineTable({
     empezadoEn: v.number(),

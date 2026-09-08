@@ -147,6 +147,7 @@ function pasaFiltros(
 const CAMPOS_OPCIONALES = [
   "sourcePages",
   "section",
+  "contexto",
   "projectId",
   "documentId",
   "documentVersion",
@@ -169,6 +170,9 @@ export function aFragmento(doc: Doc<"chunks">): Fragmento {
     chunkType: doc.chunkType,
   };
   for (const campo of CAMPOS_OPCIONALES) {
+    // El contexto vacío es "sin contexto" (se escribe "" para que la fila
+    // esté en su índice de búsqueda, ver pipeline.aEntrada): no viaja.
+    if (campo === "contexto" && !doc.contexto) continue;
     if (doc[campo] !== undefined) Object.assign(f, { [campo]: doc[campo] });
   }
   return f;
@@ -183,10 +187,34 @@ const filtrosValidator = v.object({
 
 // --- Lado léxico -------------------------------------------------------------
 
+/** Fusión RRF de listas de ids, con orden total (empate: por id). Es la misma
+ *  fórmula que `fusionarRrf`, sobre ids en vez de fragmentos, para unir las
+ *  dos listas léxicas antes de que el llamador las fusione con el denso. */
+export function fusionarIds(listas: Id<"chunks">[][]): Id<"chunks">[] {
+  const puntuacion = new Map<Id<"chunks">, number>();
+  for (const lista of listas) {
+    lista.forEach((id, indice) => {
+      puntuacion.set(id, (puntuacion.get(id) ?? 0) + 1 / (RRF_K + indice + 1));
+    });
+  }
+  return Array.from(puntuacion.keys()).sort(
+    (a, b) => puntuacion.get(b)! - puntuacion.get(a)! || comparar(a, b),
+  );
+}
+
 /** Ids de los fragmentos que casan con los términos, en orden de relevancia
  *  (BM25 más proximidad y coincidencias exactas, según la documentación).
  *  Aquí sí se aplican TODOS los filtros, encadenando `.eq`. Devuelve solo
- *  ids: la fila completa se carga después junto con las del lado denso. */
+ *  ids: la fila completa se carga después junto con las del lado denso.
+ *
+ *  Consulta DOS índices: el del texto y el del contexto que se escribe al
+ *  indexar (recuperación contextual, ver `contexto` en schema.ts), y fusiona
+ *  las dos listas por RRF. Así un fragmento cuyo texto dice "the impaired
+ *  group" pero cuyo contexto dice "cohorte con deterioro cognitivo leve del
+ *  estudio X" se encuentra por esas palabras. Los fragmentos sin contexto
+ *  (anteriores a la marca) solo están en el primer índice y siguen saliendo
+ *  igual que antes; una lista vacía del segundo no cambia el orden del
+ *  primero. */
 export const lexica = internalQuery({
   args: {
     propietario: v.id("users"),
@@ -197,17 +225,36 @@ export const lexica = internalQuery({
   handler: async (ctx, args): Promise<Id<"chunks">[]> => {
     const activos = filtrosActivos(args.filtros);
     const n = Math.max(1, Math.min(MAX_LEXICO, Math.floor(args.n)));
-    const filas = await ctx.db
-      .query("chunks")
-      .withSearchIndex("porTexto", (q) =>
-        (Object.entries(activos) as Array<[CampoFiltro, string]>).reduce(
-          (expr, [campo, valor]) => expr.eq(campo, valor),
+    const conFiltros = <Q extends { eq: (campo: CampoFiltro, valor: string) => Q }>(q: Q): Q =>
+      (Object.entries(activos) as Array<[CampoFiltro, string]>).reduce(
+        (expr, [campo, valor]) => expr.eq(campo, valor),
+        q,
+      );
+    // El índice del contexto va protegido: si falla, el del texto sigue
+    // respondiendo solo (lo que había antes de existir el contexto), en vez
+    // de tirar el lado léxico entero. Además, el arnés de convex-test lanza al
+    // recorrer un índice de búsqueda cuyo campo falta en alguna fila, y las
+    // filas anteriores a la marca no llevan `contexto`.
+    const [porTexto, porContexto] = await Promise.all([
+      ctx.db
+        .query("chunks")
+        .withSearchIndex("porTexto", (q) =>
           // El propietario primero y siempre: aquí el índice sí encadena AND.
-          q.search("text", args.terminos).eq("propietario", args.propietario),
-        ),
-      )
-      .take(n);
-    return filas.map((fila) => fila._id);
+          conFiltros(q.search("text", args.terminos).eq("propietario", args.propietario)),
+        )
+        .take(n),
+      ctx.db
+        .query("chunks")
+        .withSearchIndex("porContexto", (q) =>
+          conFiltros(q.search("contexto", args.terminos).eq("propietario", args.propietario)),
+        )
+        .take(n)
+        .catch((exc: unknown) => {
+          console.warn("búsqueda léxica: el índice del contexto falló", String(exc).slice(0, 160));
+          return [] as Doc<"chunks">[];
+        }),
+    ]);
+    return fusionarIds([porTexto.map((f) => f._id), porContexto.map((f) => f._id)]).slice(0, n);
   },
 });
 
@@ -229,15 +276,16 @@ export const cargar = internalQuery({
     // Un fragmento cuyo documento ya no existe es un huérfano (un borrado
     // por lotes que murió a medias): no se cita. La ficha desapareció de la
     // biblioteca, así que el agente no puede seguir respondiendo con él como
-    // si estuviera. Una consulta por documento, no por fragmento.
-    const documentosVivos = new Map<string, boolean>();
-    const existe = async (id: Id<"documents">) => {
+    // si estuviera. Una consulta por documento, no por fragmento. Del
+    // documento se copia además su estado de retracción (Crossref), que el
+    // fragmento no lleva y el modelo tiene que ver.
+    const documentos = new Map<string, Doc<"documents"> | null>();
+    const documentoDe = async (id: Id<"documents">) => {
       const clave = String(id);
-      const previo = documentosVivos.get(clave);
-      if (previo !== undefined) return previo;
-      const vivo = (await ctx.db.get(id)) !== null;
-      documentosVivos.set(clave, vivo);
-      return vivo;
+      if (documentos.has(clave)) return documentos.get(clave) ?? null;
+      const doc = await ctx.db.get(id);
+      documentos.set(clave, doc);
+      return doc;
     };
     const out: Fragmento[] = [];
     for (const fila of filas) {
@@ -247,8 +295,11 @@ export const cargar = internalQuery({
       // sitio donde el aislamiento entre corpus se sostiene de verdad.
       if (fila.propietario !== args.propietario) continue;
       if (!pasaFiltros(fila, activos)) continue;
-      if (!(await existe(fila.documentRef))) continue;
-      out.push(aFragmento(fila));
+      const doc = await documentoDe(fila.documentRef);
+      if (!doc) continue;
+      const f = aFragmento(fila);
+      if (doc.retraccion) f.retraccion = doc.retraccion.tipo;
+      out.push(f);
     }
     return out;
   },

@@ -330,6 +330,29 @@ export const borrar = mutation({
     if (algunFichero || algunaCorridaNube) {
       await ctx.scheduler.runAfter(0, internal.nube.datos.borrarRastroDeUsuario, { propietario: u._id });
     }
+    // Y su evaluación de calidad (preguntas de control, generaciones,
+    // corridas y resultados), por lotes en segundo plano: los resultados
+    // guardan respuestas del asistente sobre su corpus y no deben sobrevivir
+    // a la cuenta.
+    const algunCaso = await ctx.db
+      .query("evaluacionCasos")
+      .withIndex("porPropietarioYEstado", (q) => q.eq("propietario", u._id))
+      .first();
+    const algunaGeneracion = await ctx.db
+      .query("evaluacionGeneraciones")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .first();
+    const algunaEvaluacion = await ctx.db
+      .query("evaluacionCorridas")
+      .withIndex("porPropietarioYEmpezado", (q) => q.eq("propietario", u._id))
+      .first();
+    const algunResultado = await ctx.db
+      .query("evaluacionResultados")
+      .withIndex("porPropietario", (q) => q.eq("propietario", u._id))
+      .first();
+    if (algunCaso || algunaGeneracion || algunaEvaluacion || algunResultado) {
+      await ctx.scheduler.runAfter(0, internal.evaluacion.datos.borrarRastroDeUsuario, { propietario: u._id });
+    }
 
     // 4. Convex Auth y la cuenta.
     const sesionesAuth = await ctx.db

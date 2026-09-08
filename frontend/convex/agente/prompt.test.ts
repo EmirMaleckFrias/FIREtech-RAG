@@ -129,7 +129,7 @@ describe("fuentesPayload", () => {
       [
         "source_file", "page", "project_id", "document_id", "section", "language", "document_type",
         "source_pages", "snippet", "score", "chunk_type", "title", "citation", "doi", "locator", "fuente",
-        "plan_items", "grado",
+        "plan_items", "grado", "retraccion",
       ].sort(),
     );
     expect(f).toEqual({
@@ -151,6 +151,7 @@ describe("fuentesPayload", () => {
       fuente: "Allegri et al., 2023",
       plan_items: ["e0", "e2"],
       grado: "directa",
+      retraccion: "",
     });
     for (const k of Object.keys(f)) expect(k).toMatch(/^[a-z_]+$/);
   });
@@ -259,7 +260,7 @@ describe("SYSTEM_PROMPT y herramientas", () => {
     // Dice la verdad sobre los idiomas: ya no afirma que todo se buscó en inglés.
     expect(SYSTEM_PROMPT).toContain("Cada resultado de arriba dice en qué idiomas se buscó");
     expect(SYSTEM_PROMPT).not.toMatch(/ya se buscaron también en inglés/);
-    expect(VERSION_PROMPT).toBe("v4");
+    expect(VERSION_PROMPT).toBe("v5");
   });
 
   test("la fórmula de ausencia del prompt y la abstención segura las reconoce el verificador como abstención", () => {

@@ -33,8 +33,14 @@ describe("caché del plan", () => {
     });
     const ahora = Date.now();
     expect(await t.query(internal.agente.cachePlan.leer, { clave, ahora })).toEqual({
-      items: [{ id: "e0" }], preguntaEn: "question", clase: "documental",
+      items: [{ id: "e0" }], preguntaEn: "question", clase: "documental", variantes: [],
     });
+    // Las reformulaciones de la pregunta se guardan y se leen con el plan.
+    await t.mutation(internal.agente.cachePlan.guardar, {
+      clave, pregunta: "pregunta", modelo: "m", version: "v", items: [{ id: "e0" }], preguntaEn: "question", clase: "documental",
+      variantes: ["query variant", "another"],
+    });
+    expect((await t.query(internal.agente.cachePlan.leer, { clave, ahora }))?.variantes).toEqual(["query variant", "another"]);
     expect(await t.query(internal.agente.cachePlan.leer, { clave, ahora: ahora + 31 * DIA })).toBeNull();
     expect(await t.query(internal.agente.cachePlan.leer, { clave: "otra", ahora })).toBeNull();
   });

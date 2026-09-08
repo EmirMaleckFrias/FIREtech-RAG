@@ -23,7 +23,9 @@ function normalizar(t: string): string {
 export function claveDeCalificacion(
   consulta: string, evidenceNeeded: string, fragmentoId: string, modelo: string,
 ): string {
-  return `${modelo}|${normalizar(consulta)}|${normalizar(evidenceNeeded)}|${fragmentoId}`;
+  // La versión del prompt va en la clave: un cambio del prompt del calificador
+  // invalida los veredictos guardados solo, sin vaciar la tabla a mano.
+  return `${calificador.VERSION_CALIFICADOR}|${modelo}|${normalizar(consulta)}|${normalizar(evidenceNeeded)}|${fragmentoId}`;
 }
 
 // Lista de pares y no objeto indexado por clave: ver la nota equivalente en

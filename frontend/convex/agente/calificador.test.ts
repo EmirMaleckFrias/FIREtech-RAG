@@ -102,6 +102,21 @@ describe("calificarEvidencia", () => {
     );
   });
 
+  test("el contexto escrito al indexar va en la cabecera, en su línea y etiquetado; sin él no aparece nada", async () => {
+    const conContexto: Fragmento = {
+      _id: "c0", text: "the mean was 542 in the impaired group", sourceFile: "a.pdf", page: 2, chunkType: "text", documentType: "pdf",
+      contexto: "Resultados del estudio X sobre p-tau217 en la cohorte con deterioro cognitivo leve",
+    };
+    const sinContexto: Fragmento = { _id: "c1", text: "otro", sourceFile: "a.pdf", page: 3, chunkType: "text", documentType: "pdf" };
+    espia.mockResolvedValueOnce(respuesta(grados({ 0: "directa", 1: "no" })));
+    await calificarEvidencia("q", "e", [conContexto, sinContexto]);
+    const contenido = mensajeUsuario();
+    expect(contenido).toContain(
+      "· cita: [a.pdf, pág. 2]\n(contexto del fragmento: Resultados del estudio X sobre p-tau217 en la cohorte con deterioro cognitivo leve)\nthe mean was 542",
+    );
+    expect(contenido).toContain("· cita: [a.pdf, pág. 3]\notro");
+  });
+
   test("usa el modelo de rerank con el razonamiento del calificador y la temperatura", async () => {
     espia.mockResolvedValueOnce(respuesta(grados({ 0: "parcial" })));
     await calificarEvidencia("q", "e", fragmentos(1));

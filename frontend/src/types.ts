@@ -132,6 +132,16 @@ export interface Source {
   /** Grado que le dio el calificador respecto a su punto del plan. Vacio =
    *  sin calificar (calificador apagado o caido): NO significa "no". */
   grado?: Grado;
+  /** "retractado" | "retirado" | "preocupacion" | "": lo que dice Crossref
+   *  del artículo del que sale el fragmento. Se pinta en rojo. */
+  retraccion?: string;
+}
+
+/** Lo que Crossref dice de un artículo indexado (documents.retraccion). */
+export interface RetraccionDocumento {
+  tipo: 'retractado' | 'retirado' | 'preocupacion' | string;
+  fecha: string | null;
+  avisoDoi: string | null;
 }
 
 /** Grado de relevancia de un fragmento para su punto del plan. */
@@ -147,6 +157,9 @@ export interface PlanItem {
   /** Que evidencia hace falta, en lenguaje claro. Es lo que se le muestra a
    *  quien pregunta (los ids son internos). */
   evidence_needed: string;
+  /** Reformulaciones con sinónimos o siglas que también se buscaron. Ausente
+   *  en los planes anteriores a la marca o cuando no había sinónimos. */
+  variantes?: string[];
 }
 
 /** Estado de un punto del plan tras el verificador (contrato D/F). */
@@ -210,6 +223,11 @@ export interface Afirmacion {
   veredicto: Veredicto;
   motivo: string;
   fragmento_id: string;
+  /** El fragmento citado habla de OTRA entidad (otro fármaco, biomarcador,
+   *  población o estudio) que la que la afirmación atribuye: el dato es real
+   *  pero no es de quien se dice. Va siempre con `no_sostenida`. Ausente en
+   *  los informes anteriores a la marca. */
+  entidad_distinta?: boolean;
 }
 
 /** Informe de atribución de una respuesta (columna `verificacion`). */
@@ -312,6 +330,9 @@ export interface DocumentInfo {
   /** El avance de la ingesta en curso (fase, hecho de total, desde cuándo),
    *  para la barra de la ficha. null si no se está indexando. */
   progreso: ProgresoIngesta | null;
+  /** Retractado, retirado o con expresión de preocupación según Crossref.
+   *  null = nada que avisar (o sin DOI con el que preguntar). */
+  retraccion: RetraccionDocumento | null;
 }
 
 /** Avance de una ingesta en marcha (documents.progreso). */
@@ -327,6 +348,9 @@ export interface AvisosIngesta {
   sinLeer: number;
   omitidas: number;
   recortados: number;
+  /** Fragmentos indexados sin su frase de contexto de búsqueda: se encuentran
+   *  algo peor. Reindexar lo reintenta. */
+  sinContexto: number;
   motivo: string | null;
 }
 
@@ -471,4 +495,94 @@ export interface SourceFocus {
   page: number | null;
   /** Cambia en cada clic para re-disparar el efecto aunque sea la misma fuente. */
   token: number;
+}
+
+/* ======================================================================
+   Evaluación de la calidad (Ajustes > Calidad; convex/evaluacion/datos.ts)
+   ====================================================================== */
+
+/** Categorías de una pregunta de control. */
+export type CategoriaEvaluacion = 'single_hop' | 'multi_hop' | 'tabla' | 'abstencion' | 'entidad';
+
+export type EstadoCaso = 'propuesto' | 'aprobado' | 'descartado';
+
+/** Una pregunta de control tal como la devuelve `evaluacion.datos.casos`. */
+export interface CasoEvaluacion {
+  _id: Id<'evaluacionCasos'>;
+  clave: string;
+  pregunta: string;
+  modo: ModoPensamiento;
+  categoria: CategoriaEvaluacion | string;
+  critico: boolean;
+  /** Lo que debería decir la respuesta, en llano, para juzgarlo sin leer patrones. */
+  respuestaEsperada: string;
+  estado: EstadoCaso;
+  origen: 'generado' | 'manual';
+  creadoEn: number;
+  /** Nombres de los documentos donde debería estar la evidencia. */
+  fuentes: string[];
+}
+
+/** Una generación de preguntas en marcha o terminada (`evaluacion.datos.generacionActual`). */
+export interface GeneracionEvaluacion {
+  _id: Id<'evaluacionGeneraciones'>;
+  empezadoEn: number;
+  terminadoEn: number | null;
+  estado: 'running' | 'ok' | 'error';
+  objetivo: number;
+  generados: number;
+  descartados: number;
+  paso: string | null;
+  error: string | null;
+}
+
+/** El resumen de una corrida, con los nombres del evaluador (`puntuar.resumir`). */
+export interface ResumenEvaluacion {
+  cases: number;
+  passed: number;
+  pass_rate: number;
+  release_gate_passed: boolean;
+  critical_failures: string[];
+  unstable_cases: string[];
+  mean_evidence_recall: number;
+  mean_citation_precision: number;
+  mean_faithfulness: number | null;
+  mean_retrieval_mrr?: number | null;
+  mean_retrieval_hit_at_5?: number | null;
+  mean_retrieval_hit_at_20?: number | null;
+  mean_context_precision?: number | null;
+  entity_misattributions_total?: number;
+  failures_by_stage?: { retrieval: number; grading: number; generation: number };
+  unsupported_claims_total: number;
+  mean_latency_ms: number;
+  by_category: Record<string, { total: number; passed: number }>;
+}
+
+/** Una corrida de la evaluación (`evaluacion.datos.corridas`). */
+export interface CorridaEvaluacion {
+  _id: Id<'evaluacionCorridas'>;
+  empezadoEn: number;
+  terminadoEn: number | null;
+  estado: 'running' | 'ok' | 'error';
+  disparo: 'manual' | 'programada';
+  casosTotal: number;
+  casosHechos: number;
+  casoActual: string | null;
+  repeticiones: number;
+  resumen: ResumenEvaluacion | null;
+  error: string | null;
+}
+
+/** El resultado de un caso dentro de una corrida (`evaluacion.datos.resultadosDe`). */
+export interface ResultadoEvaluacion {
+  clave: string;
+  pregunta: string;
+  categoria: CategoriaEvaluacion | string;
+  critico: boolean;
+  passed: boolean;
+  /** Fallos en el vocabulario del evaluador; la interfaz los traduce a frases. */
+  failures: string[];
+  metrics: Record<string, number | boolean | null>;
+  /** La respuesta del asistente en la primera repetición, recortada. */
+  respuesta: string;
 }

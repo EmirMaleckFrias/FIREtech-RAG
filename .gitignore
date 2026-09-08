@@ -37,3 +37,9 @@ frontend/evals/results/
 
 # node_modules en cualquier nivel (la raiz tambien: vitest deja resultados ahi)
 node_modules/
+
+# Casos de evaluación del RAG: preguntas y respuestas esperadas sobre documentos
+# clínicos de cada cuenta. Solo se versiona la plantilla; los reportes ya
+# estaban ignorados más arriba (frontend/evals/results/).
+frontend/evals/*.jsonl
+!frontend/evals/alzheimer.template.jsonl
