@@ -87,6 +87,14 @@ Campos de `messages` que escribe el agente: `estado`, `plan`, `hops`, `sources`,
 (`subida` | `notion` | `google` | `onedrive`), `notionPageId` (páginas de Notion) y
 `nubeFicheroId` (ficheros de Google Drive u OneDrive).
 
+`documents.ingestaRunId` es la corrida de ingesta que posee el documento (la última que lo
+reclamó); `ingestionRuns.latidoEn` su última escritura. La tabla `contadores` (`clave`,
+`valor`) guarda las cifras de Ajustes: `preguntas`, `preguntas:dia:AAAA-MM-DD`,
+`usuario:<id>:preguntas`, `usuario:<id>:sesiones`, `votos:arriba`, `votos:abajo`; las
+actualiza la misma transacción que escribe o borra lo contado y `contadores.reconstruir` las
+recalcula desde las tablas. `messages` lleva además el índice `porEstadoYCreacion` para el
+barrido de turnos colgados.
+
 Las listas que van al navegador están acotadas: `mensajes.deSesion` devuelve los últimos 200
 mensajes de la conversación, `documentos.listar` hasta 5000 documentos y `sesiones.listar`
 hasta 1000 conversaciones. Ninguna query lee el reloj (`Date.now()`): el instante lo manda el
@@ -129,7 +137,7 @@ quien llama (`permisos.ts`): sin sesión, `no_autenticado`; con la cuenta bloque
 | `usuarios.yo` | query | cualquiera | `{_id, email, rol, bloqueado}`, o `null` sin sesión. Bloqueado: `acceso_revocado`. |
 | `usuarios.listar` | query | admin | Cuentas con `creadoEn`, `ultimoAccesoEn`, `sesiones` y `mensajes` (preguntas, no turnos). Solo cifras, nunca texto. |
 | `usuarios.actualizar` | mutation `{userId, rol?, bloqueado?}` | admin, otro | Asciende, degrada, bloquea o desbloquea. Sobre uno mismo: `invalido`. |
-| `usuarios.borrar` | mutation `{userId}` | admin, otro | Cascada a mano: sesiones y feedback ya; mensajes, corpus entero (documentos, fragmentos, ficheros) y rastro de Notion por lotes agendados; filas de Convex Auth; la cuenta. |
+| `usuarios.borrar` | mutation `{userId}` | admin, otro | Cascada a mano: sesiones, feedback y sus contadores ya; mensajes, corpus entero (documentos, fragmentos, ficheros) y rastro de Notion y de las nubes por lotes agendados; filas de Convex Auth; la cuenta. |
 | `estadisticas.sistema` | query `{ahora}` | admin | Ver sección 13. `ahora` lo manda el cliente redondeado. |
 | `semilla.ascenderSiPreasignado` | mutation | usuario | Si el correo propio está en `adminsPreasignados`, pasa a `admin`. Sin argumentos: solo sobre uno mismo. |
 

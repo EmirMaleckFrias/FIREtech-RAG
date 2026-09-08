@@ -36,6 +36,7 @@ import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { ajustes } from "./lib/config";
+import { LATIDO_VIVO_MS } from "./ingesta/escritura";
 import { origenDocumento } from "./schema";
 import { errorDatos, usuario } from "./usuarios";
 
@@ -46,8 +47,9 @@ export const EXTENSIONES_PERMITIDAS = [
   "jpg", "jpeg", "png", "webp", "gif",
 ] as const;
 
-// Minutos tras los que un documento en `processing` se considera abandonado y
-// se puede reintentar. Existe porque había una forma de quedarse en
+// Minutos tras los que un documento en `processing` SIN corrida que lo haya
+// reclamado se considera abandonado y se puede reintentar. Con corrida, manda
+// su latido (ver `ingestaViva`). Existe porque había una forma de quedarse en
 // `processing` PARA SIEMPRE: si la función de Vercel moría por el corte de
 // 300 s a mitad de ingesta no había excepción de Python, así que nadie marcaba
 // `failed`. Y entonces los dos caminos de recuperación se bloqueaban entre sí:
@@ -361,7 +363,7 @@ export const reindexar = mutation({
   handler: async (ctx, { documentId }) => {
     const u = await usuario(ctx);
     const d = await propio(ctx, documentId, u._id);
-    if (d.status === "processing" && !processingRancio(d)) {
+    if (d.status === "processing" && (await ingestaViva(ctx, d))) {
       throw errorDatos("conflicto", `'${d.fileName}' ya se está procesando.`);
     }
     // El esquema deja `storageId` opcional (filas traídas de Supabase, donde
@@ -459,6 +461,25 @@ export const borrarCorpusDeUsuario = internalMutation({
 // ---------------------------------------------------------------------------
 // Ayudantes con base
 // ---------------------------------------------------------------------------
+/** ¿Hay una ingesta VIVA de este documento?
+ *
+ *  Si una corrida lo reclamó (`ingestaRunId`), viva es que sigue `running` y
+ *  su último latido es reciente (LATIDO_VIVO_MS): una que murió sin cerrar
+ *  deja de bloquear en once minutos, y una legítima que lleve más de diez
+ *  desde el registro (la cola de la plataforma la retrasó) sigue protegida
+ *  mientras escriba. Sin corrida que lo haya reclamado (recién registrado, la
+ *  acción aún no arrancó) se cae a la regla de la fecha, `processingRancio`. */
+async function ingestaViva(ctx: MutationCtx, d: Doc<"documents">): Promise<boolean> {
+  if (d.ingestaRunId) {
+    const run = await ctx.db.get(d.ingestaRunId);
+    if (run && run.status === "running") {
+      return Date.now() - (run.latidoEn ?? run.empezadoEn) < LATIDO_VIVO_MS;
+    }
+    return false;
+  }
+  return !processingRancio(d);
+}
+
 /** El documento, si es de quien pregunta. Ajeno o inexistente: `no_encontrado`
  *  en los dos casos, igual que `sesionPropia` con las conversaciones. Decir
  *  "no es tuyo" confirmaría que existe y de qué se llama el corpus de otra

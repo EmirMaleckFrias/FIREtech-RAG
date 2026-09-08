@@ -18,6 +18,7 @@ import type * as agente_prompt from "../agente/prompt.js";
 import type * as agente_revisor from "../agente/revisor.js";
 import type * as agente_verificador from "../agente/verificador.js";
 import type * as auth from "../auth.js";
+import type * as contadores from "../contadores.js";
 import type * as crons from "../crons.js";
 import type * as documentos from "../documentos.js";
 import type * as estadisticas from "../estadisticas.js";
@@ -86,6 +87,7 @@ declare const fullApi: ApiFromModules<{
   "agente/revisor": typeof agente_revisor;
   "agente/verificador": typeof agente_verificador;
   auth: typeof auth;
+  contadores: typeof contadores;
   crons: typeof crons;
   documentos: typeof documentos;
   estadisticas: typeof estadisticas;

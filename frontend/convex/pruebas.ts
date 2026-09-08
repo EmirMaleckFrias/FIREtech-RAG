@@ -9,6 +9,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { anotarPregunta, borrarDeUsuario, claveVotos, sumar } from "./contadores";
 import { LOTE_CHUNKS } from "./documentos";
 import type { Doc } from "./_generated/dataModel";
 import { ajustes } from "./lib/config";
@@ -70,6 +71,7 @@ export const prepararPregunta = internalMutation({
       content: args.texto,
       creadoEn: ahora,
     });
+    await anotarPregunta(ctx, userId, ahora, { sesionNueva: args.sessionId === undefined });
     const messageId = await ctx.db.insert("messages", {
       sessionId,
       userId,
@@ -331,7 +333,11 @@ export const borrarUsuarioDePrueba = internalMutation({
       .query("feedback")
       .withIndex("porUsuarioYMensaje", (q) => q.eq("userId", usuario._id))
       .collect();
-    for (const f of votos) await ctx.db.delete(f._id);
+    for (const f of votos) {
+      await sumar(ctx, claveVotos(f.rating), -1);
+      await ctx.db.delete(f._id);
+    }
+    await borrarDeUsuario(ctx, usuario._id);
     await ctx.scheduler.runAfter(0, internal.mensajes.borrarRestantes, { userId: usuario._id });
     // Y su corpus, igual que `usuarios.borrar`: sin esto quedaban documentos
     // con un propietario que ya no existe, invisibles para todo el mundo y

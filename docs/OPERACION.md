@@ -272,15 +272,20 @@ exponencial con tope de 20 s).
 
 ## 7. Límites conocidos
 
-- **Las estadísticas recorren `messages`.** `estadisticas.sistema` cuenta preguntas leyendo
-  todos los mensajes, y `usuarios.listar` lee los de cada usuario para contar. Cada respuesta
-  del asistente arrastra `sources` y `hops` (decenas de KB) y una transacción puede leer
-  16 MiB, así que aguanta unos cientos de respuestas en total. Más allá, Ajustes > Sistema y
-  Ajustes > Usuarios fallarán. **Pendiente: una tabla de contadores.**
-- **Dos ingestas concurrentes del mismo documento.** La única guarda es el `processing` de
-  menos de 10 minutos. Si dos reindexados entran a la vez pasados los 10 minutos, o una
-  ingesta legítima dura más de 10 minutos y alguien reindexa, pueden correr dos a la vez y
-  duplicar fragmentos de la misma versión. Si pasa: borrar el documento y subirlo de nuevo.
+- **Las estadísticas salen de la tabla `contadores`** (`convex/contadores.ts`): preguntas en
+  total, por día natural y por cuenta, conversaciones por cuenta y votos por signo, actualizados
+  en la misma transacción que escribe o borra lo que cuentan. "Últimos 7 días" son los siete
+  días naturales anteriores más hoy. Al estrenar la tabla en un despliegue con datos, o si las
+  cifras se desviaran, `npx convex run contadores:reconstruir` las recalcula desde las tablas
+  por lotes (mientras corre, las cifras son parciales).
+- **Dos ingestas del mismo documento a la vez.** Cada corrida RECLAMA el documento al arrancar
+  (`documents.ingestaRunId`) y cada escritura de fragmentos comprueba que sigue siendo la dueña
+  y deja latido (`ingestionRuns.latidoEn`). La más reciente gana: la vieja se detiene en su
+  siguiente escritura, se cierra como `failed` con el motivo y no toca ni el estado del
+  documento ni los fragmentos (los suyos, anteriores al reclamo, los retira la nueva). El
+  documento conserva la última corrida al terminar. `reindexar` responde `conflicto` solo si
+  esa corrida está `running` con latido de menos de 11 minutos; sin corrida que lo haya
+  reclamado (recién registrado) sigue la regla de los 10 minutos por fecha.
 - **PDFs a dos columnas.** Las líneas se reconstruyen agrupando los items de pdf.js por
   altura, y en una página a dos columnas eso fundía cada línea de la izquierda con la de la
   derecha (medido el 4 de septiembre de 2026 con cinco artículos reales: los encabezados no
@@ -292,7 +297,10 @@ exponencial con tope de 20 s).
   con sus celdas (se degrada la estructura, no se pierde el dato). Revisa con
   `pruebas:leerDocumento` la muestra de fragmentos de un artículo nuevo antes de darlo por
   bien indexado.
-- **Sin OCR.** Un PDF escaneado no tiene texto extraíble y la ingesta lo rechaza diciéndolo.
+- **OCR.** Las páginas de PDF sin texto propio y las imágenes (sueltas o dentro de un Word) se
+  leen con un modelo de visión por el gateway (`ENABLE_OCR`, `OCR_MODEL`); lo que no se pudo
+  leer queda en los `avisos` del documento. Un escaneo de muy mala calidad puede salir con
+  texto incompleto: revisa los avisos de la ficha.
 - **Tablas de PDF.** Se reconocen las filas por geometría y se marcan como `table`, pero no se
   reconstruye la estructura de columnas con cabecera como en Word o Excel.
 - **Filtros en la búsqueda vectorial.** Solo se aplica el filtro más selectivo en el lado
@@ -303,8 +311,10 @@ exponencial con tope de 20 s).
 - **Google como proveedor** existe en `auth.ts` si el despliegue tiene `AUTH_GOOGLE_ID` y
   `AUTH_GOOGLE_SECRET`, pero el frontend aún no puede saberlo y no muestra el botón.
 - **Turnos colgados.** Si la acción muere sin pasar por su `catch` (despliegue a mitad,
-  600 s), la fila queda en un estado no final. El frontend lo pinta como error de tiempo a
-  los 630 s; la fila no se corrige sola.
+  600 s), la fila queda en un estado no final. La cierra como error de tiempo el perro
+  guardián que agenda `mensajes.enviar` a los 630 s (`marcarColgado`) y, por debajo, el cron
+  `cerrar turnos colgados` cada 15 minutos (`mensajes.cerrarColgados`, por el índice
+  `porEstadoYCreacion`). El frontend lo pinta igual a los 630 s.
 
 ## 8. Arnés de pruebas interno
 
@@ -358,8 +368,6 @@ el que confirma que funciona.
 
 - **Evaluación automática contra Convex.** `backend/evaluar.py` sigue apuntando a la API
   antigua; ver [MIGRACION_CONVEX.md](MIGRACION_CONVEX.md).
-- **Tabla de contadores** para estadísticas y listado de usuarios.
 - **Botón de Google** en la pantalla de acceso.
-- **OCR** para PDFs escaneados.
 - **Ingesta por carpeta desde la CLI** (el `ingest.py` anterior). Hoy se sube por la interfaz o
   con las funciones de prueba de la sección 3.

@@ -17,6 +17,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import schema from "./schema";
 import { errorDatos, sesionDe, usuario } from "./usuarios";
+import { anotarPregunta, claveVotos, desanotarPregunta, sumar } from "./contadores";
 
 /** Tope de la pregunta. Una pregunta más larga que esto es casi siempre un
  *  documento pegado por error, y hay una vía para eso (subirlo). */
@@ -127,6 +128,7 @@ export const enviar = mutation({
 
     const ahora = Date.now();
     let sessionId = args.sessionId;
+    const sesionNueva = sessionId === undefined;
     if (sessionId !== undefined) {
       await sesionDe(ctx, sessionId, u._id);
     } else {
@@ -152,6 +154,8 @@ export const enviar = mutation({
       content: texto,
       creadoEn: ahora,
     });
+    // Los contadores de Ajustes, en la misma transacción (ver contadores.ts).
+    await anotarPregunta(ctx, u._id, ahora, { sesionNueva });
     // +1 ms: los dos se insertan en el mismo instante y el índice `porSesionYCreacion`
     // ordena por `creadoEn`; sin esto la respuesta podría listarse antes que
     // la pregunta.
@@ -173,9 +177,8 @@ export const enviar = mutation({
       historial,
     });
 
-    // Perro guardián: ver `marcarColgado`. 540 s de presupuesto + 90 de margen.
-
-    await ctx.scheduler.runAfter(630_000, internal.mensajes.marcarColgado, { messageId });
+    // Perro guardián: ver `marcarColgado` (y el barrido `cerrarColgados`).
+    await ctx.scheduler.runAfter(ESPERA_COLGADO_MS, internal.mensajes.marcarColgado, { messageId });
     return { sessionId, messageId };
   },
 });
@@ -284,6 +287,12 @@ export const calificar = mutation({
       )
       .unique();
     if (previo) {
+      // Cambiar el voto mueve una unidad de un contador al otro; repetirlo
+      // no toca ninguno.
+      if (previo.rating !== args.rating) {
+        await sumar(ctx, claveVotos(previo.rating), -1);
+        await sumar(ctx, claveVotos(args.rating), 1);
+      }
       await ctx.db.patch(previo._id, {
         rating: args.rating,
         comentario,
@@ -291,6 +300,7 @@ export const calificar = mutation({
       });
       return previo._id;
     }
+    await sumar(ctx, claveVotos(args.rating), 1);
     return await ctx.db.insert("feedback", {
       messageId: m._id,
       userId: u._id,
@@ -304,14 +314,20 @@ export const calificar = mutation({
 // ---------------------------------------------------------------------------
 // Borrado por lotes
 // ---------------------------------------------------------------------------
-/** Borra estos mensajes y su feedback. */
+/** Borra estos mensajes y su feedback, y descuenta lo que contaban: cada
+ *  pregunta (mensaje `user`) y cada voto. Los contadores de la cuenta solo se
+ *  tocan si existen: si la cuenta ya se borró, no se recrean. */
 async function borrarMensajes(ctx: MutationCtx, mensajes: Doc<"messages">[]) {
   for (const m of mensajes) {
     const votos = await ctx.db
       .query("feedback")
       .withIndex("porMensaje", (q) => q.eq("messageId", m._id))
       .collect();
-    for (const f of votos) await ctx.db.delete(f._id);
+    for (const f of votos) {
+      await sumar(ctx, claveVotos(f.rating), -1);
+      await ctx.db.delete(f._id);
+    }
+    if (m.role === "user") await desanotarPregunta(ctx, m.userId, m.creadoEn);
     await ctx.db.delete(m._id);
   }
 }
@@ -378,20 +394,57 @@ export const borrarRestantes = internalMutation({
  *  mutación con margen sobre el presupuesto total de la pregunta: si el turno
  *  sigue abierto, lo cierra con un error honesto. Lo señaló la revisión
  *  adversarial del bucle. */
+/** Lo que lee la usuaria en un turno que murió sin terminar. */
+export const MENSAJE_COLGADO =
+  "El asistente no terminó de responder en el tiempo previsto. Vuelve a " +
+  "hacer la pregunta; si se repite, prueba en pensamiento normal.";
+
+/** Cuánto se espera antes de dar un turno por colgado: 540 s de presupuesto
+ *  de la pregunta más 90 de margen. Es lo que agenda `enviar` como perro
+ *  guardián y lo que usa el barrido periódico. */
+export const ESPERA_COLGADO_MS = 630_000;
+
+const ESTADOS_EN_MARCHA = ["pensando", "buscando", "redactando", "revisando"] as const;
+
+/** Cierra como error de tiempo un turno del asistente que sigue en marcha.
+ *  Un estado final (`listo`, `error`, `cancelado`) no se toca: un turno que la
+ *  usuaria paró no se reescribe como error diez minutos después. */
+async function cerrarComoColgado(ctx: MutationCtx, m: Doc<"messages">): Promise<boolean> {
+  if (m.role !== "assistant") return false;
+  if (!(ESTADOS_EN_MARCHA as readonly string[]).includes(m.estado ?? "")) return false;
+  await ctx.db.patch(m._id, { estado: "error", error: MENSAJE_COLGADO });
+  return true;
+}
+
 export const marcarColgado = internalMutation({
   args: { messageId: v.id("messages") },
   handler: async (ctx, { messageId }): Promise<boolean> => {
     const m = await ctx.db.get(messageId);
-    if (!m || m.role !== "assistant") return false;
-    // `cancelado` también es final: un turno que la usuaria paró no se
-    // reescribe como error de tiempo diez minutos después.
-    if (m.estado === "listo" || m.estado === "error" || m.estado === "cancelado") return false;
-    await ctx.db.patch(messageId, {
-      estado: "error",
-      error:
-        "El asistente no terminó de responder en el tiempo previsto. Vuelve a " +
-        "hacer la pregunta; si se repite, prueba en pensamiento normal.",
-    });
-    return true;
+    if (!m) return false;
+    return await cerrarComoColgado(ctx, m);
+  },
+});
+
+/** Barrido periódico (convex/crons.ts): cierra los turnos que siguen en
+ *  marcha pasado el presupuesto. Es la red por debajo del perro guardián que
+ *  agenda `enviar`: si la acción del agente muere sin pasar por su `catch` (un
+ *  despliegue a mitad, el tope de tiempo de la plataforma) y por lo que sea
+ *  el trabajo agendado no llega, la fila no se queda en `redactando` para
+ *  siempre. Lee por el índice de estado y antigüedad, acotado: nunca recorre
+ *  la tabla de mensajes. */
+export const cerrarColgados = internalMutation({
+  args: {},
+  handler: async (ctx): Promise<{ cerrados: number }> => {
+    const limite = Date.now() - ESPERA_COLGADO_MS;
+    let cerrados = 0;
+    for (const estado of ESTADOS_EN_MARCHA) {
+      const colgados = await ctx.db
+        .query("messages")
+        .withIndex("porEstadoYCreacion", (q) => q.eq("estado", estado).lt("creadoEn", limite))
+        .take(50);
+      for (const m of colgados) if (await cerrarComoColgado(ctx, m)) cerrados++;
+    }
+    if (cerrados > 0) console.warn(`turnos colgados cerrados por el barrido: ${cerrados}`);
+    return { cerrados };
   },
 });

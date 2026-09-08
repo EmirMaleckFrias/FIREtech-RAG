@@ -133,11 +133,9 @@ en Docker para desarrollar.
 | Pendiente | Estado y qué implica |
 |---|---|
 | **Evaluador offline** | `backend/evaluar.py` y `backend/app/evaluation.py` siguen en Python y llaman a `POST /api/chat` por SSE en `http://localhost:8000`, que ya no existe. La lógica determinista (cobertura de evidencias, resolución de citas, patrones de hops, contenido obligatorio y prohibido, abstención, `min_faithfulness` leído del verificador) sigue siendo válida. Portarla como script que use `pruebas:prepararPregunta` y `pruebas:leerRespuesta`, o como acción interna de Convex. Los patrones de cita y abstención ya son idénticos a `lib/citas.ts`. |
-| **Tabla de contadores** | `estadisticas.sistema` y `usuarios.listar` recorren `messages`; aguantan unos cientos de respuestas dentro de los 16 MiB por transacción. Hace falta un cambio de esquema con contadores por usuario y globales, actualizados en `enviar` y en los borrados. |
 | **Google OAuth** | `auth.ts` ofrece Google si existen `AUTH_GOOGLE_ID` y `AUTH_GOOGLE_SECRET`, pero el frontend no tiene forma de saberlo: `useGoogleDisponible()` devuelve `false`. Falta una query `usuarios.googleDisponible` que publique `googleDisponible()` y las variables en el despliegue. |
 | **Despliegue de producción frente a dev** | Confirmar qué despliegue de Convex es producción, poner su clave de despliegue como `CONVEX_DEPLOY_KEY` en Vercel y sus variables (`OPENAI_API_KEY`, Convex Auth, presupuestos) en ese despliegue. `frontend/.env.example` apunta al despliegue usado durante la migración (`gregarious-pony-327`). Sembrar administradores en cada despliegue. |
 | **Retirar el histórico** | Borrar `backend/`, `api/`, `supabase/`, `infra/`, `data/` y `.python-version` cuando la migración esté verificada y el evaluador portado. |
-| **Dos ingestas concurrentes** | La guarda de 10 minutos de `processing` no cubre todos los casos; ver OPERACION.md. |
 | **PDFs a dos columnas** | Resuelto en lo esencial el 4 de septiembre de 2026 (`pdf.ts` detecta el canal vertical y lee columna a columna, medido con cinco artículos reales). Quedan los casos límite de OPERACION.md: maquetas poco habituales sin separar y filas de tabla a todo el ancho partidas en dos mitades. |
 | **Ingesta por carpeta** | No hay sustituto del `ingest.py` para cargar un corpus grande de una vez; hoy es la interfaz o las funciones de prueba una a una. |
 

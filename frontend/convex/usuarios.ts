@@ -21,6 +21,7 @@ import { mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
+import { borrarDeUsuario, clavePreguntasDe, claveSesionesDe, claveVotos, leer, sumar } from "./contadores";
 import { rol } from "./schema";
 import {
   AccesoRevocado,
@@ -161,22 +162,16 @@ export const listar = query({
     );
     const salida = [];
     for (const u of cuentas) {
-      const sesiones = await ctx.db
-        .query("sessions")
-        .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id))
-        .collect();
-      const mensajes = await ctx.db
-        .query("messages")
-        .withIndex("porUsuarioYCreacion", (q) => q.eq("userId", u._id))
-        .collect();
+      // Dos lecturas por índice, no la tabla de mensajes de cada cuenta (ver
+      // contadores.ts). `mensajes` son preguntas, no turnos: cada turno tiene
+      // un mensaje del usuario y otro del asistente y contar los dos
+      // duplicaría la cifra.
       salida.push({
         ...ficha(u),
         creadoEn: u.creadoEn ?? u._creationTime,
         ultimoAccesoEn: u.ultimoAccesoEn ?? null,
-        sesiones: sesiones.length,
-        // Preguntas, no mensajes: cada turno tiene un mensaje del usuario y
-        // otro del asistente y contar los dos duplicaría la cifra.
-        mensajes: mensajes.filter((m) => m.role === "user").length,
+        sesiones: await leer(ctx, claveSesionesDe(u._id)),
+        mensajes: await leer(ctx, clavePreguntasDe(u._id)),
       });
     }
     return salida;
@@ -266,7 +261,13 @@ export const borrar = mutation({
       .query("feedback")
       .withIndex("porUsuarioYMensaje", (q) => q.eq("userId", u._id))
       .collect();
-    for (const f of votos) await ctx.db.delete(f._id);
+    for (const f of votos) {
+      await sumar(ctx, claveVotos(f.rating), -1);
+      await ctx.db.delete(f._id);
+    }
+    // Sus contadores se van ya; el borrado de sus mensajes en segundo plano
+    // descuenta los globales y no recrea los suyos (ver contadores.ts).
+    await borrarDeUsuario(ctx, u._id);
 
     // 2. Mensajes, por lotes y en segundo plano.
     const algunMensaje = await ctx.db

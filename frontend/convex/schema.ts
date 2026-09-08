@@ -164,7 +164,24 @@ export default defineSchema({
     creadoEn: v.number(),
   })
     .index("porSesionYCreacion", ["sessionId", "creadoEn"])
-    .index("porUsuarioYCreacion", ["userId", "creadoEn"]),
+    .index("porUsuarioYCreacion", ["userId", "creadoEn"])
+    // Para el barrido de turnos colgados (`mensajes.cerrarColgados`): los
+    // que siguen en un estado no final pasado el presupuesto, leídos por
+    // estado y antigüedad sin recorrer la tabla, que cada respuesta arrastra
+    // sus fuentes y sus hops.
+    .index("porEstadoYCreacion", ["estado", "creadoEn"]),
+
+  // Contadores agregados, uno por clave (ver convex/contadores.ts). Existen
+  // porque Convex no tiene agregados y contar preguntas recorriendo
+  // `messages` leía cada respuesta con sus fuentes y sus hops: aguantaba unos
+  // cientos de respuestas dentro de los 16 MiB de una transacción y después
+  // Ajustes > Sistema y Ajustes > Usuarios fallaban. Se actualizan en la misma
+  // transacción que escribe o borra lo que cuentan, y se pueden reconstruir
+  // desde las tablas (`contadores.reconstruir`).
+  contadores: defineTable({
+    clave: v.string(),
+    valor: v.number(),
+  }).index("porClave", ["clave"]),
 
   feedback: defineTable({
     messageId: v.id("messages"),
@@ -222,6 +239,13 @@ export default defineSchema({
     // ofrece reintentar. Antes esto solo quedaba en `ingestionRuns`, que no
     // lee nadie, y un escaneo con 39 de 40 páginas sin leer se veía perfecto.
     avisos: v.optional(avisosIngesta),
+    // La corrida de ingesta que POSEE el documento ahora mismo (ver
+    // ingesta/escritura.ts `reclamarDocumento`). Es lo que impide que dos
+    // ingestas del mismo documento escriban a la vez: cada escritura de
+    // fragmentos comprueba que la corrida sigue siendo la dueña, y la más
+    // reciente siempre gana. `reindexar` la consulta para saber si hay una
+    // ingesta viva de verdad (con latido), en vez de adivinarlo por la fecha.
+    ingestaRunId: v.optional(v.id("ingestionRuns")),
   })
     // El nombre de archivo identifica el documento DENTRO DEL CORPUS DE UNA
     // PERSONA, no del despliegue: dos usuarias pueden tener cada una su
@@ -564,6 +588,12 @@ export default defineSchema({
   ingestionRuns: defineTable({
     empezadoEn: v.number(),
     terminadoEn: v.optional(v.number()),
+    // Última escritura de la corrida. Una corrida `running` sin latido
+    // reciente está muerta (la acción cayó sin cerrarla) y otra puede
+    // reclamar su documento; una con latido reciente está viva aunque lleve
+    // más de diez minutos desde que se registró el documento.
+    latidoEn: v.optional(v.number()),
+    documentId: v.optional(v.id("documents")),
     status: v.union(
       v.literal("running"),
       v.literal("completed"),

@@ -7,6 +7,7 @@
 import { v } from "convex/values";
 import { query } from "./_generated/server";
 import { ajustes } from "./lib/config";
+import { CLAVE_PREGUNTAS, CLAVE_VOTOS_ABAJO, CLAVE_VOTOS_ARRIBA, clavesDeLaVentana, leer, leerVarias } from "./contadores";
 import { administrador } from "./usuarios";
 import { VERSION_PROMPT } from "./agente/prompt";
 
@@ -51,14 +52,14 @@ export const sistema = query({
       languages: distintos(listos.map((d) => d.language)),
     };
 
-    // Actividad. Las preguntas se cuentan recorriendo `messages`: Convex no
-    // tiene agregados y el esquema no lleva contadores, así que cada
-    // respuesta del asistente (con sus `sources` y `hops`) se lee para
-    // contar una pregunta. Aguanta unos cientos de respuestas dentro de los
-    // 16 MiB que una transacción puede leer; más allá hace falta una tabla
-    // de contadores. El backend anterior avisaba de lo mismo con Postgres.
-    const mensajes = await ctx.db.query("messages").collect();
-    const preguntas = mensajes.filter((m) => m.role === "user");
+    // Actividad: de los contadores (contadores.ts), no recorriendo
+    // `messages`. Antes cada respuesta del asistente (con sus `sources` y
+    // `hops`) se leía para contar una pregunta, y a unos cientos de
+    // respuestas la query pasaba de los 16 MiB de una transacción y esta
+    // pantalla fallaba. Las de "7 días" son las de los últimos siete días
+    // naturales más hoy.
+    const preguntasTotal = await leer(ctx, CLAVE_PREGUNTAS);
+    const preguntas7d = await leerVarias(ctx, clavesDeLaVentana(ahora, 7));
 
     // Usuarios activos: los que abrieron alguna conversación en la ventana.
     // Se pregunta por índice y usuario (como mucho una fila leída por cuenta)
@@ -73,16 +74,14 @@ export const sistema = query({
       if (reciente) activos++;
     }
 
-    const votos = await ctx.db.query("feedback").collect();
-
     return {
       index,
       activity: {
-        questions_total: preguntas.length,
-        questions_7d: preguntas.filter((m) => m.creadoEn >= desde).length,
+        questions_total: preguntasTotal,
+        questions_7d: preguntas7d,
         active_users_7d: activos,
-        feedback_up: votos.filter((f) => f.rating === 1).length,
-        feedback_down: votos.filter((f) => f.rating === -1).length,
+        feedback_up: await leer(ctx, CLAVE_VOTOS_ARRIBA),
+        feedback_down: await leer(ctx, CLAVE_VOTOS_ABAJO),
       },
       config: {
         model: a.modelo,

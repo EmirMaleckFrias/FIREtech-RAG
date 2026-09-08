@@ -28,6 +28,7 @@ import { ajustes } from "../lib/config";
 import * as gateway from "../lib/gateway";
 import { Telemetria } from "../lib/telemetry";
 import { sha256Hex } from "./hash";
+import { PERDIO_EL_DOCUMENTO } from "./escritura";
 import { LOTE_BORRADO, LOTE_EMBEDDINGS, LOTE_ESCRITURA, MAX_ERROR_CHARS } from "./lotes";
 import { crearOcr } from "./ocr";
 import { parsearDocumento } from "./parsear";
@@ -67,6 +68,7 @@ async function borrarEnLotes(
     version: string;
     desde: number;
     modo: "antiguos" | "deEstaCorrida";
+    runId: Id<"ingestionRuns">;
   },
 ): Promise<number> {
   let total = 0;
@@ -86,14 +88,26 @@ export const ingestar = internalAction({
     const a = ajustes();
     const tel = new Telemetria();
     const t0 = Date.now();
-    const run = await ctx.runMutation(internal.ingesta.escritura.abrirRun, {});
+    const run = await ctx.runMutation(internal.ingesta.escritura.abrirRun, { documentId });
     const stats: Record<string, unknown> = { pages: 0, chunks: 0, ms: 0, tokens_embedding: 0 };
     let version: string | null = null;
     let fileName = "";
+    // El instante en que esta corrida se quedó el documento (reloj de la
+    // base). Todo fragmento anterior a él es "antiguo": versiones previas y lo
+    // que otra corrida alcanzara a escribir antes de perderlo.
+    let desde = run.empezadoEn;
 
     try {
-      const doc = await ctx.runQuery(internal.ingesta.escritura.documento, { documentId });
-      if (!doc) throw new Error("el documento ya no existe en el registro");
+      // Reclamar ANTES de leer el fichero: la corrida más reciente es la que
+      // gana, y a partir de aquí cualquier otra que estuviera escribiendo
+      // este documento se detiene en su siguiente escritura. Ver
+      // escritura.reclamarDocumento.
+      const reclamo = await ctx.runMutation(internal.ingesta.escritura.reclamarDocumento, {
+        documentId,
+        runId: run.runId,
+      });
+      desde = reclamo.reclamadoEn;
+      const doc = reclamo.doc;
       fileName = doc.fileName;
       stats.fileName = fileName;
       stats.documentId = String(documentId);
@@ -160,6 +174,7 @@ export const ingestar = internalAction({
           await ctx.runMutation(internal.ingesta.escritura.insertarChunks, {
             documentId,
             version,
+            runId: run.runId,
             chunks: trozo.map((c, k) => aEntrada(c, respuesta.vectores[j + k])),
           });
         }
@@ -173,8 +188,9 @@ export const ingestar = internalAction({
       const retirados = await borrarEnLotes(ctx, {
         documentId,
         version,
-        desde: run.empezadoEn,
+        desde,
         modo: "antiguos",
+        runId: run.runId,
       });
       stats.chunks_retirados = retirados;
 
@@ -190,6 +206,7 @@ export const ingestar = internalAction({
         language: oNada(primero.language),
         documentType: primero.documentType,
         avisos,
+        runId: run.runId,
       });
       stats.ms = Date.now() - t0;
       stats.telemetria = tel.resumen();
@@ -201,25 +218,42 @@ export const ingestar = internalAction({
       console.info(`Ingesta de '${fileName}' completa: ${chunks.length} fragmentos.`);
     } catch (exc) {
       const mensaje = mensajeDe(exc).slice(0, MAX_ERROR_CHARS);
-      console.error(`Falló la ingesta de '${fileName}': ${mensaje}`);
+      // Otra corrida más reciente reclamó el documento: esta se retira SIN
+      // tocar nada. Sus fragmentos son anteriores al reclamo de la nueva y
+      // los retira ella al terminar; el estado del documento es de la nueva,
+      // así que marcarlo como fallido aquí lo pisaría. Solo se cierra la
+      // corrida, dejando dicho por qué.
+      const perdio = mensaje.includes(PERDIO_EL_DOCUMENTO);
+      if (perdio) {
+        console.warn(`La ingesta de '${fileName}' se retira: ${PERDIO_EL_DOCUMENTO}.`);
+      } else {
+        console.error(`Falló la ingesta de '${fileName}': ${mensaje}`);
+      }
       // Nada a medias: fuera los fragmentos de la versión nueva escritos en
       // esta corrida. La versión anterior, si la había, sigue intacta.
-      if (version !== null) {
+      if (version !== null && !perdio) {
         try {
           await borrarEnLotes(ctx, {
             documentId,
             version,
-            desde: run.empezadoEn,
+            desde,
             modo: "deEstaCorrida",
+            runId: run.runId,
           });
         } catch (limpieza) {
           console.error(`No se pudieron limpiar los fragmentos de '${fileName}': ${mensajeDe(limpieza)}`);
         }
       }
-      try {
-        await ctx.runMutation(internal.ingesta.escritura.marcarFallido, { documentId, error: mensaje });
-      } catch (marca) {
-        console.error(`No se pudo marcar '${fileName}' como failed: ${mensajeDe(marca)}`);
+      if (!perdio) {
+        try {
+          await ctx.runMutation(internal.ingesta.escritura.marcarFallido, {
+            documentId,
+            error: mensaje,
+            runId: run.runId,
+          });
+        } catch (marca) {
+          console.error(`No se pudo marcar '${fileName}' como failed: ${mensajeDe(marca)}`);
+        }
       }
       stats.ms = Date.now() - t0;
       stats.telemetria = tel.resumen();

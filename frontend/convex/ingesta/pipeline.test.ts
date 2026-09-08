@@ -11,6 +11,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import type { PaginationResult } from "convex/server";
 import * as gateway from "../lib/gateway";
 import schema from "../schema";
+import { PERDIO_EL_DOCUMENTO } from "./escritura";
 import { LOTE_EMBEDDINGS, MAX_ERROR_CHARS } from "./lotes";
 import { escribirPdf } from "./pdfFalso.test-util";
 
@@ -321,6 +322,81 @@ describe("ingestar", () => {
     // por formato, igual que en el Python, y la del DOI forma su propio chunk:
     // lo que importa es que el resumen sabe de qué sección sale.
     expect(chunks.find((c) => c.text.includes("Amyloid beta 42"))?.section).toBe("Abstract");
+  });
+});
+
+describe("ingestar: dos corridas sobre el mismo documento", () => {
+  test("ADVERSARIAL: la más reciente gana, la vieja se retira sin tocar nada y no queda ningún fragmento duplicado", async () => {
+    const t = convexTest(schema, modules);
+    const bytes = csvGrande(5);
+    const documentId = await documentoConFichero(t, "datos.csv", bytes);
+    // En cuanto la PRIMERA corrida pide embeddings (ya tiene el fichero leído
+    // y el documento reclamado), arranca una segunda ingesta del mismo
+    // documento y se deja terminar. Es el reindexado que entra a la vez que
+    // una ingesta en marcha.
+    let segundaLanzada = false;
+    vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
+      if (!segundaLanzada) {
+        segundaLanzada = true;
+        await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+      }
+      return {
+        vectores: textos.map((_, i) => vectorFalso(i)),
+        usage: USO(textos.length),
+        modelo: "openai/text-embedding-3-large",
+      };
+    });
+
+    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+
+    // Un solo juego de fragmentos: el de la corrida que ganó.
+    const chunks = await chunksDe(t, documentId);
+    expect(chunks).toHaveLength(5);
+    expect(new Set(chunks.map((c) => c.text)).size).toBe(5);
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("ready");
+    expect(doc?.chunks).toBe(5);
+    // Dos corridas: la segunda completa, la primera retirada con el motivo. Y
+    // el documento se queda con la ganadora, no sin dueña.
+    const runs = await t.run((ctx) => ctx.db.query("ingestionRuns").order("asc").collect());
+    expect(runs.map((r) => r.status)).toEqual(["failed", "completed"]);
+    expect(doc?.ingestaRunId).toBe(runs[1]._id);
+    expect(runs[0].error).toContain(PERDIO_EL_DOCUMENTO);
+    expect(runs.every((r) => r.documentId === documentId)).toBe(true);
+  });
+
+  test("una corrida que ya no es la dueña no puede escribir, borrar ni cambiar el estado del documento", async () => {
+    const t = convexTest(schema, modules);
+    const documentId = await documentoConFichero(t, "datos.csv", csvGrande(2));
+    const r1 = await t.mutation(internal.ingesta.escritura.abrirRun, { documentId });
+    await t.mutation(internal.ingesta.escritura.reclamarDocumento, { documentId, runId: r1.runId });
+    const r2 = await t.mutation(internal.ingesta.escritura.abrirRun, { documentId });
+    await t.mutation(internal.ingesta.escritura.reclamarDocumento, { documentId, runId: r2.runId });
+
+    const entrada = {
+      text: "x", embedding: vectorFalso(0), page: 1, sourcePages: [1], chunkType: "table" as const,
+      documentType: "csv",
+    };
+    await expect(
+      t.mutation(internal.ingesta.escritura.insertarChunks, { documentId, version: "v", runId: r1.runId, chunks: [entrada] }),
+    ).rejects.toThrow(PERDIO_EL_DOCUMENTO);
+    await expect(
+      t.mutation(internal.ingesta.escritura.borrarChunks, { documentId, version: "v", desde: 0, modo: "deEstaCorrida", lote: 10, runId: r1.runId }),
+    ).rejects.toThrow(PERDIO_EL_DOCUMENTO);
+    expect(await t.mutation(internal.ingesta.escritura.marcarFallido, { documentId, error: "x", runId: r1.runId })).toBe(false);
+    await expect(
+      t.mutation(internal.ingesta.escritura.marcarListo, { documentId, sha256: "s", pages: 1, chunks: 1, runId: r1.runId }),
+    ).rejects.toThrow(PERDIO_EL_DOCUMENTO);
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("processing");
+    expect(doc?.ingestaRunId).toBe(r2.runId);
+    // La dueña sí puede, y el documento se queda con ella (ADVERSARIAL: si lo
+    // soltara, la corrida vieja que despertase después lo encontraría libre).
+    expect(await t.mutation(internal.ingesta.escritura.marcarListo, { documentId, sha256: "s", pages: 1, chunks: 1, runId: r2.runId })).toBe(true);
+    expect((await t.run((ctx) => ctx.db.get(documentId)))?.ingestaRunId).toBe(r2.runId);
+    await expect(
+      t.mutation(internal.ingesta.escritura.insertarChunks, { documentId, version: "v", runId: r1.runId, chunks: [entrada] }),
+    ).rejects.toThrow(PERDIO_EL_DOCUMENTO);
   });
 });
 

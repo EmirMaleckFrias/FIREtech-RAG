@@ -9,6 +9,7 @@
 // existe (ver permisos.ts).
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { claveSesionesDe, sumar } from "./contadores";
 import { LONGITUD_TITULO, borrarMensajesDeSesion } from "./mensajes";
 import { sesionDe, usuario } from "./usuarios";
 
@@ -37,6 +38,7 @@ export const crear = mutation({
   handler: async (ctx, { titulo }) => {
     const u = await usuario(ctx);
     const limpio = titulo.trim().slice(0, LONGITUD_TITULO) || "Nueva conversación";
+    await sumar(ctx, claveSesionesDe(u._id), 1);
     return await ctx.db.insert("sessions", {
       titulo: limpio,
       userId: u._id,
@@ -59,6 +61,7 @@ export const borrar = mutation({
     await sesionDe(ctx, sessionId, u._id);
     await borrarMensajesDeSesion(ctx, sessionId);
     await ctx.db.delete(sessionId);
+    await sumar(ctx, claveSesionesDe(u._id), -1);
     return { ok: true };
   },
 });

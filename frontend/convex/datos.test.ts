@@ -718,6 +718,32 @@ describe("documentos", () => {
     await ejecutarAgendadas(t);
   });
 
+  test("reindexar mira si la corrida está VIVA (latido), no la fecha del registro", async () => {
+    const t = nuevaBase();
+    const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
+    const min = 60_000;
+    const storageId = await guardarFichero(t);
+    // Registrado hace media hora (la cola lo retrasó) pero con una corrida
+    // que sigue escribiendo: antes esto pasaba la guarda y duplicaba.
+    const legitima = await nuevoDocumento(t, { fileName: "larga.pdf", propietario: admin.id, status: "processing", storageId, ingestadoEn: Date.now() - 30 * min });
+    const runViva = await t.run((ctx) =>
+      ctx.db.insert("ingestionRuns", { empezadoEn: Date.now() - 30 * min, latidoEn: Date.now() - 20_000, status: "running", documentId: legitima }),
+    );
+    await t.run((ctx) => ctx.db.patch(legitima, { ingestaRunId: runViva }));
+    expect(await codigoDe(admin.como.mutation(api.documentos.reindexar, { documentId: legitima }))).toBe("conflicto");
+    // La misma corrida, sin latido desde hace doce minutos: murió. Se puede.
+    await t.run((ctx) => ctx.db.patch(runViva, { latidoEn: Date.now() - 12 * min }));
+    expect(await codigoDe(admin.como.mutation(api.documentos.reindexar, { documentId: legitima }))).toBe("ok");
+    // Una corrida cerrada tampoco bloquea, aunque el registro sea reciente.
+    const conCerrada = await nuevoDocumento(t, { fileName: "cerrada.pdf", propietario: admin.id, status: "processing", storageId, ingestadoEn: Date.now() });
+    const runCerrada = await t.run((ctx) =>
+      ctx.db.insert("ingestionRuns", { empezadoEn: Date.now(), latidoEn: Date.now(), status: "failed", documentId: conCerrada }),
+    );
+    await t.run((ctx) => ctx.db.patch(conCerrada, { ingestaRunId: runCerrada }));
+    expect(await codigoDe(admin.como.mutation(api.documentos.reindexar, { documentId: conCerrada }))).toBe("ok");
+    await ejecutarAgendadas(t);
+  });
+
   test("reindexar sin fichero guardado o sin registro no puede", async () => {
     const t = nuevaBase();
     const admin = await alta(t, "admin@airobotix.net", { rol: "admin" });
@@ -794,6 +820,11 @@ describe("usuarios", () => {
     const s2 = await nuevaSesion(t, ana.id);
     await turnosCompletos(t, s1, ana.id, 2);
     await turnosCompletos(t, s2, ana.id, 1);
+    // Las filas se sembraron a mano, sin pasar por las mutaciones que llevan
+    // los contadores: se reconstruyen desde las tablas, que es también lo que
+    // se hace al estrenar la tabla en un despliegue con datos.
+    await t.mutation(internal.contadores.reconstruir, {});
+    await ejecutarAgendadas(t);
 
     expect(await codigoDe(ana.como.query(api.usuarios.listar, {}))).toBe("solo_admin");
     const lista = await admin.como.query(api.usuarios.listar, {});
@@ -979,6 +1010,9 @@ describe("estadisticas.sistema", () => {
       await ctx.db.insert("feedback", { messageId: viejaPregunta, userId: ana.id, rating: 1, creadoEn: ahora });
       await ctx.db.insert("feedback", { messageId: viejaPregunta, userId: admin.id, rating: -1, creadoEn: ahora });
     });
+    // Sembrado a mano: los contadores se reconstruyen desde las tablas.
+    await t.mutation(internal.contadores.reconstruir, {});
+    await ejecutarAgendadas(t);
 
     expect(await codigoDe(ana.como.query(api.estadisticas.sistema, { ahora: Date.now() }))).toBe("solo_admin");
     const stats = await admin.como.query(api.estadisticas.sistema, { ahora: Date.now() });

@@ -54,4 +54,10 @@ export const repartirSincronizaciones = internalMutation({
 
 crons.interval("sincronizar fuentes conectadas", { minutes: 60 }, internal.crons.repartirSincronizaciones, {});
 
+// Red por debajo del perro guardián de cada turno: un turno del asistente que
+// siga en marcha pasado su presupuesto se cierra como error de tiempo, para
+// que ninguna fila se quede en "redactando" para siempre (ver
+// mensajes.cerrarColgados).
+crons.interval("cerrar turnos colgados", { minutes: 15 }, internal.mensajes.cerrarColgados, {});
+
 export default crons;

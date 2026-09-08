@@ -2,7 +2,8 @@
 // `ingestar`. Van aparte porque `pipeline.ts` es "use node" y un fichero así
 // solo puede exportar acciones.
 import { v } from "convex/values";
-import { internalMutation, internalQuery } from "../_generated/server";
+import { internalMutation, internalQuery, type MutationCtx } from "../_generated/server";
+import type { Doc, Id } from "../_generated/dataModel";
 import { avisosIngesta, tipoFragmento } from "../schema";
 
 /** El documento a ingerir, o null si lo borraron. */
@@ -15,13 +16,74 @@ export const documento = internalQuery({
  *  reloj de la base: es el que se compara con `_creationTime` al retirar
  *  fragmentos, así que no puede venir del reloj de la acción. */
 export const abrirRun = internalMutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { documentId: v.optional(v.id("documents")) },
+  handler: async (ctx, { documentId }) => {
     const empezadoEn = Date.now();
-    const runId = await ctx.db.insert("ingestionRuns", { empezadoEn, status: "running" });
+    const runId = await ctx.db.insert("ingestionRuns", {
+      empezadoEn,
+      latidoEn: empezadoEn,
+      documentId,
+      status: "running",
+    });
     return { runId, empezadoEn };
   },
 });
+
+/** El texto con el que se avisa de que OTRA corrida se quedó el documento.
+ *  Lo distingue `pipeline.ingestar` para no limpiar ni marcar nada: lo que
+ *  esta corrida dejó escrito lo retira la nueva, y el estado del documento es
+ *  de la nueva. */
+export const PERDIO_EL_DOCUMENTO = "otra ingesta más reciente reclamó el documento";
+
+/** Una corrida `running` cuyo último latido es más viejo que esto está
+ *  muerta: la acción de Node dura como mucho 10 minutos, así que ninguna
+ *  corrida viva pasa tanto tiempo sin escribir. */
+export const LATIDO_VIVO_MS = 11 * 60_000;
+
+/**
+ * La corrida reclama el documento: desde aquí es SU dueña, y cualquier otra
+ * corrida que estuviera escribiendo se entera en su siguiente escritura y se
+ * detiene. La más reciente gana siempre, sea un reindexado a mano, una
+ * sincronización que trae otra versión o un segundo intento tras un cuelgue:
+ * es la que leyó el fichero más nuevo.
+ *
+ * Devuelve `reclamadoEn` (reloj de la base): es el instante que separa los
+ * fragmentos de esta corrida (`_creationTime` posterior) de todo lo anterior,
+ * incluidos los que una corrida perdedora alcanzó a escribir antes de perder.
+ * Es el `desde` con el que se retiran los antiguos al terminar.
+ */
+export const reclamarDocumento = internalMutation({
+  args: { documentId: v.id("documents"), runId: v.id("ingestionRuns") },
+  handler: async (ctx, { documentId, runId }) => {
+    const doc = await ctx.db.get(documentId);
+    if (!doc) throw new Error("el documento ya no existe en el registro");
+    const reclamadoEn = Date.now();
+    await ctx.db.patch(documentId, { ingestaRunId: runId });
+    await ctx.db.patch(runId, { latidoEn: reclamadoEn, documentId });
+    return { reclamadoEn, doc };
+  },
+});
+
+/** ¿Sigue siendo esta corrida la dueña del documento? Lanza si no, con el
+ *  texto que el pipeline reconoce. Un documento borrado lanza lo suyo.
+ *
+ *  La igualdad es ESTRICTA: un documento sin dueña también rechaza. La
+ *  primera versión aceptaba `ingestaRunId` ausente, y como la corrida que
+ *  terminaba soltaba el documento, la corrida perdedora que despertaba
+ *  después lo encontraba libre y escribía sus fragmentos encima de los de la
+ *  ganadora (lo cazó la prueba adversarial: 10 fragmentos en vez de 5). Por
+ *  eso el documento CONSERVA la última corrida al terminar y `reindexar` mira
+ *  si esa corrida está viva, no si hay dueña. */
+async function exigirPropiedad(
+  ctx: MutationCtx,
+  documentId: Id<"documents">,
+  runId: Id<"ingestionRuns">,
+): Promise<Doc<"documents">> {
+  const doc = await ctx.db.get(documentId);
+  if (!doc) throw new Error("el documento fue borrado durante la ingesta");
+  if (doc.ingestaRunId !== runId) throw new Error(PERDIO_EL_DOCUMENTO);
+  return doc;
+}
 
 export const cerrarRun = internalMutation({
   args: {
@@ -59,10 +121,19 @@ export const insertarChunks = internalMutation({
     documentId: v.id("documents"),
     version: v.string(),
     chunks: v.array(chunkEntrada),
+    // La corrida que escribe. Si el documento ya lo reclamó otra, se lanza y
+    // no se escribe nada: es lo que impide que dos ingestas dupliquen los
+    // fragmentos de la misma versión. Opcional solo por los llamadores
+    // antiguos; el pipeline lo manda siempre.
+    runId: v.optional(v.id("ingestionRuns")),
   },
-  handler: async (ctx, { documentId, version, chunks }) => {
-    const doc = await ctx.db.get(documentId);
+  handler: async (ctx, { documentId, version, chunks, runId }) => {
+    const doc = runId
+      ? await exigirPropiedad(ctx, documentId, runId)
+      : await ctx.db.get(documentId);
     if (!doc) throw new Error("el documento fue borrado durante la ingesta");
+    // Latido: la corrida sigue viva mientras escribe.
+    if (runId) await ctx.db.patch(runId, { latidoEn: Date.now() });
     for (const chunk of chunks) {
       await ctx.db.insert("chunks", {
         ...chunk,
@@ -108,8 +179,16 @@ export const borrarChunks = internalMutation({
     desde: v.number(),
     modo: v.union(v.literal("antiguos"), v.literal("deEstaCorrida")),
     lote: v.number(),
+    runId: v.optional(v.id("ingestionRuns")),
   },
-  handler: async (ctx, { documentId, version, desde, modo, lote }) => {
+  handler: async (ctx, { documentId, version, desde, modo, lote, runId }) => {
+    // Solo la dueña retira fragmentos: una corrida que perdió el documento
+    // podría borrar, en `deEstaCorrida`, lo que la nueva acaba de escribir
+    // (misma versión, creados después de su `desde`).
+    if (runId) {
+      await exigirPropiedad(ctx, documentId, runId);
+      await ctx.db.patch(runId, { latidoEn: Date.now() });
+    }
     const candidatos =
       modo === "antiguos"
         ? await ctx.db
@@ -145,9 +224,10 @@ export const marcarListo = internalMutation({
     language: v.optional(v.string()),
     documentType: v.optional(v.string()),
     avisos: v.optional(avisosIngesta),
+    runId: v.optional(v.id("ingestionRuns")),
   },
-  handler: async (ctx, { documentId, avisos, ...campos }) => {
-    const doc = await ctx.db.get(documentId);
+  handler: async (ctx, { documentId, avisos, runId, ...campos }): Promise<boolean> => {
+    const doc = runId ? await exigirPropiedad(ctx, documentId, runId) : await ctx.db.get(documentId);
     if (!doc) throw new Error("el documento fue borrado durante la ingesta");
     await ctx.db.patch(documentId, {
       ...campos,
@@ -157,17 +237,24 @@ export const marcarListo = internalMutation({
       status: "ready",
       error: undefined,
       ingestadoEn: Date.now(),
+      // `ingestaRunId` se CONSERVA: la corrida cerrada ya no bloquea a nadie
+      // (ver documentos.ingestaViva), y soltar el documento abriría la puerta
+      // a una corrida vieja que despertara después.
     });
+    return true;
   },
 });
 
-/** Documento fallido, con el motivo. Si ya no existe, no hay nada que marcar. */
+/** Documento fallido, con el motivo. Si ya no existe, no hay nada que marcar;
+ *  si lo reclamó otra corrida, tampoco: el estado es de la nueva. */
 export const marcarFallido = internalMutation({
-  args: { documentId: v.id("documents"), error: v.string() },
-  handler: async (ctx, { documentId, error }) => {
+  args: { documentId: v.id("documents"), error: v.string(), runId: v.optional(v.id("ingestionRuns")) },
+  handler: async (ctx, { documentId, error, runId }): Promise<boolean> => {
     const doc = await ctx.db.get(documentId);
-    if (!doc) return;
+    if (!doc) return false;
+    if (runId && doc.ingestaRunId !== runId) return false;
     await ctx.db.patch(documentId, { status: "failed", error, ingestadoEn: Date.now() });
+    return true;
   },
 });
 
