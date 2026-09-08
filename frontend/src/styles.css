@@ -2876,11 +2876,18 @@ textarea {
   margin-left: auto;
 }
 
+/* El CUERPO ENTERO del panel desplaza (banda, fuentes conectadas, subida y
+   lista juntas). Antes solo desplazaba la lista y lo de arriba era fijo: con
+   Notion, Google Drive y OneDrive la parte fija pasaba de la altura de la
+   pantalla, la lista se quedaba sin sitio y no se podía mover nada. */
 .docs-body {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 /* --- zona de subida --- */
@@ -3073,10 +3080,9 @@ textarea {
 }
 
 /* --- listado --- */
+/* Ya no desplaza por su cuenta: crece con su contenido y desplaza `.docs-body`. */
 .docs-list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  flex: none;
   list-style: none;
   margin: 0;
   padding: 2px 14px 16px;
