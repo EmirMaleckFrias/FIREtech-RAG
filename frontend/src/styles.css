@@ -87,7 +87,6 @@
   --green: #16a34a;
   --red: #dc2626;
   --amber: #d97706;
-  --gray-dot: #a8a29e;
 
   --user-bubble: #f0eeeb;
   --code-bg: rgba(0, 0, 0, 0.05);
@@ -168,7 +167,6 @@
   --green: #4ade80;
   --red: #f87171;
   --amber: #f59e0b;
-  --gray-dot: #57534e;
 
   --user-bubble: #1f1f1e;
   --code-bg: rgba(255, 255, 255, 0.065);
@@ -739,34 +737,6 @@ textarea {
   flex-shrink: 0;
 }
 
-.dot-green {
-  position: relative;
-  background: var(--green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
-}
-
-/* pulso suave, solo cuando todo está ok (transform + opacity, compositable) */
-.dot-green::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: var(--green);
-  animation: pulse-ring 2.4s cubic-bezier(0.25, 0.6, 0.35, 1) infinite;
-}
-
-@keyframes pulse-ring {
-  0% {
-    transform: scale(1);
-    opacity: 0.45;
-  }
-  65%,
-  100% {
-    transform: scale(2.7);
-    opacity: 0;
-  }
-}
-
 .dot-red {
   background: var(--red);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 18%, transparent);
@@ -775,10 +745,6 @@ textarea {
 .dot-amber {
   background: var(--amber);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 18%, transparent);
-}
-
-.dot-gray {
-  background: var(--gray-dot);
 }
 
 /* ----------------------------------------------------------------------
@@ -4591,10 +4557,6 @@ button.doc-badge-failed:active {
   .skeleton::after {
     animation: none;
     opacity: 0;
-  }
-
-  .dot-green::after {
-    content: none;
   }
 
   /* sin auto-salida: el "Gracias" queda visible en vez de desvanecerse */

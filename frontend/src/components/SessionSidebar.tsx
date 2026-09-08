@@ -27,11 +27,12 @@ interface SessionSidebarProps {
   onOpenSettings: () => void;
 }
 
-const CONEXION: Record<EstadoConexion, { texto: string; clase: string }> = {
-  conectando: { texto: 'Conectando…', clase: 'dot-gray' },
-  en_linea: { texto: 'En línea', clase: 'dot-green' },
-  sin_conexion: { texto: 'Sin conexión', clase: 'dot-red' },
-};
+// Del estado de la conexión solo se pinta el MALO. "En línea" con su punto
+// verde estaba siempre ahí sin decir nada: quien usa la aplicación da por
+// hecho que funciona, y un adorno permanente en el pie de la barra lateral es
+// ruido. "Sin conexión" sí importa, porque explica por qué el asistente no
+// responde, y "Conectando…" tampoco se enseña: dura un instante al abrir y
+// parpadeaba en cada carga.
 
 /** Etiqueta de grupo por fecha relativa, estilo ChatGPT/Claude. */
 function groupLabel(ms: number, now: Date): string {
@@ -85,7 +86,7 @@ export function SessionSidebar({
   const [deleting, setDeleting] = useState<Id<'sessions'> | null>(null);
   const [deleteError, setDeleteError] = useState<{ id: Id<'sessions'>; text: string } | null>(null);
 
-  const estado = CONEXION[conexion];
+  const sinConexion = conexion === 'sin_conexion';
   const groups = groupSessions(sessions);
 
   const handleDelete = async (id: Id<'sessions'>) => {
@@ -264,10 +265,12 @@ export function SessionSidebar({
             )}
           </div>
 
-          <div className="sidebar-footer" title="Estado de la conexión con Convex">
-            <span className={`health-dot ${estado.clase}`} aria-hidden="true" />
-            <span className="sidebar-status-text">{estado.texto}</span>
-          </div>
+          {sinConexion && (
+            <div className="sidebar-footer" role="status" title="No hay conexión con el servidor">
+              <span className="health-dot dot-red" aria-hidden="true" />
+              <span className="sidebar-status-text">Sin conexión</span>
+            </div>
+          )}
         </div>
       </div>
     </aside>

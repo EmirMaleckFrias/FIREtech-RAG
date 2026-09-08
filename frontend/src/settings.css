@@ -167,7 +167,6 @@
 :root[data-reducir-movimiento='true'] .caret,
 :root[data-reducir-movimiento='true'] .feedback-thanks { animation: none; opacity: 1; }
 :root[data-reducir-movimiento='true'] .stream-caret::before,
-:root[data-reducir-movimiento='true'] .dot-green::after { content: none; }
 :root[data-reducir-movimiento='true'] .shimmer-text {
   animation: none; background: none; -webkit-text-fill-color: currentColor; color: var(--text-2);
 }
