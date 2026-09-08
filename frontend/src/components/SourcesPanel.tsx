@@ -1,336 +1,211 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useSheetDrag } from '../lib/useSheetDrag';
 import { piezasDeMeta, tituloDeFuente } from '../lib/fuentes';
-import { citationFileKey, citationPages, extractCitations } from '../lib/markdown';
-import type { ChatMessage, Source, SourceFocus } from '../types';
-import { IconChevronDown, IconDocument } from './icons';
+import {
+  agruparFuentes, enlaceDoi, filtrarFuentes, puntosDeFuentes, resolverDestino,
+  textoParaCopiar, type FiltroFuentes, type FuenteExplorable,
+} from '../lib/exploradorFuentes';
+import { usePreferencias } from '../lib/preferencias';
+import type { ChatMessage, SourceFocus } from '../types';
+import {
+  IconAlert, IconCheck, IconChevronDown, IconCopy, IconDocument,
+  IconPanelRight, IconSearch, IconX,
+} from './icons';
+import './SourcesPanel.css';
 
 interface SourcesPanelProps {
   open: boolean;
-  /** Mensaje del asistente cuyas fuentes se muestran (o null si no hay). */
   message: ChatMessage | null;
   focus: SourceFocus | null;
-  /** Cierre (scrim, swipe-down del bottom sheet en móvil). */
   onClose: () => void;
 }
 
-/* ------------------------------- modelo ---------------------------------- */
-
-interface SourceItem {
-  /** Clave estable de la tarjeta (dedupe, refs, expansión). */
-  key: string;
-  source: Source;
-  cited: boolean;
-}
-
-interface SourceGroup {
-  /** Nombre de archivo tal cual llegó (primera aparición). */
-  file: string;
-  fileKey: string;
-  items: SourceItem[];
-  citedCount: number;
-}
-
-/** Páginas citadas de un archivo; all=true si alguna cita no menciona página. */
-interface CitedEntry {
-  all: boolean;
-  pages: Set<number>;
-}
-
-function buildCitedMap(content: string): Map<string, CitedEntry> {
-  const map = new Map<string, CitedEntry>();
-  for (const ref of extractCitations(content)) {
-    const key = citationFileKey(ref.file);
-    let entry = map.get(key);
-    if (!entry) {
-      entry = { all: false, pages: new Set() };
-      map.set(key, entry);
-    }
-    const pages = citationPages(ref);
-    if (pages.length === 0) entry.all = true;
-    else for (const p of pages) entry.pages.add(p);
-  }
-  return map;
-}
-
-/** Claves con las que una cita puede referirse a esta fuente.
- *
- *  El modelo cita por el nombre del archivo, pero cuando el documento es un
- *  artículo con autor y año cita "Allegri et al., 2021", que es como se cita
- *  de verdad un trabajo. Sin esta segunda clave, esas citas no enlazaban con
- *  su fuente y el panel mostraba todo como no citado. */
-function sourceKeys(s: Source): string[] {
-  const claves = [citationFileKey(s.source_file)];
-  if (s.citation) claves.push(citationFileKey(s.citation));
-  return claves;
-}
-
-function isCited(s: Source, citedMap: Map<string, CitedEntry>): boolean {
-  for (const clave of sourceKeys(s)) {
-    const entry = citedMap.get(clave);
-    if (!entry) continue;
-    if (entry.all) return true;
-    // Fuente sin página de un archivo citado: no se puede descartar, cuenta.
-    if (s.page === null) return true;
-    if (entry.pages.has(s.page)) return true;
-  }
-  return false;
-}
-
-/**
- * Dedupe fuerte por archivo, página y fragmento
- * y agrupación por archivo. Citadas primero: dentro de cada grupo y los
- * grupos con citadas por delante (orden estable en ambas particiones).
- */
-function buildGroups(sources: Source[], citedMap: Map<string, CitedEntry>): SourceGroup[] {
-  const groups: SourceGroup[] = [];
-  const byFile = new Map<string, SourceGroup>();
-  const seen = new Set<string>();
-
-  for (const s of sources) {
-    const fileKey = citationFileKey(s.source_file);
-    const identity = `t:${s.snippet.trim().slice(0, 80)}`;
-    const key = `${fileKey}|${s.page ?? 'x'}|${identity}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    let group = byFile.get(fileKey);
-    if (!group) {
-      group = { file: s.source_file, fileKey, items: [], citedCount: 0 };
-      byFile.set(fileKey, group);
-      groups.push(group);
-    }
-    const cited = isCited(s, citedMap);
-    group.items.push({ key, source: s, cited });
-    if (cited) group.citedCount++;
-  }
-
-  for (const g of groups) {
-    g.items = [...g.items.filter((i) => i.cited), ...g.items.filter((i) => !i.cited)];
-  }
-  return [...groups.filter((g) => g.citedCount > 0), ...groups.filter((g) => g.citedCount === 0)];
-}
-
-/* ------------------------------ helpers UI -------------------------------- */
-
-function scorePercent(score: number | null): number | null {
-  if (score === null || Number.isNaN(score)) return null;
-  const clamped = Math.max(0, Math.min(1, score));
-  return Math.round(clamped * 100);
-}
-
-/** Badge del tipo de fragmento (solo los que aportan contexto). */
-function chunkBadge(chunkType: string | undefined): string | null {
-  if (chunkType === 'table') return 'Tabla';
-  return null;
-}
-
-/** Etiqueta del grado que dio el calificador. Vacio = sin calificar, y
- *  entonces no se pinta nada: "sin etiqueta" no debe leerse como "no sirve". */
-function gradoLabel(grado: Source['grado']): string | null {
-  if (grado === 'directa') return 'Directa';
-  if (grado === 'parcial') return 'Parcial';
-  return null;
-}
-
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  );
-}
-
-/* --------------------------------- panel ---------------------------------- */
-
 export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProps) {
-  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
-  /** Overrides del usuario sobre el colapsado por defecto de cada grupo. */
-  const [groupToggles, setGroupToggles] = useState<Map<string, boolean>>(new Map());
-  const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const pendingScroll = useRef<string | null>(null);
+  const [busqueda, setBusqueda] = useState('');
+  const [filtro, setFiltro] = useState<FiltroFuentes>('todas');
+  const [punto, setPunto] = useState('');
+  const [ampliado, setAmpliado] = useState(false);
+  const [overlay, setOverlay] = useState(false);
+  const [expandidas, setExpandidas] = useState<Set<string>>(new Set());
+  const [gruposAbiertos, setGruposAbiertos] = useState<Map<string, boolean>>(new Map());
+  const [resaltadas, setResaltadas] = useState<Set<string>>(new Set());
+  const [aviso, setAviso] = useState('');
+  const [copia, setCopia] = useState<{ key: string; estado: 'copiando' | 'copiado' | 'error' } | null>(null);
+  const [scrollTarget, setScrollTarget] = useState<string | null>(null);
   const panelRef = useRef<HTMLElement>(null);
   const grabberRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const focoConsumido = useRef<number | null>(null);
+  const copiaVersion = useRef(0);
+  const preferencias = usePreferencias();
   const msgKey = message?.localId ?? null;
-  const content = message?.content ?? '';
-  const rawSources = message?.sources;
-  const plan = message?.plan ?? [];
+  const grupos = useMemo(() => agruparFuentes(message?.sources ?? [], message?.content ?? ''),
+    [message?.sources, message?.content]);
+  const puntos = useMemo(() => puntosDeFuentes(message), [message?.plan, message?.hops, message?.verificacion]);
+  const visibles = useMemo(() => filtrarFuentes(grupos, busqueda, filtro, punto), [grupos, busqueda, filtro, punto]);
+  const total = grupos.reduce((n, g) => n + g.items.length, 0);
+  const citadas = grupos.reduce((n, g) => n + g.items.filter((i) => i.cita !== null).length, 0);
+  const mostradas = visibles.reduce((n, g) => n + g.items.length, 0);
+  const filtrando = Boolean(busqueda.trim() || punto || filtro !== 'todas');
 
-  // Bottom sheet en móvil: swipe-down sobre el asa cierra el panel.
   useSheetDrag(panelRef, grabberRef, onClose);
 
-  // Al cambiar de mensaje, colapsa tarjetas y resetea los grupos.
   useEffect(() => {
-    setExpandedCards(new Set());
-    setGroupToggles(new Map());
+    if (copia?.estado !== 'copiado') return;
+    const timer = window.setTimeout(() => setCopia(null), 2400);
+    return () => window.clearTimeout(timer);
+  }, [copia]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 1100px)');
+    const actualizar = () => setOverlay(media.matches);
+    actualizar();
+    media.addEventListener('change', actualizar);
+    return () => media.removeEventListener('change', actualizar);
+  }, []);
+
+  useEffect(() => {
+    setBusqueda(''); setFiltro('todas'); setPunto('');
+    setExpandidas(new Set()); setGruposAbiertos(new Map()); setResaltadas(new Set());
+    setAviso(''); setCopia(null); setScrollTarget(null);
+    copiaVersion.current++;
+    return () => { copiaVersion.current++; };
   }, [msgKey]);
 
-  // Citas (archivo, página) presentes en la respuesta: mismo parser que los chips.
-  const citedMap = useMemo(() => buildCitedMap(content), [content]);
-
-  const groups = useMemo(
-    () => buildGroups(rawSources ?? [], citedMap),
-    [rawSources, citedMap],
-  );
-
-  const totalCount = useMemo(() => groups.reduce((n, g) => n + g.items.length, 0), [groups]);
-  const citedCount = useMemo(() => groups.reduce((n, g) => n + g.citedCount, 0), [groups]);
-
-  // Colapsado por defecto: solo si hay >2 grupos Y el grupo no tiene citadas.
-  const groupIsOpen = (g: SourceGroup): boolean =>
-    groupToggles.get(g.fileKey) ?? (groups.length <= 2 || g.citedCount > 0);
-
-  // Clic en una cita del mensaje: expande el grupo + la tarjeta y desplaza.
+  // En escritorio se puede seguir leyendo el chat; en overlay el foco no
+  // debe escaparse detrás del panel. Al cerrar vuelve al control anterior.
   useEffect(() => {
-    if (!focus || !message) return;
-    // La cita puede venir por nombre de archivo o por referencia del trabajo
-    // ("Allegri et al., 2021"), asi que se busca el grupo por las dos vias.
-    const clave = citationFileKey(focus.file);
-    const group =
-      groups.find((g) => g.fileKey === clave) ??
-      groups.find((g) => g.items.some((i) => sourceKeys(i.source).includes(clave)));
-    if (!group) return;
-    const fileKey = group.fileKey;
-    const target =
-      (focus.page !== null
-        ? group.items.find((i) => i.source.page === focus.page)
-        : undefined) ??
-      group.items.find((i) => focus.page === null || i.source.page === null) ??
-      group.items[0];
-    if (!target) return;
-    setGroupToggles((prev) => {
-      const next = new Map(prev);
-      next.set(fileKey, true);
-      return next;
-    });
-    setExpandedCards((prev) => {
-      const next = new Set(prev);
-      next.add(target.key);
-      return next;
-    });
-    pendingScroll.current = target.key;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focus?.token]);
+    if (!open) return;
+    const anterior = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (overlay) closeRef.current?.focus();
+    return () => {
+      if (panelRef.current?.contains(document.activeElement)) anterior?.focus();
+    };
+  }, [open, overlay]);
 
-  // El scroll corre tras el render que monta la tarjeta (el grupo pudo estar
-  // colapsado). Respeta prefers-reduced-motion: sin smooth scrolling.
   useEffect(() => {
-    const key = pendingScroll.current;
-    if (key === null) return;
-    const el = itemRefs.current.get(key);
-    if (!el) return; // aún no montada: reintenta en el siguiente render
-    pendingScroll.current = null;
+    if (!open || !focus || !message || focoConsumido.current === focus.token) return;
+    // Mientras llegan las fuentes, conservar la solicitud de navegación.
+    if (grupos.length === 0 && message.streaming) return;
+    const destino = resolverDestino(grupos, focus);
+    if (destino.estado !== 'encontrada' && message.streaming) return;
+    focoConsumido.current = focus.token;
+    setBusqueda(''); setFiltro('todas'); setPunto(''); setResaltadas(new Set());
+    if (destino.estado === 'encontrada') {
+      setAviso('');
+      setGruposAbiertos((prev) => new Map(prev).set(destino.grupo, true));
+      setExpandidas((prev) => new Set([...prev, ...destino.tarjetas]));
+      setResaltadas(new Set(destino.tarjetas));
+      setScrollTarget(destino.tarjetas[0]);
+    } else if (destino.estado === 'pagina_ausente') {
+      setGruposAbiertos((prev) => new Map(prev).set(destino.grupo, true));
+      setAviso('No tenemos un fragmento de la página ' + focus.page +
+        ' para esta respuesta. El documento aparece abajo, pero no lo sustituimos por otra página.');
+    } else if (destino.estado === 'ambigua') {
+      setAviso('Esta referencia coincide con varios documentos. Revisa el nombre del archivo: no podemos elegir uno con seguridad.');
+    } else {
+      setAviso('No encontramos esta referencia entre las fuentes disponibles de la respuesta.');
+    }
+  }, [open, focus, grupos, message]);
+
+  useEffect(() => {
+    if (!open || !scrollTarget) return;
+    const el = itemRefs.current.get(scrollTarget);
+    if (!el) return;
+    el.focus({ preventScroll: true });
     el.scrollIntoView({
-      behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+      behavior: preferencias.reducirMovimiento || window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
       block: 'nearest',
     });
-  });
+    setScrollTarget(null);
+  }, [open, scrollTarget, visibles, expandidas, preferencias.reducirMovimiento]);
 
-  const toggleCard = (key: string) => {
-    setExpandedCards((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  const limpiar = () => { setBusqueda(''); setFiltro('todas'); setPunto(''); };
+  const grupoAbierto = (key: string, index: number) => gruposAbiertos.get(key) ?? (filtrando || index < 2);
+  const copiar = async (item: FuenteExplorable) => {
+    const version = ++copiaVersion.current;
+    setCopia({ key: item.key, estado: 'copiando' });
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Portapapeles no disponible');
+      await navigator.clipboard.writeText(textoParaCopiar(item.source));
+      if (copiaVersion.current === version) setCopia({ key: item.key, estado: 'copiado' });
+    } catch {
+      if (copiaVersion.current === version) setCopia({ key: item.key, estado: 'error' });
+    }
   };
 
-  const toggleGroup = (g: SourceGroup) => {
-    const open = groupIsOpen(g);
-    setGroupToggles((prev) => {
-      const next = new Map(prev);
-      next.set(g.fileKey, !open);
-      return next;
-    });
+  const teclado = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === 'Escape') { e.stopPropagation(); onClose(); return; }
+    if (!overlay || e.key !== 'Tab') return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const controles = [...panel.querySelectorAll<HTMLElement>('button:not([disabled]), input, select, a[href], summary')]
+      .filter((el) => el.tabIndex >= 0 && el.getClientRects().length > 0);
+    const primero = controles[0], ultimo = controles[controles.length - 1];
+    if (!primero || !ultimo) return;
+    if (e.shiftKey && (document.activeElement === primero || !panel.contains(document.activeElement))) {
+      e.preventDefault(); ultimo.focus();
+    } else if (!e.shiftKey && (document.activeElement === ultimo || !panel.contains(document.activeElement))) {
+      e.preventDefault(); primero.focus();
+    }
   };
 
-  const renderCard = (item: SourceItem) => {
+  const tarjeta = (item: FuenteExplorable, index: number) => {
     const s = item.source;
-    const title = tituloDeFuente(s);
-    const badge = chunkBadge(s.chunk_type);
-    const isOpen = expandedCards.has(item.key);
-    const dimmed = citedCount > 0 && !item.cited;
-    const pct = scorePercent(s.score);
-    const grado = gradoLabel(s.grado);
-    // De dónde sale y para qué sirvió, sin repetir lo que ya dice el título
-    // (ver lib/fuentes.ts).
-    const meta = piezasDeMeta(s, plan, title);
-
+    const expandida = expandidas.has(item.key);
+    const meta = piezasDeMeta(s, [], tituloDeFuente(s)).filter((p) => p.clase !== 'source-meta-plan');
+    const doi = enlaceDoi(s.doi);
+    const relacionados = puntos.filter((p) => s.plan_items?.includes(p.id));
+    const estadoCopia = copia?.key === item.key ? copia.estado : null;
     return (
-      <div
-        key={item.key}
-        ref={(el) => {
-          if (el) itemRefs.current.set(item.key, el);
-          else itemRefs.current.delete(item.key);
-        }}
-        className={`source-card ${isOpen ? 'source-open' : ''} ${dimmed ? 'source-uncited' : ''}`}
-      >
-        <button
-          type="button"
-          className="source-head"
-          onClick={() => toggleCard(item.key)}
-          aria-expanded={isOpen}
-        >
-          <span className="source-doc-icon" aria-hidden="true">
-            <IconDocument size={15} />
-          </span>
-          <span className="source-badge">
-            <span className="source-title-line">
-              <span className="source-title">{title}</span>
-              {item.cited && <span className="badge-cited">Citada</span>}
-              {grado !== null && (
-                <span
-                  className={`badge-grado badge-grado-${s.grado}`}
-                  title={
-                    s.grado === 'directa'
-                      ? 'El calificador juzgo que este fragmento responde directamente a su punto'
-                      : 'El calificador juzgo que este fragmento responde solo en parte a su punto'
-                  }
-                >
-                  {grado}
-                </span>
-              )}
-              {badge !== null && <span className="badge-type">{badge}</span>}
+      <div key={item.key} className={`fuentes-card ${resaltadas.has(item.key) ? 'fuentes-highlight' : ''}`}
+        tabIndex={-1} ref={(el) => { if (el) itemRefs.current.set(item.key, el); else itemRefs.current.delete(item.key); }}>
+        <button type="button" className="fuentes-card-head" aria-expanded={expandida}
+          onClick={() => setExpandidas((prev) => {
+            const next = new Set(prev);
+            if (next.has(item.key)) next.delete(item.key); else next.add(item.key);
+            return next;
+          })}>
+          <span className="fuentes-fragment-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+          <span className="fuentes-card-heading">
+            <span className="fuentes-card-location">{s.locator || (s.page !== null ? `Página ${s.page}` : 'Fragmento sin página')}</span>
+            <span className="fuentes-badges">
+              {item.cita && <span className="fuentes-cited">{item.cita === 'pagina' ? 'Página citada' : 'Documento citado'}</span>}
+              {s.chunk_type === 'table' && <span>Tabla</span>}
             </span>
-            {/* Las piezas van cada una en su caja y la fila las deja pasar
-                de línea: en 320 px, un `flex` sin envoltura las aplastaba por
-                debajo de su contenido y el texto se pintaba encima de la
-                vecina. El separador es hermano, no hijo, para que el nombre
-                del fichero pueda recortarse sin llevárselo. */}
-            {meta.length > 0 && (
-              <span className="source-meta">
-                {meta.map((pieza, i) => (
-                  <Fragment key={i}>
-                    {i > 0 && (
-                      <span className="source-sep" aria-hidden="true">
-                        ·
-                      </span>
-                    )}
-                    <span className={`source-meta-item ${pieza.clase ?? ''}`} title={pieza.titulo}>
-                      {pieza.texto}
-                    </span>
-                  </Fragment>
-                ))}
-              </span>
-            )}
           </span>
-          <IconChevronDown size={13} className="source-chevron" />
+          <IconChevronDown size={14} className={expandida ? 'fuentes-chevron-open' : ''} />
         </button>
-
-        {isOpen && (
-          <div className="source-snippet">{s.snippet || 'Sin fragmento disponible.'}</div>
-        )}
-
-        {s.score !== null && (
-          <div className="source-score" title={`Score: ${s.score.toFixed(4)}`}>
-            <div className="score-bar">
-              {/* scaleX (no width): anima de 0 a su valor al montar, compositable */}
-              <div
-                className="score-fill"
-                style={{ transform: `scaleX(${(pct ?? 0) / 100})` }}
-              />
+        {!expandida && <p className="fuentes-preview">{s.snippet || 'Sin fragmento disponible.'}</p>}
+        {expandida && (
+          <div className="fuentes-card-body">
+            {meta.length > 0 && <p className="fuentes-meta">{meta.map((m) => m.texto).join(' · ')}</p>}
+            <div className="fuentes-snippet">{s.snippet || 'Sin fragmento disponible.'}</div>
+            {relacionados.length > 0 && (
+              <div className="fuentes-related">
+                <span>Recuperado para</span>
+                {relacionados.map((p) => <button type="button" key={p.id} onClick={() => {
+                  setPunto(p.id); setBusqueda(''); setFiltro('todas');
+                }}>{p.texto}</button>)}
+              </div>
+            )}
+            {(s.grado || (s.score !== null && Number.isFinite(s.score))) && (
+              <details className="fuentes-technical">
+                <summary>Detalles de recuperación</summary>
+                {s.grado && <p>Relevancia {s.grado === 'directa' ? 'directa' : 'parcial'} según el calificador para el punto buscado. No es un dictamen sobre la respuesta completa.</p>}
+                {s.score !== null && Number.isFinite(s.score) && <p>Score de recuperación: {s.score.toFixed(4)}. No es un porcentaje de certeza ni de fidelidad.</p>}
+              </details>
+            )}
+            <div className="fuentes-actions">
+              <button type="button" disabled={copia?.estado === 'copiando' || !s.snippet}
+                onClick={() => void copiar(item)}>
+                {estadoCopia === 'copiado' ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                {estadoCopia === 'copiado' ? 'Copiado' : estadoCopia === 'copiando' ? 'Copiando…' : 'Copiar con referencia'}
+              </button>
+              {doi && <a href={doi} target="_blank" rel="noopener noreferrer" aria-label="Abrir DOI en una pestaña nueva">Abrir DOI ↗</a>}
             </div>
-            <span className="score-num">{s.score.toFixed(2)}</span>
+            {estadoCopia === 'error' && <p className="fuentes-copy-error" role="alert">No se pudo copiar. Puedes seleccionar y copiar el fragmento manualmente.</p>}
           </div>
         )}
       </div>
@@ -338,65 +213,96 @@ export function SourcesPanel({ open, message, focus, onClose }: SourcesPanelProp
   };
 
   return (
-    <aside ref={panelRef} className={`sources-panel ${open ? '' : 'sources-closed'}`}>
+    <aside ref={panelRef} className={`sources-panel fuentes-panel ${ampliado ? 'fuentes-wide' : ''} ${open ? '' : 'sources-closed'}`}
+      aria-label="Fuentes de la respuesta" aria-hidden={!open} role={overlay ? 'dialog' : undefined}
+      aria-modal={overlay && open ? true : undefined} onKeyDown={teclado}>
       <div ref={grabberRef} className="sheet-grabber" aria-hidden="true" />
-      <div className="sources-inner">
-        <div className="sources-header">
-          <h2>Fuentes</h2>
-          {totalCount > 0 && <span className="sources-badge-count">{totalCount}</span>}
-          {citedCount > 0 && (
-            <span className="sources-cited-note">
-              · {citedCount} {citedCount === 1 ? 'citada' : 'citadas'}
-            </span>
+      <div className="sources-inner fuentes-inner">
+        <header className="fuentes-header">
+          <span className="fuentes-header-icon"><IconDocument size={20} /></span>
+          <div><h2>Fuentes</h2><p>Explora la evidencia de esta respuesta</p></div>
+          <div className="fuentes-header-actions">
+            <button type="button" className="icon-btn fuentes-expand" aria-pressed={ampliado}
+              title={ampliado ? 'Reducir panel' : 'Ampliar panel'} aria-label={ampliado ? 'Reducir panel' : 'Ampliar panel'}
+              onClick={() => setAmpliado((v) => !v)}><IconPanelRight size={17} /></button>
+            <button type="button" className="icon-btn" ref={closeRef} onClick={onClose} aria-label="Cerrar fuentes" title="Cerrar fuentes"><IconX size={17} /></button>
+          </div>
+        </header>
+        <div className="fuentes-body">
+          {aviso && <p className="fuentes-warning" role="status"><IconAlert size={16} />{aviso}</p>}
+          {total === 0 ? (
+            <div className="fuentes-empty">
+              <IconDocument size={30} />
+              <h3>{message?.streaming ? 'Reuniendo evidencia' : 'Aquí empieza la verificación'}</h3>
+              <p>{message?.streaming ? 'Las fuentes aparecerán mientras avanza la búsqueda.' :
+                'Selecciona una cita o abre las fuentes de una respuesta para consultar sus fragmentos.'}</p>
+            </div>
+          ) : (
+            <>
+              <div className="fuentes-summary">
+                <div><strong>{grupos.length}</strong><span>{grupos.length === 1 ? 'documento' : 'documentos'}</span></div>
+                <div><strong>{total}</strong><span>{total === 1 ? 'fragmento' : 'fragmentos'}</span></div>
+                <div><strong>{citadas}</strong><span>con cita asociada</span></div>
+              </div>
+              <div className="fuentes-tools">
+                <div className="fuentes-search">
+                  <IconSearch size={16} />
+                  <input type="search" value={busqueda} onChange={(e) => setBusqueda(e.target.value)}
+                    placeholder="Título, autor o texto…" aria-label="Buscar en las fuentes de esta respuesta" />
+                </div>
+                <div className="fuentes-filters" role="group" aria-label="Filtrar fuentes">
+                  <button type="button" aria-pressed={filtro === 'todas'} onClick={() => setFiltro('todas')}>Todas <span>{total}</span></button>
+                  <button type="button" aria-pressed={filtro === 'citadas'} onClick={() => setFiltro('citadas')}>Citadas <span>{citadas}</span></button>
+                </div>
+                {puntos.length > 0 && <label className="fuentes-point">
+                  <span>Punto investigado</span>
+                  <select value={punto} onChange={(e) => setPunto(e.target.value)}>
+                    <option value="">Todos los puntos</option>
+                    {puntos.map((p) => <option value={p.id} key={p.id}>{p.texto}</option>)}
+                  </select>
+                </label>}
+                {punto && <p className="fuentes-selected-point">{puntos.find((p) => p.id === punto)?.texto}</p>}
+              </div>
+              <details className="fuentes-explanation">
+                <summary>¿Qué significa «citada»?</summary>
+                <p>La respuesta menciona ese documento o página. No garantiza que cada fragmento de esa página respalde una afirmación. «Recuperado para» indica el punto que motivó la búsqueda, no una verificación.</p>
+              </details>
+              <div className="fuentes-result-toolbar">
+                <span role="status">{mostradas} de {total} {total === 1 ? 'fragmento' : 'fragmentos'} · {visibles.length} {visibles.length === 1 ? 'documento' : 'documentos'}</span>
+                {filtrando && <button type="button" onClick={limpiar}>Limpiar filtros</button>}
+              </div>
+              {visibles.length === 0 ? (
+                <div className="fuentes-empty fuentes-no-results"><IconSearch size={24} /><h3>Sin coincidencias</h3>
+                  <p>No hay fragmentos que coincidan con estos filtros en esta respuesta.</p>
+                  <button type="button" onClick={limpiar}>Mostrar todas las fuentes</button>
+                </div>
+              ) : (
+                <div className="fuentes-results">
+                  {visibles.map((g, index) => {
+                    const expandido = grupoAbierto(g.key, index);
+                    const source = g.items[0].source;
+                    return <section key={g.key} className="fuentes-group">
+                      <button type="button" className="fuentes-group-head" aria-expanded={expandido}
+                        onClick={() => setGruposAbiertos((prev) => new Map(prev).set(g.key, !expandido))}>
+                        <span className="fuentes-file-icon"><IconDocument size={17} /></span>
+                        <span className="fuentes-group-title">
+                          <strong>{tituloDeFuente(source)}</strong>
+                          {source.title && source.title !== tituloDeFuente(source)
+                            ? <span>{source.title}</span>
+                            : g.file !== tituloDeFuente(source) ? <span>{g.file}</span> : null}
+                          <small>{g.items.length} {g.items.length === 1 ? 'fragmento' : 'fragmentos'}</small>
+                        </span>
+                        <IconChevronDown size={14} className={expandido ? 'fuentes-chevron-open' : ''} />
+                      </button>
+                      {expandido && <div className="fuentes-group-body">{g.items.map(tarjeta)}</div>}
+                    </section>;
+                  })}
+                </div>
+              )}
+            </>
           )}
+          <span className="fuentes-sr-only" role="status">{copia?.estado === 'copiado' ? 'Fragmento y referencia copiados.' : ''}</span>
         </div>
-
-        {totalCount === 0 ? (
-          <div className="sources-empty">
-            <span className="sources-empty-icon" aria-hidden="true">
-              <IconDocument size={22} />
-            </span>
-            <p>
-              {message?.streaming
-                ? 'Buscando en los documentos…'
-                : 'Las fuentes de la respuesta aparecerán aquí. Haz clic en una cita dentro de la respuesta para resaltar su fuente.'}
-            </p>
-          </div>
-        ) : (
-          <div className="sources-list">
-            {groups.map((g) => {
-              const isOpen = groupIsOpen(g);
-              return (
-                <section key={g.fileKey} className="source-group">
-                  <button
-                    type="button"
-                    className="source-group-head"
-                    aria-expanded={isOpen}
-                    onClick={() => toggleGroup(g)}
-                  >
-                    <span className="source-group-icon" aria-hidden="true">
-                      <IconDocument size={13} />
-                    </span>
-                    <span className="source-group-file" title={g.file}>
-                      {g.file}
-                    </span>
-                    <span className="source-sep">·</span>
-                    <span className="source-group-count">
-                      {g.items.length} {g.items.length === 1 ? 'fragmento' : 'fragmentos'}
-                    </span>
-                    {g.citedCount > 0 && (
-                      <span className="source-group-cited">
-                        {g.citedCount} {g.citedCount === 1 ? 'citada' : 'citadas'}
-                      </span>
-                    )}
-                    <IconChevronDown size={13} className="source-chevron" />
-                  </button>
-                  {isOpen && <div className="source-group-body">{g.items.map(renderCard)}</div>}
-                </section>
-              );
-            })}
-          </div>
-        )}
       </div>
     </aside>
   );

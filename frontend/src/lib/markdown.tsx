@@ -35,51 +35,37 @@ export function Markdown({ text, onCitation, tail }: MarkdownProps) {
 
 /* ---------------------------------- citas --------------------------------- */
 
-/** Extensiones indexables (fuente única de la lista, siempre con flag "i"). */
-const CITATION_EXTS = 'pdf|xlsx|csv|txt|md';
+/** Extensiones que se pueden citar sin un localizador de página. */
+const CITATION_EXTS = 'pdf|docx|xlsx|csv|txt|md|png|jpe?g|webp|tiff?|bmp';
 
-/**
- * Token de cita. Fuente ÚNICA del patrón: la comparten el renderizador
- * inline (chips) y extractCitations (panel de fuentes): no duplicar en
- * otros módulos, y compilar SIEMPRE sus derivados con la flag "i".
- *
- * Formatos aceptados:
- *   [archivo.pdf, pág. 3]   con cualquier extensión indexable (pdf, xlsx,
- *                           csv, txt, md) y cualquier capitalización (.PDF)
- *   [archivo.xlsx]          con extensión y sin página
- *   [archivo, pág. 3]       sin extensión pero con página ("pág", "págs",
- *                           "página", "pag"...): el resto del pipeline ya
- *                           tolera nombres sin extensión (citationFileKey).
- */
+/** Un único token para los chips del chat y el panel. El nombre puede
+ * contener comas (autor, año); la página empieza en "pág.", NO en el año. */
 const CITATION_TOKEN_RE = new RegExp(
-  `\\[[^\\[\\]\\n]*?\\.(?:${CITATION_EXTS})\\b[^\\]\\n]*\\]` +
-    `|\\[[^\\[\\]\\n,]+,\\s*p[aá]g(?:ina)?s?\\.?\\s*\\d[^\\]\\n]*\\]`,
+  '\\[[^\\[\\]\\n]*?\\.(?:' + CITATION_EXTS + ')\\b[^\\]\\n]*\\]' +
+    '|\\[[^\\[\\]\\n]+?,\\s*p[aá]g(?:ina)?s?\\.?\\s*\\d[^\\]\\n]*\\]' +
+    '|\\[[^\\[\\]\\n]+,\\s*(?:18|19|20)\\d{2}[a-z]?\\s*\\]',
   'i',
 );
-
-/** Cita con extensión: el nombre termina en ella (haya coma después o no). */
 const CITATION_WITH_EXT_RE = new RegExp(
-  `^\\[\\s*([^\\],]*?\\.(?:${CITATION_EXTS}))\\b\\s*,?\\s*(.*)\\]$`,
-  'i',
+  '^\\[\\s*([^\\]\\n]*?\\.(?:' + CITATION_EXTS + '))\\b\\s*,?\\s*(.*)\\]$', 'i',
 );
-/** Cita sin extensión: el nombre llega hasta la primera coma (o el cierre). */
-const CITATION_NO_EXT_RE = /^\[\s*([^\],]+?)\s*(?:,\s*(.*))?\]$/;
+const CITATION_WITH_PAGE_RE = /^\[\s*([^\[\]\n]+?)\s*,\s*p[aá]g(?:ina)?s?\.?\s*(\d[^\]\n]*)\]$/i;
+const CITATION_AUTHOR_YEAR_RE = /^\[\s*([^\[\]\n]+,\s*(?:18|19|20)\d{2}[a-z]?)\s*\]$/i;
 
 export function parseCitation(raw: string): CitationRef | null {
-  const m = CITATION_WITH_EXT_RE.exec(raw) ?? CITATION_NO_EXT_RE.exec(raw);
-  if (!m) return null;
-  const file = m[1].trim();
-  if (file === '') return null;
-  const rest = m[2] ?? '';
+  const page = CITATION_WITH_PAGE_RE.exec(raw);
+  const author = CITATION_AUTHOR_YEAR_RE.exec(raw);
+  const fileMatch = CITATION_WITH_EXT_RE.exec(raw);
+  const match = page ?? author ?? fileMatch;
+  if (!match) return null;
+  const file = match[1].trim();
+  if (!file) return null;
+  // Un año sin "pág." no se transforma en una página. Para ficheros se
+  // conserva también la forma histórica "[archivo.pdf, 3]".
+  const rest = page ? page[2] : author ? '' : fileMatch?.[2] ?? '';
   const pm = /(\d+(?:\s*[-–,]\s*\d+)*)/.exec(rest);
   const pageLabel = pm ? pm[1].replace(/\s+/g, '') : null;
-  const firstNum = pageLabel ? /^\d+/.exec(pageLabel) : null;
-  return {
-    file,
-    pageLabel,
-    firstPage: firstNum ? parseInt(firstNum[0], 10) : null,
-    raw,
-  };
+  return { file, pageLabel, firstPage: pageLabel ? parseInt(pageLabel, 10) : null, raw };
 }
 
 /** Extensiones indexables: una cita (o un source_file) puede venir con o sin ella. */
