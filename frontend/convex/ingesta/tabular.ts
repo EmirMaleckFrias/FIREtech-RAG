@@ -11,7 +11,7 @@
 // aquí es poco: hojas en orden, cadenas compartidas, celdas y fechas.
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import { MAX_CHUNKS, chunkBase, partirTexto } from "./chunking";
+import { chunkBase, partirTexto } from "./chunking";
 import { decodificarBytes } from "./texto";
 import type { ChunkParseado, Parseo } from "./tipos";
 
@@ -279,9 +279,6 @@ export async function leerXlsx(bytes: Uint8Array): Promise<Array<[string, Fila[]
         celdas[columna] = valorDeCelda(c, contexto);
       }
       if (celdas.some(Boolean)) filas.push([numeroFila, celdas]);
-      // Corta temprano cuando el tope ya está garantizadamente excedido (+10:
-      // margen por la posible fila de header).
-      if (filas.length > MAX_CHUNKS + 10) break;
     }
     if (filas.length) hojas.push([nombre, filas]);
   }
@@ -406,7 +403,6 @@ export function parsearCsvDocumento(bytes: Uint8Array, nombre: string): Parseo {
     numero++;
     const celdas = registro.map((c) => c.trim());
     if (celdas.some(Boolean)) filas.push([numero, celdas]);
-    if (filas.length > MAX_CHUNKS + 10) break; // ver comentario en leerXlsx
   }
   const chunks = filasAChunks(filas, nombre);
   return { chunks, pages: chunks.length };

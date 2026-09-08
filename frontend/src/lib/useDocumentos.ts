@@ -18,7 +18,7 @@ import type { Id } from '../../convex/_generated/dataModel';
 import { avisarSiEsFatal } from './auth';
 import { maxFragmentos } from './biblioteca';
 import { mensajeDeError } from './errores';
-import type { AvisosIngesta, DocumentInfo, DocumentStatus } from '../types';
+import type { AvisosIngesta, DocumentInfo, DocumentStatus, ProgresoIngesta } from '../types';
 
 /** Cuánto dura el destello verde de un documento que acaba de quedar listo. */
 export const DESTELLO_MS = 1_800;
@@ -39,6 +39,7 @@ interface DocumentoDoc {
   titulo?: string | null;
   citation?: string | null;
   avisos?: { sinLeer?: number; omitidas?: number; recortados?: number; motivo?: string | null } | null;
+  progreso?: unknown;
 }
 
 function normalizeAvisos(a: DocumentoDoc['avisos']): AvisosIngesta | null {
@@ -77,6 +78,21 @@ export function normalizeDocumento(d: DocumentoDoc): DocumentInfo {
     titulo: typeof d.titulo === 'string' && d.titulo.trim() !== '' ? d.titulo : null,
     citation: typeof d.citation === 'string' && d.citation.trim() !== '' ? d.citation : null,
     avisos: normalizeAvisos(d.avisos),
+    progreso: normalizeProgreso(d.progreso),
+  };
+}
+
+function normalizeProgreso(p: unknown): ProgresoIngesta | null {
+  if (typeof p !== 'object' || p === null) return null;
+  const x = p as Record<string, unknown>;
+  if (x.fase !== 'leyendo' && x.fase !== 'embebiendo') return null;
+  if (typeof x.hecho !== 'number' || typeof x.total !== 'number') return null;
+  return {
+    fase: x.fase,
+    hecho: x.hecho,
+    total: x.total,
+    empezadoEn: typeof x.empezadoEn === 'number' ? x.empezadoEn : 0,
+    actualizadoEn: typeof x.actualizadoEn === 'number' ? x.actualizadoEn : 0,
   };
 }
 

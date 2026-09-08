@@ -145,6 +145,8 @@ export const listar = query({
       // sincronización no se sube ni se borra a mano, lo gobierna Notion.
       origen: d.origen ?? null,
       notionPageId: d.notionPageId ?? null,
+      // El avance de la ingesta en curso, para la barra de la ficha.
+      progreso: d.progreso ?? null,
     }));
   },
 });
@@ -386,6 +388,7 @@ export const reindexar = mutation({
     await ctx.db.patch(d._id, {
       status: "processing",
       error: undefined,
+      progreso: undefined,
       ingestadoEn: Date.now(),
     });
     await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.ingestar, { documentId: d._id });

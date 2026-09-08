@@ -678,10 +678,14 @@ upload_limit_mb}}`. `index` sale de `documents` en `ready`; `activity` recorre `
 2. `parsearDocumento` decide por extensión, sanea, detecta el idioma sobre los primeros 40
    fragmentos (`es`, `en`, `pt`, `fr`, o vacío si no está claro) y aplica los topes: sin texto
    legible, error (distinguiendo "imagen sin texto" de "el servicio de lectura falló, vuelve a
-   intentarlo"); más de 4000 fragmentos, error pidiendo dividir.
-3. Se embebe en lotes de 96 y cada lote se escribe en mutaciones de como mucho 32 fragmentos
-   (un fragmento lleva 3072 números y los argumentos de una mutación desde Node tienen un tope
-   de 5 MiB).
+   intentarlo"). No hay tope de fragmentos por documento: si tarda, se ve el avance.
+3. Los fragmentos se encolan en `fragmentosPendientes` y una cadena de acciones `embeber` los
+   embebe en lotes de 96 (tres lotes en paralelo) y escribe cada lote en mutaciones de como
+   mucho 32 fragmentos (un fragmento lleva 3072 números y los argumentos de una mutación desde
+   Node tienen un tope de 5 MiB). Cada acción trabaja unos 7 minutos y pasa el relevo a la
+   siguiente con el cursor, así que un documento de cualquier tamaño termina; el avance (fase
+   `leyendo` página a página o `embebiendo` fragmento a fragmento, hecho de total, desde
+   cuándo) se escribe en `documents.progreso` y la ficha pinta barra y tiempo estimado.
 4. Solo después de escribir la versión nueva se retira la anterior. Un fallo de embeddings no
    deja al documento sin versión consultable.
 5. Éxito: `ready` con `pages`, `chunks`, `titulo`, `citation`, `doi`, `language`,

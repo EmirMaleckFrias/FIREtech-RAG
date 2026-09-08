@@ -201,8 +201,13 @@ describe("texto plano y saneo general", () => {
     await expect(parsearDocumento("presentacion.pptx", utf8("x"))).rejects.toThrow("Extensión no soportada");
     await expect(parsearDocumento("vacio.txt", utf8("   \n\n  "))).rejects.toThrow("no contiene texto extraíble");
     await expect(parsearDocumento("malo.pdf", utf8("esto no es un pdf"))).rejects.toThrow();
-    const filas = ["id,valor", ...Array.from({ length: 4001 }, (_, i) => `${i},${i}`)].join("\n");
-    await expect(parsearDocumento("enorme.csv", utf8(filas))).rejects.toThrow("el máximo permitido es 4000");
+    // Sin tope de fragmentos: una hoja de 4100 filas se lee ENTERA (antes
+    // fallaba a las 4000 pidiendo dividir el archivo). Si tarda, se ve el
+    // avance; no se rechaza.
+    const filas = ["id,valor", ...Array.from({ length: 4100 }, (_, i) => `${i},${i}`)].join("\n");
+    const enorme = await parsearDocumento("enorme.csv", utf8(filas));
+    expect(enorme.chunks).toHaveLength(4100);
+    expect(enorme.chunks[4099].text).toContain("4099");
   });
 });
 

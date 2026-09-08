@@ -547,6 +547,8 @@ describe("documentos", () => {
       avisos: null,
       origen: null,
       notionPageId: null,
+      // El avance de la ingesta en curso; null cuando no se está indexando.
+      progreso: null,
     });
   });
 

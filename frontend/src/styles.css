@@ -5553,6 +5553,9 @@ button.banda-aviso-error:hover { background: color-mix(in srgb, var(--red) 14%, 
   opacity: 0.75;
 }
 
+/* Barra de la ingesta en marcha, debajo de los datos de la ficha. */
+.ficha-progreso { margin-top: 8px; }
+
 /* Las tarjetas de Google Drive y OneDrive reutilizan la de Notion; solo la
    lista de carpetas enseña además la ruta, en pequeño, debajo del nombre. */
 .nube-carpetas-lista label { align-items: flex-start; }

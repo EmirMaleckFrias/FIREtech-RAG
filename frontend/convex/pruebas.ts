@@ -285,6 +285,27 @@ export const ultimosTurnos = internalQuery({
 /** Reindexa TODOS los documentos que conservan su fichero: pone `processing`
  *  y agenda la ingesta. Para cuando cambia el parser y hay que rehacer
  *  secciones, citas o troceado sin volver a subir nada. */
+/** Reindexa UN documento de una cuenta por su nombre de fichero, desde la
+ *  CLI y sin sesión: para volver a intentar una ingesta que falló por un tope
+ *  que ya se subió, sin obligar a la usuaria a pulsar nada. Deja el
+ *  documento en `processing` y agenda la acción, como `documentos.reindexar`. */
+export const reindexarDocumento = internalMutation({
+  args: { correo: v.string(), fileName: v.string() },
+  handler: async (ctx, args) => {
+    const u = await ctx.db.query("users").withIndex("email", (q) => q.eq("email", args.correo)).unique();
+    if (!u) return { estado: "cuenta_no_existe" as const };
+    const d = await ctx.db
+      .query("documents")
+      .withIndex("porPropietarioYNombre", (q) => q.eq("propietario", u._id).eq("fileName", args.fileName))
+      .first();
+    if (!d) return { estado: "documento_no_existe" as const };
+    if (!d.storageId) return { estado: "sin_fichero" as const };
+    await ctx.db.patch(d._id, { status: "processing", error: undefined, ingestadoEn: Date.now() });
+    await ctx.scheduler.runAfter(0, internal.ingesta.pipeline.ingestar, { documentId: d._id });
+    return { estado: "agendado" as const, documentId: d._id };
+  },
+});
+
 export const reindexarTodo = internalMutation({
   args: {},
   handler: async (ctx) => {

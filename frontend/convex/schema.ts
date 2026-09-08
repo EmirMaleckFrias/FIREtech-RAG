@@ -74,6 +74,15 @@ export const avisosIngesta = v.object({
   motivo: v.optional(v.string()),
 });
 
+/** El avance de una ingesta en marcha (ver ingesta/pipeline.ts). */
+export const progresoIngesta = v.object({
+  fase: v.union(v.literal("leyendo"), v.literal("embebiendo")),
+  hecho: v.number(),
+  total: v.number(),
+  empezadoEn: v.number(),
+  actualizadoEn: v.number(),
+});
+
 /** De dónde salió un documento: subida manual, o una de las sincronizaciones
  *  (Notion, Google Drive, OneDrive). Compartido con `documentos.ts` y con los
  *  módulos de sincronización para que un origen nuevo se añada en un sitio. */
@@ -246,6 +255,11 @@ export default defineSchema({
     // reciente siempre gana. `reindexar` la consulta para saber si hay una
     // ingesta viva de verdad (con latido), en vez de adivinarlo por la fecha.
     ingestaRunId: v.optional(v.id("ingestionRuns")),
+    // Avance de la ingesta en curso, para la barra de la ficha: qué fase
+    // (leyendo páginas, embebiendo fragmentos), cuánto va de cuánto y desde
+    // cuándo, con lo que el cliente estima lo que falta. Se limpia al
+    // terminar. No hay tope de tamaño por documento: si tarda, se ve.
+    progreso: v.optional(progresoIngesta),
   })
     // El nombre de archivo identifica el documento DENTRO DEL CORPUS DE UNA
     // PERSONA, no del despliegue: dos usuarias pueden tener cada una su
@@ -585,6 +599,18 @@ export default defineSchema({
   }).index("porClave", ["clave"]),
 
   // Corridas de ingesta, como la tabla `ingestion_runs`.
+  // Fragmentos ya parseados a la espera de embeberse. Es lo que permite que
+  // un documento de cualquier tamaño se indexe: la acción que lo lee guarda
+  // aquí sus fragmentos y una cadena de acciones los va embebiendo y
+  // escribiendo en `chunks`, cada una dentro de sus 10 minutos, hasta vaciar
+  // la cola (ver ingesta/pipeline.ts `embeber`). Vacía en reposo.
+  fragmentosPendientes: defineTable({
+    documentId: v.id("documents"),
+    runId: v.id("ingestionRuns"),
+    indice: v.number(),
+    chunk: v.any(),
+  }).index("porRun", ["runId", "indice"]),
+
   ingestionRuns: defineTable({
     empezadoEn: v.number(),
     terminadoEn: v.optional(v.number()),

@@ -6,8 +6,10 @@
 // Sin "use node": lo importan los parsers y se prueba directo.
 import type { ChunkParseado, MetaObra } from "./tipos";
 
-/** Tope duro por documento (error claro si se excede). */
-export const MAX_CHUNKS = 4000;
+// No hay tope de fragmentos por documento. Lo hubo (4000) y hacía fallar un
+// manual de 7 MB con "divide el documento", que a quien sube un PDF no le dice
+// nada; el límite real es el tiempo de una acción, y la ingesta lo rodea
+// embebiendo en acciones encadenadas (pipeline.ts) y enseñando el avance.
 /** Tamaño objetivo de chunk (aprox.). */
 export const TARGET_TOKENS = 400;
 /** 15 % de 400. */

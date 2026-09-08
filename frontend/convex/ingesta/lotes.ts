@@ -4,6 +4,10 @@
 /** Textos por petición de embeddings: margen bajo el límite de inputs por
  *  request, como en `embeddings.py`. */
 export const LOTE_EMBEDDINGS = 96;
+/** Lotes de embeddings que se piden al gateway a la vez. Tres: suficiente para
+ *  que un documento grande quepa en los 10 minutos de la acción y poco para
+ *  no tropezar con el límite de peticiones del gateway. */
+export const EMBEDDINGS_A_LA_VEZ = 3;
 
 /** Chunks por mutación de escritura. Cada chunk lleva 3072 números (~25 KB en
  *  binario, hasta ~60 KB como JSON de argumentos) más hasta 8000 caracteres

@@ -356,6 +356,15 @@ describe("tablas dentro del PDF, por geometría", () => {
   });
 });
 
+describe("avance de la lectura", () => {
+  test("avisa página a página con (hechas, total), para la barra de la ficha", async () => {
+    const vistos: Array<[number, number]> = [];
+    const pagina = (n: number): LineaFalsa[] => [[`Página ${n} con texto suficiente para contar como leída.`, 10]];
+    await parsearPdf(escribirPdf([pagina(1), pagina(2), pagina(3)]), "tres.pdf", { alAvanzar: (h, t) => vistos.push([h, t]) });
+    expect(vistos).toEqual([[1, 3], [2, 3], [3, 3]]);
+  });
+});
+
 describe("contexto, solape y secciones", () => {
   test("cada chunk lleva título y sección dentro del texto, y la cita en el payload", async () => {
     const chunks = await parsear([[

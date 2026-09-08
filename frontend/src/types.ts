@@ -309,6 +309,18 @@ export interface DocumentInfo {
   /** Lo que la ingesta no pudo leer del todo (páginas escaneadas sin leer,
    *  imágenes omitidas, texto recortado). null = nada que avisar. */
   avisos: AvisosIngesta | null;
+  /** El avance de la ingesta en curso (fase, hecho de total, desde cuándo),
+   *  para la barra de la ficha. null si no se está indexando. */
+  progreso: ProgresoIngesta | null;
+}
+
+/** Avance de una ingesta en marcha (documents.progreso). */
+export interface ProgresoIngesta {
+  fase: 'leyendo' | 'embebiendo';
+  hecho: number;
+  total: number;
+  empezadoEn: number;
+  actualizadoEn: number;
 }
 
 export interface AvisosIngesta {

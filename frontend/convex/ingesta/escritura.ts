@@ -6,6 +6,12 @@ import { internalMutation, internalQuery, type MutationCtx } from "../_generated
 import type { Doc, Id } from "../_generated/dataModel";
 import { avisosIngesta, tipoFragmento } from "../schema";
 
+/** La corrida, para leer sus cifras parciales entre acciones. */
+export const corrida = internalQuery({
+  args: { runId: v.id("ingestionRuns") },
+  handler: async (ctx, { runId }) => ctx.db.get(runId),
+});
+
 /** El documento a ingerir, o null si lo borraron. */
 export const documento = internalQuery({
   args: { documentId: v.id("documents") },
@@ -236,6 +242,7 @@ export const marcarListo = internalMutation({
       avisos,
       status: "ready",
       error: undefined,
+      progreso: undefined,
       ingestadoEn: Date.now(),
       // `ingestaRunId` se CONSERVA: la corrida cerrada ya no bloquea a nadie
       // (ver documentos.ingestaViva), y soltar el documento abriría la puerta
@@ -253,8 +260,86 @@ export const marcarFallido = internalMutation({
     const doc = await ctx.db.get(documentId);
     if (!doc) return false;
     if (runId && doc.ingestaRunId !== runId) return false;
-    await ctx.db.patch(documentId, { status: "failed", error, ingestadoEn: Date.now() });
+    await ctx.db.patch(documentId, { status: "failed", error, progreso: undefined, ingestadoEn: Date.now() });
     return true;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Avance y cola de fragmentos pendientes
+// ---------------------------------------------------------------------------
+/** El avance de la ingesta, para la barra de la ficha. Solo lo escribe la
+ *  dueña; una corrida que perdió el documento no pinta nada. También cuenta
+ *  como latido. */
+export const actualizarProgreso = internalMutation({
+  args: {
+    documentId: v.id("documents"),
+    runId: v.id("ingestionRuns"),
+    fase: v.union(v.literal("leyendo"), v.literal("embebiendo")),
+    hecho: v.number(),
+    total: v.number(),
+    empezadoEn: v.number(),
+  },
+  handler: async (ctx, { documentId, runId, ...avance }) => {
+    const doc = await ctx.db.get(documentId);
+    if (!doc || doc.ingestaRunId !== runId) return false;
+    const ahora = Date.now();
+    await ctx.db.patch(documentId, { progreso: { ...avance, actualizadoEn: ahora } });
+    await ctx.db.patch(runId, { latidoEn: ahora });
+    return true;
+  },
+});
+
+/** Guarda un lote de fragmentos parseados a la espera de embeberse. */
+export const guardarPendientes = internalMutation({
+  args: {
+    documentId: v.id("documents"),
+    runId: v.id("ingestionRuns"),
+    desde: v.number(),
+    chunks: v.array(v.any()),
+  },
+  handler: async (ctx, { documentId, runId, desde, chunks }) => {
+    await exigirPropiedad(ctx, documentId, runId);
+    await ctx.db.patch(runId, { latidoEn: Date.now() });
+    for (const [i, chunk] of chunks.entries()) {
+      await ctx.db.insert("fragmentosPendientes", { documentId, runId, indice: desde + i, chunk });
+    }
+    return chunks.length;
+  },
+});
+
+/** Los siguientes `n` fragmentos pendientes de una corrida, desde `desde`. */
+export const leerPendientes = internalQuery({
+  args: { runId: v.id("ingestionRuns"), desde: v.number(), n: v.number() },
+  handler: async (ctx, { runId, desde, n }) =>
+    await ctx.db
+      .query("fragmentosPendientes")
+      .withIndex("porRun", (q) => q.eq("runId", runId).gte("indice", desde))
+      .take(n),
+});
+
+/** Borra hasta `lote` fragmentos pendientes de una corrida (los ya embebidos,
+ *  o todos al abandonar). Devuelve cuántos borró. */
+export const borrarPendientes = internalMutation({
+  args: { runId: v.id("ingestionRuns"), lote: v.number(), hasta: v.optional(v.number()) },
+  handler: async (ctx, { runId, lote, hasta }) => {
+    const filas = await ctx.db
+      .query("fragmentosPendientes")
+      .withIndex("porRun", (q) => (hasta === undefined ? q.eq("runId", runId) : q.eq("runId", runId).lt("indice", hasta)))
+      .take(lote);
+    for (const f of filas) await ctx.db.delete(f._id);
+    return filas.length;
+  },
+});
+
+/** Anota cifras parciales en la corrida sin cerrarla (las del parseo, que
+ *  ocurre en otra acción que el embebido). */
+export const anotarStats = internalMutation({
+  args: { runId: v.id("ingestionRuns"), stats: v.any() },
+  handler: async (ctx, { runId, stats }) => {
+    const run = await ctx.db.get(runId);
+    if (!run) return;
+    await ctx.db.patch(runId, { stats: { ...((run.stats as Record<string, unknown>) ?? {}), ...stats } });
   },
 });
 

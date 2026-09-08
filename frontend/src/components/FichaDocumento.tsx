@@ -25,6 +25,7 @@
 import type { KeyboardEvent } from 'react';
 import { cifra, fechaCorta, formatoDe, identidadDe, pesoRelativo } from '../lib/biblioteca';
 import { fuenteDe } from '../lib/origenes';
+import { fraccionDeProgreso, textoDeProgreso } from '../lib/progresoIngesta';
 import type { DocumentInfo } from '../types';
 import { IconAlert, IconCheck, IconRefresh, IconSpinner, IconTrash } from './icons';
 
@@ -153,7 +154,7 @@ export function FichaDocumento({
             ) : doc.status === 'processing' ? (
               <span className="ficha-insignia ficha-insignia-proceso" role="status">
                 <IconSpinner size={11} />
-                <span className="shimmer-text">Indexando</span>
+                <span className="shimmer-text">{doc.progreso ? textoDeProgreso(doc.progreso) : 'Indexando'}</span>
               </span>
             ) : (
               <button
@@ -179,6 +180,19 @@ export function FichaDocumento({
           </div>
 
           {fichero !== '' && <p className="ficha-fichero">{fichero}</p>}
+
+          {/* La barra de la ingesta en marcha: fase, cuánto va de cuánto y lo
+              que falta (lib/progresoIngesta.ts). Un documento grande tarda, y
+              lo que no puede pasar es que parezca colgado. */}
+          {doc.status === 'processing' && doc.progreso !== null && (
+            <div className="upload-bar ficha-progreso" aria-hidden="true">
+              {fraccionDeProgreso(doc.progreso) === null ? (
+                <div className="upload-fill upload-fill-indeterminate" />
+              ) : (
+                <div className="upload-fill" style={{ transform: `scaleX(${fraccionDeProgreso(doc.progreso)})` }} />
+              )}
+            </div>
+          )}
         </div>
 
         <div className="ficha-acciones">

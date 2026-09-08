@@ -76,6 +76,17 @@ async function documentoConFichero(t: T, fileName: string, contenido: Uint8Array
   });
 }
 
+/** Ingesta completa: la acción que lee y encola, y las encadenadas que
+ *  embeben hasta vaciar la cola. */
+async function ingerir(t: T, documentId: Id<"documents">) {
+  await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+  await t.finishAllScheduledFunctions(() => {}, 200);
+}
+
+async function pendientesDe(t: T) {
+  return t.run((ctx) => ctx.db.query("fragmentosPendientes").collect());
+}
+
 async function chunksDe(t: T, documentId: Id<"documents">) {
   return t.run((ctx) =>
     ctx.db.query("chunks").withIndex("porDocumento", (q) => q.eq("documentRef", documentId)).collect(),
@@ -129,7 +140,7 @@ describe("ingestar", () => {
     const documentId = await documentoConFichero(t, "datos.csv", bytes);
     const embed = embedFalso();
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     // Tres peticiones al gateway, ninguna por encima del lote.
     const tamanos = embed.mock.calls.map(([textos]) => textos.length);
@@ -176,7 +187,7 @@ describe("ingestar", () => {
     await chunkAjeno(t, otro, "v", "de otro documento");
     embedFalso();
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     const chunks = await chunksDe(t, documentId);
     expect(chunks).toHaveLength(5);
@@ -223,7 +234,7 @@ describe("ingestar", () => {
     expect(await contarChunksDe(t, documentId)).toBe(viejos + 1);
     embedFalso();
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     expect(await contarChunksDe(t, documentId)).toBe(800);
     const doc = await t.run((ctx) => ctx.db.get(documentId));
@@ -246,7 +257,7 @@ describe("ingestar", () => {
       return { vectores: textos.map((_, i) => vectorFalso(i)), usage: USO(textos.length), modelo: "m" };
     });
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     const chunks = await chunksDe(t, documentId);
     expect(chunks).toHaveLength(1);
@@ -260,7 +271,9 @@ describe("ingestar", () => {
     expect(runs[0].status).toBe("failed");
     expect(runs[0].error?.length).toBe(MAX_ERROR_CHARS);
     const telemetria = (runs[0].stats as { telemetria: { por_componente: Record<string, { errores: number }> } }).telemetria;
-    expect(telemetria.por_componente.embeddings.errores).toBe(1);
+    // Los lotes van de tres en tres: el primero entró y los otros dos del
+    // grupo fallaron a la vez, así que son dos errores, no uno.
+    expect(telemetria.por_componente.embeddings.errores).toBe(2);
   });
 
   test("un fichero que no se puede parsear deja failed con el motivo y no llama al gateway", async () => {
@@ -268,7 +281,7 @@ describe("ingestar", () => {
     const documentId = await documentoConFichero(t, "presentacion.pptx", new TextEncoder().encode("x"));
     const embed = embedFalso();
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     expect(embed).not.toHaveBeenCalled();
     const doc = await t.run((ctx) => ctx.db.get(documentId));
@@ -283,7 +296,7 @@ describe("ingestar", () => {
     await t.run((ctx) => ctx.db.delete(documentId));
     const embed = embedFalso();
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     expect(embed).not.toHaveBeenCalled();
     expect(await t.run((ctx) => ctx.db.query("chunks").collect())).toHaveLength(0);
@@ -306,7 +319,7 @@ describe("ingestar", () => {
     const documentId = await documentoConFichero(t, "biomarkers.pdf", pdf);
     embedFalso();
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     const doc = await t.run((ctx) => ctx.db.get(documentId));
     expect(doc?.status).toBe("ready");
@@ -330,15 +343,23 @@ describe("ingestar: dos corridas sobre el mismo documento", () => {
     const t = convexTest(schema, modules);
     const bytes = csvGrande(5);
     const documentId = await documentoConFichero(t, "datos.csv", bytes);
-    // En cuanto la PRIMERA corrida pide embeddings (ya tiene el fichero leído
-    // y el documento reclamado), arranca una segunda ingesta del mismo
-    // documento y se deja terminar. Es el reindexado que entra a la vez que
-    // una ingesta en marcha.
+    // En cuanto la PRIMERA corrida pide embeddings (ya tiene sus fragmentos en
+    // la cola), arranca una segunda ingesta del mismo documento y se deja
+    // terminar entera (su lectura y su embebido). Es el reindexado que entra
+    // a la vez que una ingesta en marcha.
     let segundaLanzada = false;
     vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
       if (!segundaLanzada) {
         segundaLanzada = true;
         await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+        // La segunda dejó agendado su embebido: se corre aquí mismo y se
+        // retira de la cola de agendados para que no corra dos veces.
+        const trabajos = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+        const doc = await t.run((ctx) => ctx.db.get(documentId));
+        const suyo = trabajos.find((j) => j.name.includes("embeber") && (j.args[0] as { runId: string }).runId === doc?.ingestaRunId && j.state.kind === "pending");
+        if (!suyo) throw new Error("la segunda corrida no agendó su embebido");
+        await t.run((ctx) => ctx.scheduler.cancel(suyo._id));
+        await t.action(internal.ingesta.pipeline.embeber, suyo.args[0] as never);
       }
       return {
         vectores: textos.map((_, i) => vectorFalso(i)),
@@ -347,7 +368,7 @@ describe("ingestar: dos corridas sobre el mismo documento", () => {
       };
     });
 
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
 
     // Un solo juego de fragmentos: el de la corrida que ganó.
     const chunks = await chunksDe(t, documentId);
@@ -357,12 +378,13 @@ describe("ingestar: dos corridas sobre el mismo documento", () => {
     expect(doc?.status).toBe("ready");
     expect(doc?.chunks).toBe(5);
     // Dos corridas: la segunda completa, la primera retirada con el motivo. Y
-    // el documento se queda con la ganadora, no sin dueña.
+    // el documento se queda con la ganadora, no sin dueña. La cola, vacía.
     const runs = await t.run((ctx) => ctx.db.query("ingestionRuns").order("asc").collect());
     expect(runs.map((r) => r.status)).toEqual(["failed", "completed"]);
-    expect(doc?.ingestaRunId).toBe(runs[1]._id);
     expect(runs[0].error).toContain(PERDIO_EL_DOCUMENTO);
+    expect(doc?.ingestaRunId).toBe(runs[1]._id);
     expect(runs.every((r) => r.documentId === documentId)).toBe(true);
+    expect(await pendientesDe(t)).toEqual([]);
   });
 
   test("una corrida que ya no es la dueña no puede escribir, borrar ni cambiar el estado del documento", async () => {
@@ -400,12 +422,87 @@ describe("ingestar: dos corridas sobre el mismo documento", () => {
   });
 });
 
+describe("ingestar: sin tope de tamaño, con avance visible", () => {
+  test("el avance se escribe en el documento mientras se embebe, y se limpia al terminar", async () => {
+    const t = convexTest(schema, modules);
+    const documentId = await documentoConFichero(t, "datos.csv", csvGrande(250));
+    const vistos: Array<{ fase: string; hecho: number; total: number }> = [];
+    vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
+      const doc = await t.run((ctx) => ctx.db.get(documentId));
+      if (doc?.progreso) vistos.push({ fase: doc.progreso.fase, hecho: doc.progreso.hecho, total: doc.progreso.total });
+      return { vectores: textos.map((_, i) => vectorFalso(i)), usage: USO(textos.length), modelo: "m" };
+    });
+    await ingerir(t, documentId);
+    // Al empezar a embeber: fase embebiendo, 0 de 250. La cola de 250 se
+    // embebe en un solo grupo de tres lotes, así que las tres llamadas ven
+    // el mismo avance.
+    expect(vistos[0]).toEqual({ fase: "embebiendo", hecho: 0, total: 250 });
+    const doc = await t.run((ctx) => ctx.db.get(documentId));
+    expect(doc?.status).toBe("ready");
+    expect(doc?.progreso).toBeUndefined();
+    expect(await pendientesDe(t)).toEqual([]);
+  });
+
+  test("ADVERSARIAL: cuando una acción agota su tiempo, la siguiente sigue desde el cursor y nada se pierde ni se repite", async () => {
+    const { configurarTiempoPorAccion } = await import("./pipeline");
+    configurarTiempoPorAccion(0); // cada acción hace un grupo y pasa el relevo
+    try {
+      const t = convexTest(schema, modules);
+      const n = LOTE_EMBEDDINGS * 3 * 2 + 17; // tres grupos: dos llenos y uno corto
+      const bytes = csvGrande(n);
+      const documentId = await documentoConFichero(t, "datos.csv", bytes);
+      embedFalso();
+      await ingerir(t, documentId);
+      const chunks = await chunksDe(t, documentId);
+      expect(chunks).toHaveLength(n);
+      expect(new Set(chunks.map((c) => c.page)).size).toBe(n);
+      const doc = await t.run((ctx) => ctx.db.get(documentId));
+      expect(doc?.status).toBe("ready");
+      expect(doc?.chunks).toBe(n);
+      expect(await pendientesDe(t)).toEqual([]);
+      const [run] = await t.run((ctx) => ctx.db.query("ingestionRuns").collect());
+      expect(run.status).toBe("completed");
+      const stats = run.stats as Record<string, unknown>;
+      expect(stats.relevos_embebido).toBe(2);
+      expect(stats.tokens_embedding).toBe(n * 10);
+      expect(stats.pages).toBe(n);
+    } finally {
+      configurarTiempoPorAccion(7 * 60_000);
+    }
+  });
+
+  test("un fallo del gateway a mitad de la cadena vacía la cola y deja el documento en failed", async () => {
+    const { configurarTiempoPorAccion } = await import("./pipeline");
+    configurarTiempoPorAccion(0);
+    try {
+      const t = convexTest(schema, modules);
+      const documentId = await documentoConFichero(t, "datos.csv", csvGrande(LOTE_EMBEDDINGS * 3 * 2));
+      let llamadas = 0;
+      vi.spyOn(gateway, "embed").mockImplementation(async (textos) => {
+        // El segundo grupo (segunda acción) falla.
+        if (++llamadas > 3) throw new Error("gateway caído");
+        return { vectores: textos.map((_, i) => vectorFalso(i)), usage: USO(textos.length), modelo: "m" };
+      });
+      await ingerir(t, documentId);
+      const doc = await t.run((ctx) => ctx.db.get(documentId));
+      expect(doc?.status).toBe("failed");
+      expect(doc?.error).toBe("gateway caído");
+      expect(doc?.progreso).toBeUndefined();
+      // Lo que el primer grupo escribió se retiró: nada a medias.
+      expect(await chunksDe(t, documentId)).toEqual([]);
+      expect(await pendientesDe(t)).toEqual([]);
+    } finally {
+      configurarTiempoPorAccion(7 * 60_000);
+    }
+  });
+});
+
 describe("ingestar: aislamiento y avisos", () => {
   test("cada fragmento escrito lleva el propietario del documento (la frontera del corpus)", async () => {
     const t = convexTest(schema, modules);
     const documentId = await documentoConFichero(t, "propios.csv", csvGrande(30));
     embedFalso();
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
     const doc = await t.run((ctx) => ctx.db.get(documentId));
     const chunks = await t.run((ctx) =>
       ctx.db.query("chunks").withIndex("porDocumento", (q) => q.eq("documentRef", documentId)).collect(),
@@ -413,7 +510,7 @@ describe("ingestar: aislamiento y avisos", () => {
     expect(chunks.length).toBe(30);
     expect(chunks.every((c) => c.propietario === doc?.propietario)).toBe(true);
     // Y tras reindexar, igual.
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
     const otraVez = await t.run((ctx) =>
       ctx.db.query("chunks").withIndex("porDocumento", (q) => q.eq("documentRef", documentId)).collect(),
     );
@@ -438,7 +535,7 @@ describe("ingestar: aislamiento y avisos", () => {
       razonamientoRechazado: false,
     });
     try {
-      await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+      await ingerir(t, documentId);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -463,7 +560,7 @@ describe("ingestar: aislamiento y avisos", () => {
     ]]);
     const documentId = await documentoConFichero(t, "guia-hta.pdf", pdf);
     embedFalso();
-    await t.action(internal.ingesta.pipeline.ingestar, { documentId });
+    await ingerir(t, documentId);
     const doc = await t.run((ctx) => ctx.db.get(documentId));
     expect(doc?.status).toBe("ready");
     expect(doc?.citation).toBeUndefined();

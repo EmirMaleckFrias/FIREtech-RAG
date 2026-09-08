@@ -570,6 +570,9 @@ function bordesPorAltura(lineas: LineaPdf[], cuantas: number): Set<number> {
 export interface OpcionesExtraccion {
   imagenesSi?: (lineas: LineaPdf[], numeroPagina: number) => boolean;
   conImagenes?: (imagenes: ImagenParaOcr[], numeroPagina: number) => void;
+  /** Se llama tras cada página con (páginas leídas, total): el avance que ve
+   *  la usuaria mientras un PDF largo se lee. */
+  alAvanzar?: (hecho: number, total: number) => void;
 }
 
 /** Desempaqueta una imagen de UN BIT por píxel (bit 1 = blanco, MSB primero,
@@ -764,6 +767,7 @@ export async function extraerLineas(
       } catch {
         // Con una tarea pendiente pdf.js se niega a limpiar; no pasa nada.
       }
+      opciones.alAvanzar?.(n, documento.numPages);
     }
     return { paginas, numPaginas: documento.numPages, paginasIlegibles, imagenesDescartadas };
   } finally {
@@ -802,7 +806,12 @@ export function textoDePagina(lineas: LineaPdf[]): number {
 export async function parsearPdf(
   bytes: Uint8Array,
   nombre: string,
-  opciones: { omitirReferencias?: boolean; ocr?: Ocr; minTextoPagina?: number } = {},
+  opciones: {
+    omitirReferencias?: boolean;
+    ocr?: Ocr;
+    minTextoPagina?: number;
+    alAvanzar?: (hecho: number, total: number) => void;
+  } = {},
 ): Promise<{
   chunks: ChunkParseado[];
   pages: number;
@@ -825,20 +834,20 @@ export async function parsearPdf(
   // sobreviven a la siguiente, solo su PNG y su promesa.
   const lecturas = new Map<number, Promise<ResultadoOcr[]>>();
   const ocr = opciones.ocr;
-  const { paginas, numPaginas, paginasIlegibles, imagenesDescartadas } = await extraerLineas(
-    bytes,
-    ocr
+  const { paginas, numPaginas, paginasIlegibles, imagenesDescartadas } = await extraerLineas(bytes, {
+    alAvanzar: opciones.alAvanzar,
+    ...(ocr
       ? {
-          imagenesSi: (lineas) => textoDePagina(lineas) < minTexto,
-          conImagenes: (imagenes, n) => {
+          imagenesSi: (lineas: LineaPdf[]) => textoDePagina(lineas) < minTexto,
+          conImagenes: (imagenes: ImagenParaOcr[], n: number) => {
             lecturas.set(
               n,
               Promise.all(imagenes.map((img, i) => ocr(img, { nombre, pagina: n, indice: i + 1 }))),
             );
           },
         }
-      : {},
-  );
+      : {}),
+  });
   const avisos: AvisosIngesta = { ...SIN_AVISOS };
 
   const textoCabecera = paginas

@@ -1,6 +1,6 @@
 // Punto de entrada del parseo: `parse_generic` de generic.py. Decide por
 // extensión, sanea, detecta el idioma del documento entero y aplica los topes.
-import { MAX_CHUNKS, MAX_CHUNK_CHARS } from "./chunking";
+import { MAX_CHUNK_CHARS } from "./chunking";
 import { parsearDocx } from "./docx";
 import { EXTENSIONES_IMAGEN, parsearImagen } from "./imagen";
 import { detectarIdioma } from "./idioma";
@@ -32,12 +32,18 @@ export function extensionDe(nombre: string): string {
  *  imágenes incrustadas en un Word se indexan. Sin ella (las pruebas, o
  *  ENABLE_OCR=false) los parsers se comportan como antes.
  *
- *  Lanza si la extensión no está soportada, si no se extrae texto alguno, o
- *  si se supera MAX_CHUNKS. */
+ *  Lanza si la extensión no está soportada o si no se extrae texto alguno. No
+ *  hay tope de fragmentos: un documento grande tarda más, y el avance se ve.
+ *  `alAvanzar` recibe (hecho, total) según se leen las páginas de un PDF. */
 export async function parsearDocumento(
   nombre: string,
   bytes: Uint8Array,
-  opciones: { omitirReferencias?: boolean; ocr?: Ocr; minTextoPagina?: number } = {},
+  opciones: {
+    omitirReferencias?: boolean;
+    ocr?: Ocr;
+    minTextoPagina?: number;
+    alAvanzar?: (hecho: number, total: number) => void;
+  } = {},
 ): Promise<Parseo> {
   const ext = extensionDe(nombre);
   let resultado: Parseo;
@@ -96,12 +102,6 @@ export async function parsearDocumento(
       opciones.ocr
         ? `'${nombre}' no contiene texto legible: ni texto propio ni texto reconocible en sus imágenes.`
         : `'${nombre}' no contiene texto extraíble (¿PDF escaneado sin OCR o archivo vacío?)`,
-    );
-  }
-  if (chunks.length > MAX_CHUNKS) {
-    throw new Error(
-      `'${nombre}' genera ${chunks.length} chunks; el máximo permitido es ${MAX_CHUNKS}. ` +
-        "Divide el documento en archivos más pequeños.",
     );
   }
   return { chunks, pages: resultado.pages, ...(hayAvisos(avisos) ? { avisos } : {}) };
