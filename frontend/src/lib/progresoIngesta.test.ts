@@ -26,9 +26,10 @@ describe('progreso de la ingesta', () => {
   });
 
   test('ADVERSARIAL: sin ritmo fiable no se promete tiempo', () => {
-    // Nada hecho, o menos del 5 %: no hay estimación.
+    // Nada hecho, menos del 10 %, o menos de cinco segundos: no hay estimación.
     expect(tiempoRestanteMs(p({ hecho: 0, total: 500 }), AHORA)).toBeNull();
-    expect(tiempoRestanteMs(p({ hecho: 10, total: 500 }), AHORA)).toBeNull();
+    expect(tiempoRestanteMs(p({ hecho: 45, total: 500 }), AHORA)).toBeNull();
+    expect(tiempoRestanteMs(p({ hecho: 250, total: 500, empezadoEn: AHORA - 3_000 }), AHORA)).toBeNull();
     expect(textoDeProgreso(p({ hecho: 10, total: 500 }), AHORA)).toBe('Indexando 10 de 500 fragmentos');
     // Sin tiempos: tampoco.
     expect(tiempoRestanteMs(p({ hecho: 250, total: 500, empezadoEn: 0, actualizadoEn: 0 }), AHORA)).toBeNull();

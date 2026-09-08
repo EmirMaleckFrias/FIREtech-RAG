@@ -4,8 +4,8 @@
 // ni "embeddings".
 //
 // El tiempo que falta se estima con el ritmo medido hasta ahora (hecho entre
-// el tiempo transcurrido desde que empezó la fase); con menos del 5 % hecho
-// el ritmo aún no dice nada y no se promete ningún tiempo.
+// el tiempo transcurrido desde que empezó la fase); con menos del 10 % hecho
+// o menos de cinco segundos el ritmo aún no dice nada y no se promete tiempo.
 
 import type { ProgresoIngesta } from '../types';
 import { formatearDuracion } from './pasos';
@@ -18,14 +18,17 @@ export function fraccionDeProgreso(p: ProgresoIngesta): number | null {
 }
 
 /** Milisegundos que quedan según el ritmo hasta ahora, o null si no se puede
- *  estimar todavía (nada hecho, sin tiempos o menos del 5 % completado). */
+ *  estimar todavía (nada hecho, sin tiempos, menos del 10 % o menos de 5 s). */
 export function tiempoRestanteMs(p: ProgresoIngesta, ahora = Date.now()): number | null {
   if (p.total <= 0 || p.hecho <= 0 || p.hecho >= p.total) return null;
-  if (p.hecho / p.total < 0.05) return null;
+  // Con menos del 10 % hecho o menos de cinco segundos de recorrido el ritmo
+  // engaña: medido con un PDF de 351 páginas, al 6 % prometía "2 min" y la
+  // lectura terminó en 10 s, porque las primeras páginas van más lentas.
+  if (p.hecho / p.total < 0.1) return null;
   if (!(p.empezadoEn > 0)) return null;
   const referencia = p.actualizadoEn || ahora;
   const transcurrido = referencia - p.empezadoEn;
-  if (!(transcurrido > 0)) return null;
+  if (!(transcurrido >= 5_000)) return null;
   const ritmo = p.hecho / transcurrido;
   return Math.round((p.total - p.hecho) / ritmo);
 }
