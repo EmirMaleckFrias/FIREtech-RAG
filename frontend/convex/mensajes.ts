@@ -21,7 +21,7 @@ import { anotarPregunta, claveVotos, desanotarPregunta, sumar } from "./contador
 
 /** Tope de la pregunta. Una pregunta más larga que esto es casi siempre un
  *  documento pegado por error, y hay una vía para eso (subirlo). */
-export const LIMITE_TEXTO = 4000;
+export const LIMITE_TEXTO = 5000;
 /** Título de una conversación nueva: los primeros caracteres de la pregunta. */
 export const LONGITUD_TITULO = 60;
 /** Mensajes de contexto que viajan con cada pregunta (8 = 4 turnos). Era
