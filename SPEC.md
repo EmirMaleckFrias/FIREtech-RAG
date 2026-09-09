@@ -201,13 +201,24 @@ no recrea el mensaje si la conversación se borró mientras tanto):
 |---|---|---|
 | `pensando` | nada más | al crear el mensaje; durante la clasificación |
 | `buscando` | `plan` (ids, consultas, `query_en`, `evidence_needed`); después `hops` y `sources` | plan y recuperación de evidencia |
-| `redactando` | `hops` y `sources` se actualizan con cada búsqueda extra | mientras el modelo escribe |
-| `revisando` | nada nuevo | barrera de fidelidad |
+| `redactando` | `hops` y `sources` se actualizan con cada búsqueda extra; `progreso` con las afirmaciones ya juzgadas sobre la marcha | mientras el modelo escribe |
+| `revisando` | `progreso`: "Comprobando N afirmaciones · k de N listas", "Corrigiendo N afirmaciones sin respaldo · ronda r de R" | barrera de fidelidad |
 | `listo` | `content`, `sources`, `hops` (con `estado_final` y `usado_en_respuesta` en los del plan), `verificacion`, `metrics` | publicación |
 | `error` | `error` (mensaje recortado a 500 caracteres), `metrics` | cualquier excepción |
 | `cancelado` | nada: se conserva lo ya escrito | la usuaria pulsó parar (`mensajes.detener`) |
 
 **`content` queda vacío hasta `listo`.** El texto llega de golpe.
+
+**`progreso`** es una frase para la usuaria que dice qué pasa dentro de una fase larga. Medido
+con pruebas externas el 8 sep 2026: la fase `revisando` estaba muda hasta dos minutos y el
+evaluador la dio por colgada. La escribe el bucle a partir de los avisos del verificador (uno
+por lote de afirmaciones que vuelve del juez, `OpcionesVerificacion.alAvanzar`) y del revisor
+(`OpcionesRevision.alAvanzar`, un evento por ronda de corrección), solo cuando el texto cambia.
+La interfaz lo pinta como detalle del paso en curso y lo ignora cuando el turno es final.
+
+**`alcance`** se escribe si la pregunta pidió limitarse a un documento (sección 7): `{pista,
+documento, candidatos?, encontrado}`. La interfaz lo enseña en el paso de buscar ("solo en
+«M6U1.pdf»", o por qué no se pudo acotar).
 
 Una pregunta no documental (saludo, pregunta sobre el asistente) pasa de `pensando` a `listo`
 con `sources: []`, `hops: []`, `plan: []` y sin `verificacion`.
@@ -258,6 +269,29 @@ planificador traducía. Se acepta con o sin historial (no cambia qué se busca, 
 del corpus); vacía si es igual a la consulta o pasa de 600 caracteres. Se guarda en la caché
 del plan como `preguntaEn`, así que la segunda vez que se hace la misma pregunta tampoco hace
 falta llamar al clasificador para tenerla.
+
+La misma llamada devuelve también **`documento`**: cómo se refiere el mensaje al documento al
+que pide LIMITARSE ("el PDF M6U1", "el documento de Allegri", y también genérico: "el PDF
+indexado"), o vacío si no pide limitarse a ninguno. Nombrar un documento sin pedir limitarse a
+él no cuenta. Medido con pruebas externas el 8 sep 2026: "Usando únicamente el PDF indexado,
+analiza este escenario" se buscaba en todo el corpus y la respuesta podía mezclar otros
+documentos sin decirlo. La pista se resuelve sin modelo en `agente/alcance.ts` contra los
+documentos listos de quien pregunta (nombre de fichero sin extensión y título, normalizados):
+
+- **Con palabras que identifican** ("m6u1", "allegri"): el documento cuyo nombre las lleva
+  TODAS, como palabra entera o principio de una (nunca trozo interior). Si más de uno las lleva,
+  no se elige ninguno (`ambiguo`); si ninguno, `desconocido`.
+- **Pista genérica** (solo artículos, genéricos y formato): si hay UN solo documento de ese
+  formato es ese (el caso medido); si hay varios, `ambiguo`.
+
+Con documento elegido, todas las búsquedas del turno (plan y extras, incluido el reintento que
+relaja los filtros del modelo) llevan `documentId`; si la búsqueda acotada no trae nada se
+repite sin filtro y el redactor recibe la orden de empezar diciendo que ese documento no lo
+trata y de no atribuirle nada. Con `ambiguo` o `desconocido` se busca en todos y el redactor
+tiene que decir de qué documento sale cada dato. La pista se guarda en la caché del plan
+(`planes.documento`) para que la segunda vez, sin clasificador, el alcance no se pierda.
+Telemetría: `meta.alcance_pista`, `meta.alcance` (`elegido` | `ambiguo` | `desconocido` |
+`sin_pista`), `meta.alcance_documento`; contadores `alcance_pedido`, `alcance_sin_resultados`.
 
 Las otras dos clases se responden con una sola llamada al modelo grande, razonamiento `low`, sin
 herramientas y sin barrera, con la ficha "QUÉ ERES" del prompt. Prohibido reproducir las
@@ -703,6 +737,8 @@ hops. Además de los cuatro estados del contrato usa tres propios para no afirma
 sabe: `encontrada` (hubo fragmentos y nadie dijo si se usaron), `no_buscado` (punto del plan
 sin hop) y `error_busqueda` (la búsqueda falló). El informe de atribución resume el fallo, no
 el acierto, y `sin_verificar` se pinta como aviso, nunca como aprobado.
+
+**`progreso`** (cadena) y **`alcance`** (`{pista, documento, candidatos?, encontrado}`): sección 6.
 
 **`metrics`**: sección 13.
 

@@ -38,6 +38,8 @@ const mensaje = (extra: Partial<ChatMessage> = {}): ChatMessage => ({
   sources: [fuente('PMC1.pdf', 'Allegri et al., 2023')],
   hops: [hop()],
   plan: [],
+  progreso: '',
+  alcance: null,
   verificacion: null,
   estado: 'buscando',
   streaming: true,
@@ -160,5 +162,32 @@ describe('turno detenido', () => {
 
   it('detenido antes de buscar no afirma ningún paso', () => {
     expect(pasosDelTurno(mensaje({ estado: 'cancelado', streaming: false, hops: [], plan: [] }))).toEqual([]);
+  });
+});
+
+describe('progreso y alcance en los pasos', () => {
+  it('comprobando: el avance del agente es el detalle del paso en curso, y no se queda al cerrar', () => {
+    const enCurso = pasosDelTurno(mensaje({ estado: 'revisando', progreso: 'Comprobando 31 afirmaciones · 12 de 31 listas' }));
+    expect(enCurso[3]).toMatchObject({ clave: 'comprobar', estado: 'en_curso', detalle: 'Comprobando 31 afirmaciones · 12 de 31 listas' });
+    const cerrado = pasosDelTurno(mensaje({ estado: 'listo', streaming: false, progreso: 'Comprobando 31 afirmaciones · 12 de 31 listas' }));
+    expect(cerrado[3].detalle).toBe('');
+  });
+
+  it('redactando: el avance se suma al detalle de los fragmentos', () => {
+    const pasos = pasosDelTurno(mensaje({ estado: 'redactando', progreso: '4 afirmaciones ya comprobadas sobre la marcha' }));
+    expect(pasos[2].detalle).toBe('con 3 fragmentos de 1 documento · 4 afirmaciones ya comprobadas sobre la marcha');
+    // Sin avance, el detalle de siempre.
+    expect(pasosDelTurno(mensaje({ estado: 'redactando' }))[2].detalle).toBe('con 3 fragmentos de 1 documento');
+  });
+
+  it('alcance: el paso de buscar dice a qué documento se acotó, o por qué no', () => {
+    const acotado = pasosDelTurno(mensaje({ estado: 'listo', streaming: false, alcance: { pista: 'el PDF', documento: 'M6U1.pdf', encontrado: true } }));
+    expect(acotado[1].detalle).toBe('1 búsqueda · solo en «M6U1.pdf»');
+    const vacio = pasosDelTurno(mensaje({ estado: 'listo', streaming: false, alcance: { pista: 'el PDF', documento: 'M6U1.pdf', encontrado: false } }));
+    expect(vacio[1].detalle).toContain('«M6U1.pdf» no tenía nada sobre esto: se buscó en todos');
+    const ambiguo = pasosDelTurno(mensaje({ estado: 'listo', streaming: false, alcance: { pista: 'el PDF indexado', documento: null, candidatos: 3, encontrado: true } }));
+    expect(ambiguo[1].detalle).toContain('«el PDF indexado» no identifica un documento (hay 3)');
+    const desconocido = pasosDelTurno(mensaje({ estado: 'listo', streaming: false, alcance: { pista: 'el PDF de Smith', documento: null, encontrado: true } }));
+    expect(desconocido[1].detalle).toContain('no se reconoció «el PDF de Smith»');
   });
 });

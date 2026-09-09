@@ -203,6 +203,8 @@ export const actualizarTurno = internalMutation({
       metrics: camposMensaje.metrics,
       plan: camposMensaje.plan,
       error: camposMensaje.error,
+      progreso: camposMensaje.progreso,
+      alcance: camposMensaje.alcance,
     }),
   },
   handler: async (ctx, { messageId, cambios }): Promise<boolean> => {

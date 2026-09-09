@@ -1624,3 +1624,201 @@ describe("solapes que no cambian ningún veredicto", () => {
     expect(planificar.mock.calls[0][1]).toEqual(historial);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Alcance: la pregunta pide limitarse a un documento
+// ---------------------------------------------------------------------------
+describe("alcance de la pregunta a un documento", () => {
+  async function conDocumentos(t: Base, ids: Ids, nombres: string[]): Promise<Id<"documents">[]> {
+    return await t.run(async (ctx) => {
+      const salida: Id<"documents">[] = [];
+      for (const fileName of nombres) {
+        salida.push(
+          await ctx.db.insert("documents", {
+            fileName, sha256: fileName, pages: 1, chunks: 1, status: "ready", propietario: ids.userId, ingestadoEn: 1,
+          }),
+        );
+      }
+      return salida;
+    });
+  }
+  const mensajesDelRedactor = () => mensajesDe(modelo.llamadas[0]);
+  const notaDeSistema = () => mensajesDelRedactor().filter((m) => m.role === "system").map((m) => String(m.content)).join("\n");
+
+  test("el caso medido: 'únicamente el PDF indexado' con un solo PDF limita el plan a ese documento", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t, "Usando únicamente el PDF indexado, analiza este escenario");
+    const [pdf] = await conDocumentos(t, ids, ["--M6U1_PDF.pdf", "notas.docx"]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF indexado" });
+    porPunto = { e0: { fragmentos: [frag("c1", { sourceFile: "--M6U1_PDF.pdf" })] } };
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids, { texto: "Usando únicamente el PDF indexado, analiza este escenario" }));
+
+    expect(ejecutarPlan).toHaveBeenCalledTimes(1);
+    expect(ejecutarPlan.mock.calls[0][4]).toEqual({ documentId: String(pdf) });
+    const conAlcance = escrituras.filter((c) => c.alcance);
+    expect(conAlcance.length).toBeGreaterThan(0);
+    expect(conAlcance[conAlcance.length - 1].alcance).toEqual({
+      pista: "el PDF indexado", documento: "--M6U1_PDF.pdf", candidatos: undefined, encontrado: true,
+    });
+    expect(notaDeSistema()).toContain("únicamente con el documento «--M6U1_PDF.pdf»");
+    const m = await fila(t, ids.messageId);
+    expect(m.estado).toBe("listo");
+    expect(metricasDe(m).meta.alcance).toBe("elegido");
+  });
+
+  test("ADVERSARIAL: una búsqueda extra del modelo no puede salirse del documento, ni al relajar sus propios filtros", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    const [pdf] = await conDocumentos(t, ids, ["M6U1.pdf"]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF M6U1" });
+    porPunto = { e0: { fragmentos: [frag("c1", { sourceFile: "M6U1.pdf" })] } };
+    modelo.guiones = [
+      rondaHerramientas([llamadaBuscar("t1", { semantico: "alternador", language: "es" })]),
+      rondaTexto(RESPUESTA),
+    ];
+    // Con el filtro del modelo (idioma) no hay nada; sin él, sí.
+    busqueda.mockImplementation(async (_ctx, _u, consulta, _ev, punto, _modo, filtros) =>
+      resultadoExtra(punto, consulta, (filtros as { language?: string }).language ? [] : [frag("c9", { sourceFile: "M6U1.pdf" })]),
+    );
+    const { ctx } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids, { modo: EXTENDIDO.nombre }));
+
+    expect(busqueda).toHaveBeenCalledTimes(2);
+    // La primera lleva el filtro del modelo Y el del alcance; el reintento
+    // quita el del modelo pero conserva el documento.
+    expect(busqueda.mock.calls[0][6]).toEqual({ language: "es", documentId: String(pdf) });
+    expect(busqueda.mock.calls[1][6]).toEqual({ documentId: String(pdf) });
+    const aviso = herramientaDe(modelo.llamadas[1], "t1");
+    expect(aviso).toContain('language="es"');
+    expect(aviso).not.toContain("documentId");
+  });
+
+  test("si el documento acotado no tiene nada, se busca en todos y la respuesta tiene que decirlo", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    const [pdf] = await conDocumentos(t, ids, ["M6U1.pdf", "otro.pdf"]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF M6U1" });
+    // Primera llamada (acotada): nada. Segunda (sin filtros): un fragmento de otro documento.
+    let llamada = 0;
+    ejecutarPlan.mockImplementation(async (_ctx, _propietario, plan) => {
+      llamada += 1;
+      porPunto = llamada === 1 ? {} : { e0: { fragmentos: [frag("c1", { sourceFile: "otro.pdf" })] } };
+      return evidenciaDe(plan);
+    });
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    expect(ejecutarPlan).toHaveBeenCalledTimes(2);
+    expect(ejecutarPlan.mock.calls[0][4]).toEqual({ documentId: String(pdf) });
+    expect(ejecutarPlan.mock.calls[1][4]).toEqual({});
+    const ultimo = escrituras.filter((c) => c.alcance).pop();
+    expect(ultimo?.alcance).toMatchObject({ documento: "M6U1.pdf", encontrado: false });
+    expect(notaDeSistema()).toContain("no se encontró NADA sobre esto");
+    expect(notaDeSistema()).toContain("No le atribuyas a ese documento ningún dato");
+    const m = await fila(t, ids.messageId);
+    expect(metricasDe(m).counters.alcance_sin_resultados).toBe(1);
+  });
+
+  test("ADVERSARIAL: con varios PDF, 'el PDF' no elige ninguno: se busca en todos y se exige decir de cuál sale cada dato", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    await conDocumentos(t, ids, ["a.pdf", "b.pdf", "c.pdf"]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF indexado" });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    expect(ejecutarPlan).toHaveBeenCalledTimes(1);
+    expect(ejecutarPlan.mock.calls[0][4]).toEqual({});
+    const ultimo = escrituras.filter((c) => c.alcance).pop();
+    expect(ultimo?.alcance).toEqual({ pista: "el PDF indexado", documento: null, candidatos: 3, encontrado: true });
+    expect(notaDeSistema()).toContain("hay 3 que encajan");
+    expect(notaDeSistema()).toContain("de qué documento sale cada dato");
+  });
+
+  test("una pista que no corresponde a ningún documento avisa; sin pista no se escribe alcance ni se listan documentos", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    await conDocumentos(t, ids, ["a.pdf"]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF de Smith 2020" });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const { ctx, escrituras } = ctxDirecto(t);
+    await handlerDirecto(ctx, argsDe(ids));
+    expect(ejecutarPlan.mock.calls[0][4]).toEqual({});
+    expect(escrituras.filter((c) => c.alcance).pop()?.alcance).toMatchObject({ documento: null, encontrado: true });
+    expect(notaDeSistema()).toContain("ningún documento indexado se llama así");
+
+    const t2 = nuevaBase();
+    const ids2 = await sembrar(t2);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "" });
+    const { ctx: ctx2, escrituras: escrituras2 } = ctxDirecto(t2);
+    await handlerDirecto(ctx2, argsDe(ids2));
+    expect(escrituras2.some((c) => c.alcance)).toBe(false);
+    expect(mensajesDe(modelo.llamadas[modelo.llamadas.length - 1]).some((m) => String(m.content).includes("ALCANCE"))).toBe(false);
+  });
+
+  test("la pista sobrevive a la caché del plan: la segunda vez, sin clasificador, se acota igual", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    const [pdf] = await conDocumentos(t, ids, ["M6U1.pdf", "otro.docx"]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF" });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    await handlerDirecto(ctxDirecto(t).ctx, argsDe(ids));
+    expect(clasificar).toHaveBeenCalledTimes(1);
+
+    const ids2 = await t.run(async (ctx) => {
+      const sessionId = await ctx.db.insert("sessions", { titulo: "otra", userId: ids.userId, creadoEn: 2 });
+      const messageId = await ctx.db.insert("messages", { sessionId, userId: ids.userId, role: "assistant", content: "", estado: "pensando", creadoEn: 3 });
+      return { userId: ids.userId, sessionId, messageId };
+    });
+    await handlerDirecto(ctxDirecto(t).ctx, argsDe(ids2));
+    // El clasificador no volvió a correr (clase en caché) y el filtro sigue ahí.
+    expect(clasificar).toHaveBeenCalledTimes(1);
+    expect(ejecutarPlan.mock.calls[1][4]).toEqual({ documentId: String(pdf) });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Avance visible dentro de las fases largas
+// ---------------------------------------------------------------------------
+describe("progreso del turno", () => {
+  test("la barrera escribe el avance del verificador y de la corrección, y no repite el mismo texto", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    revisar.mockImplementation(async (_pregunta, borrador, _m, _f, _r, _mapa, _t, _tel, opciones) => {
+      const avisar = opciones?.alAvanzar;
+      avisar?.({ fase: "verificando", hechas: 0, total: 31 });
+      avisar?.({ fase: "verificando", hechas: 12, total: 31 });
+      avisar?.({ fase: "verificando", hechas: 12, total: 31 });
+      avisar?.({ fase: "corrigiendo", ronda: 1, rondas: 2, fallos: 3 });
+      avisar?.({ fase: "verificando", hechas: 0, total: 3 });
+      avisar?.({ fase: "verificando", hechas: 3, total: 3 });
+      return aprobar(borrador);
+    });
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    const progresos = escrituras.filter((c) => typeof c.progreso === "string").map((c) => c.progreso);
+    expect(progresos).toEqual([
+      "Contrastando cada afirmación con su fuente",
+      "Comprobando 31 afirmaciones · 0 de 31 listas",
+      "Comprobando 31 afirmaciones · 12 de 31 listas",
+      "Corrigiendo 3 afirmaciones sin respaldo · ronda 1 de 2",
+      "Comprobando 3 afirmaciones · 0 de 3 listas",
+      "Comprobando 3 afirmaciones · 3 de 3 listas",
+    ]);
+    // El estado `revisando` y el primer texto van en la misma escritura: la
+    // fase nunca aparece muda.
+    const revisando = escrituras.find((c) => c.estado === "revisando");
+    expect(revisando?.progreso).toBe("Contrastando cada afirmación con su fuente");
+    const m = await fila(t, ids.messageId);
+    expect(m.estado).toBe("listo");
+  });
+});

@@ -14,7 +14,7 @@
 
 import { formatoDe, type FamiliaFormato } from './biblioteca';
 import { puntosDelPlan } from './mensajes';
-import type { ChatMessage, EstadoTurno, Hop, Source } from '../types';
+import type { AlcanceTurno, ChatMessage, EstadoTurno, Hop, Source } from '../types';
 
 export type EstadoPaso = 'hecho' | 'en_curso' | 'pendiente';
 
@@ -131,9 +131,13 @@ function estadoDe(indice: number, actual: number, turnoCerrado: boolean): Estado
  * devuelven los pasos que se sabe que ocurrieron (hasta donde llegó) y nada
  * más: el error lo pinta el mensaje.
  */
-export function pasosDelTurno(msg: Pick<ChatMessage, 'estado' | 'hops' | 'plan' | 'sources' | 'verificacion'>): Paso[] {
+export function pasosDelTurno(
+  msg: Pick<ChatMessage, 'estado' | 'hops' | 'plan' | 'sources' | 'verificacion'> & Partial<Pick<ChatMessage, 'progreso' | 'alcance'>>,
+): Paso[] {
   const actual = ORDEN[msg.estado] ?? 0;
   const cerrado = msg.estado === 'listo';
+  const progreso = (msg.progreso ?? '').trim();
+  const alcance = msg.alcance ?? null;
   const partes = puntosDelPlan(msg.plan).length;
   const hopsCerrados = msg.hops.filter((h) => typeof h.resultados === 'number');
   const fragmentos = hopsCerrados.reduce((n, h) => n + (h.resultados ?? 0), 0);
@@ -151,6 +155,13 @@ export function pasosDelTurno(msg: Pick<ChatMessage, 'estado' | 'hops' | 'plan' 
     estado: estadoDe(1, actual, cerrado),
   };
   if (buscar.estado === 'hecho') buscar.titulo = partes > 0 ? 'Buscado por partes' : 'Buscado en tus documentos';
+  if (alcance !== null) {
+    // La pregunta pidió limitarse a un documento: se dice a cuál se acotó la
+    // búsqueda, o por qué no se pudo (con la pista de la persona, para que
+    // vea qué se entendió).
+    const nota = textoDeAlcance(alcance);
+    buscar.detalle = buscar.detalle === '' ? nota : `${buscar.detalle} · ${nota}`;
+  }
 
   const redactar: Paso = {
     clave: 'redactar',
@@ -161,6 +172,11 @@ export function pasosDelTurno(msg: Pick<ChatMessage, 'estado' | 'hops' | 'plan' 
         : '',
     estado: estadoDe(2, actual, cerrado),
   };
+  // Mientras se redacta, el avance dice cuántas afirmaciones ya se juzgaron
+  // sobre la marcha; se añade al detalle en vez de sustituirlo.
+  if (redactar.estado === 'en_curso' && progreso !== '') {
+    redactar.detalle = redactar.detalle === '' ? progreso : `${redactar.detalle} · ${progreso}`;
+  }
 
   const comprobadas = msg.verificacion?.afirmaciones.length ?? 0;
   const comprobar: Paso = {
@@ -172,6 +188,10 @@ export function pasosDelTurno(msg: Pick<ChatMessage, 'estado' | 'hops' | 'plan' 
         : '',
     estado: estadoDe(3, actual, cerrado),
   };
+  // En curso, el avance del agente ("Comprobando 31 afirmaciones · 12 de 31
+  // listas") es el detalle: era la fase que se quedaba muda hasta dos minutos
+  // y que una evaluación externa dio por colgada.
+  if (comprobar.estado === 'en_curso' && progreso !== '') comprobar.detalle = progreso;
 
   const pasos: Paso[] = [
     {
@@ -212,3 +232,17 @@ export function resumenDelTurno(msg: Pick<ChatMessage, 'hops' | 'verificacion' |
   if (ms > 0) piezas.push(formatearDuracion(ms));
   return piezas;
 }
+
+/** Cómo se resolvió el alcance pedido, en una frase corta para el paso de buscar. */
+export function textoDeAlcance(alcance: AlcanceTurno): string {
+  if (alcance.documento !== null) {
+    return alcance.encontrado
+      ? `solo en «${alcance.documento}»`
+      : `«${alcance.documento}» no tenía nada sobre esto: se buscó en todos`;
+  }
+  if (typeof alcance.candidatos === 'number' && alcance.candidatos > 1) {
+    return `«${alcance.pista}» no identifica un documento (hay ${alcance.candidatos}): se buscó en todos`;
+  }
+  return `no se reconoció «${alcance.pista}» entre tus documentos: se buscó en todos`;
+}
+

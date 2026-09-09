@@ -78,6 +78,15 @@ operación diaria (cuentas, documentos, telemetría, variables) en
   botón "Evaluar ahora") las responde con el agente real y las puntúa: evidencia encontrada,
   citas que resuelven, fidelidad, acierto de la búsqueda y datos de otra entidad, con el
   historial para ver si el asistente sigue acertando.
+- **Responde con el documento que se le pide.** "Usando únicamente el PDF indexado…" limita
+  todas las búsquedas del turno a ese documento (resuelto por nombre o, si la pista es genérica,
+  al único documento de ese formato); si el documento no trata el tema se busca en todos y la
+  respuesta empieza diciéndolo. Cuando la pista no identifica uno ("el PDF" con varios PDF) se
+  busca en todos y la respuesta dice de qué documento sale cada dato. El paso de buscar enseña a
+  qué se acotó.
+- **Cada fase larga cuenta lo que hace.** Mientras se comprueba la respuesta, el paso enseña
+  "Comprobando 31 afirmaciones · 12 de 31 listas" o "Corrigiendo 3 afirmaciones sin respaldo ·
+  ronda 1 de 2", y mientras se redacta, cuántas afirmaciones ya se juzgaron sobre la marcha.
 - **Progreso persistente, sin stream.** El agente escribe su avance en la fila del mensaje
   (`pensando`, `buscando`, `redactando`, `revisando`, `listo` o `error`) y el navegador está
   suscrito a la conversación. Una respuesta sobrevive a que se cierre la pestaña.

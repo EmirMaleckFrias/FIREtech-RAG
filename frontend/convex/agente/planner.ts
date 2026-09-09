@@ -137,7 +137,15 @@ Y "consulta_en": esa misma consulta traducida al inglés con los términos
 técnicos en inglés (el biomarcador, la escala, el fármaco, la población),
 porque los documentos suelen estar en inglés y la coincidencia de palabras no
 traduce. Si la consulta ya está en inglés, cópiala.
-Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional","consulta":"...","consulta_en":"..."}`;
+Y "documento": SOLO si el mensaje pide expresamente LIMITAR la respuesta a un
+documento ("únicamente con el PDF M6U1", "solo en el documento de Allegri
+2023", "usando únicamente el PDF indexado", "según el archivo guia_hta.pdf, y
+nada más"): copia cómo se refiere a él, tal como aparece en el mensaje, aunque
+no lo nombre ("el PDF indexado" también vale: dice que es uno y de qué
+formato). Nombrar un documento sin pedir limitarse a él ("¿qué dice Allegri
+de esto?" puede compararse con otros) NO cuenta: deja "". Si no pide
+limitarse a ninguno, "".
+Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional","consulta":"...","consulta_en":"...","documento":""}`;
 
 /** Forma normalizada de una consulta para detectar equivalentes.
  *
@@ -349,11 +357,20 @@ export interface Clasificacion {
    *  hay planificador. Vacía si es igual a la consulta o no llegó. Opcional
    *  por los llamadores que aún no la leen. */
   consultaEn?: string;
+  /** Nombre o título del documento al que el mensaje pide LIMITARSE, tal
+   *  como lo escribió quien pregunta ("el PDF M6U1"). Vacío si no pide
+   *  limitarse a ninguno. Lo resuelve `agente/alcance.ts` contra los
+   *  documentos de la persona; aquí solo se recoge la pista. Medido con
+   *  pruebas externas el 8 sep 2026: "únicamente con el PDF X" se buscaba en
+   *  todo el corpus y la respuesta mezclaba otros documentos. */
+  documento?: string;
 }
 
 /** Tope de la consulta reformulada: más largo que esto no es una consulta,
  *  es el modelo inventando. */
 const MAX_CONSULTA = 600;
+/** Tope de la pista del documento: un nombre de fichero o un título. */
+const MAX_PISTA_DOCUMENTO = 200;
 
 /** Clase de la pregunta, ANTES de buscar, y la consulta autónoma con la que
  *  buscarla. Solo `documental` entra al pipeline.
@@ -437,7 +454,12 @@ export async function clasificar(
         (reformulada ? `; consulta reformulada: ${consulta.slice(0, 120)}` : ""),
     });
     if (r.razonamientoRechazado) tel?.incr("razonamiento_rechazado");
-    return { clase, consulta, consultaEn };
+    // La pista del documento se acepta si tiene tamaño de nombre. Que exista
+    // o no entre los documentos lo decide el bucle, que es quien los conoce.
+    const pista = textoDe(r.datos?.documento).replace(/\s+/g, " ").trim();
+    const documento = pista !== "" && pista.length <= MAX_PISTA_DOCUMENTO ? pista : "";
+    if (documento) tel?.incr("alcance_pedido");
+    return { clase, consulta, consultaEn, documento };
   } catch (exc) {
     tel?.anota("clasificador", modelo, null, {
       ms: Date.now() - t0,

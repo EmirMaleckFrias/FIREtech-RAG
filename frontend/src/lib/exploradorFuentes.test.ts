@@ -14,7 +14,7 @@ const fuente = (extra: Partial<Source> = {}): Source => ({
   score: .83, citation: 'Allegri et al., 2021', ...extra,
 });
 const mensaje = (extra: Partial<ChatMessage> = {}): ChatMessage => ({
-  localId: 'm1', id: null, role: 'assistant', content: '', sources: [],
+  localId: 'm1', id: null, role: 'assistant', content: '', sources: [], progreso: '', alcance: null,
   hops: [], plan: [], verificacion: null, estado: 'listo', streaming: false,
   error: null, feedback: null, creadoEn: 0, ...extra,
 });

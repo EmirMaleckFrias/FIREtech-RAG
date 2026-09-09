@@ -51,7 +51,17 @@ export interface OpcionesRevision {
    *  la primera sin cambiar ningún veredicto (la misma frase con la misma
    *  cita se juzga igual, se juzgue cuando se juzgue). */
   veredictosIniciales?: ReadonlyMap<string, Afirmacion>;
+  /** Aviso de avance de la barrera, para que el bucle lo escriba en el turno
+   *  y la usuaria vea qué pasa: cuántas afirmaciones se están juzgando y
+   *  cuántas han vuelto, o qué ronda de corrección va y con cuántos fallos. */
+  alAvanzar?: (evento: EventoRevision) => void;
 }
+
+/** Lo que la barrera va haciendo. `verificando` llega desde el verificador
+ *  (una vez por lote); `corrigiendo` al empezar cada ronda de corrección. */
+export type EventoRevision =
+  | { fase: "verificando"; hechas: number; total: number }
+  | { fase: "corrigiendo"; ronda: number; rondas: number; fallos: number };
 
 export interface ResultadoRevision {
   contenido: string;
@@ -745,6 +755,7 @@ export async function revisarAntesDePublicar(
       // La pregunta va al juez: es lo que le permite ver una atribución a
       // otra entidad cuando la frase no nombra la preguntada.
       pregunta,
+      alAvanzar: (hechas, total) => opciones.alAvanzar?.({ fase: "verificando", hechas, total }),
     });
     for (const [k, af] of verificador.veredictosDe(informe)) conocidos.set(k, af);
     return informe;
@@ -772,6 +783,7 @@ export async function revisarAntesDePublicar(
 
       let actual = borrador;
       for (let ronda = 1; ronda <= maxRevisiones; ronda++) {
+        opciones.alAvanzar?.({ fase: "corrigiendo", ronda, rondas: maxRevisiones, fallos: bloqueantes(informe).length });
         actual = await _corregir(pregunta, actual, mensajesConEvidencia, informe, a, t, {
           ordenarBorrado: ronda === maxRevisiones && ronda >= 2,
         });

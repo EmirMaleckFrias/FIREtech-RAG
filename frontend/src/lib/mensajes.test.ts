@@ -200,3 +200,23 @@ describe('un turno detenido por la usuaria', () => {
     expect(m.content).toBe('');
   });
 });
+
+describe('progreso y alcance del mensaje', () => {
+  it('el progreso solo se conserva mientras el turno no es final; el alcance se normaliza o se descarta', () => {
+    const base = { _id: id('m1'), role: 'assistant', content: '', creadoEn: AHORA };
+    const enCurso = mensajeDesdeDoc({ ...base, estado: 'revisando', progreso: ' Comprobando 5 afirmaciones · 2 de 5 listas ' }, AHORA, null);
+    expect(enCurso.progreso).toBe('Comprobando 5 afirmaciones · 2 de 5 listas');
+    const listo = mensajeDesdeDoc({ ...base, estado: 'listo', progreso: 'Comprobando 5 afirmaciones' }, AHORA, null);
+    expect(listo.progreso).toBe('');
+    expect(mensajeDesdeDoc({ ...base, estado: 'revisando', progreso: 42 }, AHORA, null).progreso).toBe('');
+
+    expect(mensajeDesdeDoc({ ...base, estado: 'listo' }, AHORA, null).alcance).toBeNull();
+    expect(mensajeDesdeDoc({ ...base, estado: 'listo', alcance: { documento: 'x' } }, AHORA, null).alcance).toBeNull();
+    expect(
+      mensajeDesdeDoc({ ...base, estado: 'listo', alcance: { pista: 'el PDF', documento: 'M6U1.pdf', encontrado: false } }, AHORA, null).alcance,
+    ).toEqual({ pista: 'el PDF', documento: 'M6U1.pdf', encontrado: false });
+    expect(
+      mensajeDesdeDoc({ ...base, estado: 'listo', alcance: { pista: 'el PDF', documento: null, candidatos: 3 } }, AHORA, null).alcance,
+    ).toEqual({ pista: 'el PDF', documento: null, candidatos: 3, encontrado: true });
+  });
+});

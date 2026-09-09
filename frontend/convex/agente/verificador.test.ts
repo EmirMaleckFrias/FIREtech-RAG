@@ -1373,3 +1373,52 @@ describe("cifras e identificadores", () => {
     expect(bien.afirmaciones[0].veredicto).toBe(SOSTENIDA);
   });
 });
+
+describe("aviso de avance (alAvanzar)", () => {
+  test("avisa con (0, total) antes de juzgar y una vez por lote, también por el lote que falla", async () => {
+    process.env.VERIFIER_MAX_CLAIMS = "1";
+    const c1 = frag("c1", "La conversión fue del 31.6%.", "e.pdf", 3);
+    const c2 = frag("c2", "El AUC fue 0.94.", "e.pdf", 4);
+    const c3 = frag("c3", "La edad media fue 72 años.", "e.pdf", 5);
+    espia
+      .mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok" }] }))
+      .mockRejectedValueOnce(new Error("lote caído"))
+      .mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok" }] }));
+    const avisos: Array<[number, number]> = [];
+    const informe = await verificar(
+      `La conversión fue del 31.6% ${cita(c1)}. El AUC fue 0.94 ${cita(c2)}. La edad media fue 72 años ${cita(c3)}.`,
+      [c1, c2, c3],
+      null,
+      null,
+      undefined,
+      { alAvanzar: (hechas, total) => avisos.push([hechas, total]) },
+    );
+    expect(avisos[0]).toEqual([0, 3]);
+    expect(avisos).toHaveLength(4);
+    expect(avisos[avisos.length - 1]).toEqual([3, 3]);
+    expect(avisos.every(([h, t]) => h <= t)).toBe(true);
+    // El lote caído no cambió el resultado: dos sostenidas y una sin veredicto.
+    expect(veredictos(informe).filter((v) => v === SOSTENIDA)).toHaveLength(2);
+  });
+
+  test("ADVERSARIAL: un aviso que lanza no tumba el juicio", async () => {
+    const c1 = frag("c1", "La conversión fue del 31.6%.", "e.pdf", 3);
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok" }] }));
+    const informe = await verificar(`La conversión fue del 31.6% ${cita(c1)}.`, [c1], null, null, undefined, {
+      alAvanzar: () => {
+        throw new Error("la base se cayó");
+      },
+    });
+    expect(veredictos(informe)).toEqual([SOSTENIDA]);
+  });
+
+  test("sin afirmaciones nuevas (todas reutilizadas) no se avisa: no hay nada que esperar", async () => {
+    const c1 = frag("c1", "La conversión fue del 31.6%.", "e.pdf", 3);
+    const texto = `La conversión fue del 31.6% ${cita(c1)}.`;
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "ok" }] }));
+    const previo = await verificar(texto, [c1]);
+    const avisos: unknown[] = [];
+    await verificar(texto, [c1], null, null, undefined, { veredictosPrevios: veredictosDe(previo), alAvanzar: (h, t) => avisos.push([h, t]) });
+    expect(avisos).toEqual([]);
+  });
+});

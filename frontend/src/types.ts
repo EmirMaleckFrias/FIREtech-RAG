@@ -271,6 +271,18 @@ export type EstadoTurno =
    *  turno no publica texto y conserva lo que llevara buscado. */
   | 'cancelado';
 
+/** A qué documento pidió limitarse la pregunta ("únicamente el PDF X") y
+ *  cómo se resolvió. `documento` es el nombre al que se acotó la búsqueda, o
+ *  null si la pista no identificó uno (entonces `candidatos` dice cuántos
+ *  encajaban, si varios). `encontrado` es false cuando el documento acotado
+ *  no tenía nada y se buscó en todos. */
+export interface AlcanceTurno {
+  pista: string;
+  documento: string | null;
+  candidatos?: number;
+  encontrado: boolean;
+}
+
 /** Mensaje en el estado local del chat. */
 export interface ChatMessage {
   /** Clave estable local. Es el `_id` en los mensajes ya guardados y una
@@ -289,6 +301,12 @@ export interface ChatMessage {
   /** Informe del verificador. null mientras no llega o si está desactivado. */
   verificacion: Verificacion | null;
   estado: EstadoTurno;
+  /** Lo que el agente hace dentro de la fase en curso, en una frase
+   *  ("Comprobando 31 afirmaciones · 12 de 31 listas"). Vacío si no hay
+   *  nada que decir; solo se pinta mientras el turno no es final. */
+  progreso: string;
+  /** Alcance pedido por la pregunta; null si no pidió limitarse a un documento. */
+  alcance: AlcanceTurno | null;
   /** true mientras `estado` no es final (listo o error). Es derivado, no se
    *  guarda: existe para que los componentes que ya distinguian "en curso"
    *  sigan haciendolo igual que con el streaming. */

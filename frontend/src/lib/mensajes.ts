@@ -16,7 +16,8 @@
 //   así que no hay tokens sueltos ni caret que perseguir.
 
 import type { Id } from '../../convex/_generated/dataModel';
-import type { ChatMessage, EstadoTurno, Hop, PlanItem } from '../types';
+import type {
+  AlcanceTurno, ChatMessage, EstadoTurno, Hop, PlanItem } from '../types';
 import { ANCLA } from './cobertura';
 import { normalizeHops, normalizePlan, normalizeSources, normalizeVerificacion } from './normalize';
 
@@ -50,8 +51,25 @@ export interface MensajeDoc {
   verificacion?: unknown;
   estado?: string;
   error?: string;
+  progreso?: unknown;
+  alcance?: unknown;
   creadoEn: number;
   feedback?: unknown;
+}
+
+/** El alcance tal como lo escribe el agente, o null si no lo hay o no tiene forma. */
+export function normalizeAlcance(value: unknown): AlcanceTurno | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const o = value as Record<string, unknown>;
+  const pista = typeof o.pista === 'string' ? o.pista.trim() : '';
+  if (pista === '') return null;
+  const candidatos = typeof o.candidatos === 'number' && Number.isFinite(o.candidatos) ? o.candidatos : undefined;
+  return {
+    pista,
+    documento: typeof o.documento === 'string' && o.documento.trim() !== '' ? o.documento.trim() : null,
+    ...(candidatos !== undefined ? { candidatos } : {}),
+    encontrado: o.encontrado !== false,
+  };
 }
 
 function esEstado(value: unknown): value is EstadoTurno {
@@ -113,6 +131,8 @@ export function mensajeDesdeDoc(
     plan: normalizePlan(doc.plan),
     verificacion: normalizeVerificacion(doc.verificacion),
     estado,
+    progreso: !esFinal(estado) && typeof doc.progreso === 'string' ? doc.progreso.trim() : '',
+    alcance: normalizeAlcance(doc.alcance),
     streaming: !esFinal(estado),
     error,
     feedback,

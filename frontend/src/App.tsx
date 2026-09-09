@@ -99,6 +99,8 @@ function mensajesPendientes(p: Pendiente): ChatMessage[] {
     hops: [],
     plan: [],
     verificacion: null,
+    progreso: '',
+    alcance: null,
     feedback: null,
     creadoEn: p.creadoEn,
   };
@@ -412,6 +414,8 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
           hops: [],
           plan: [],
           verificacion: null,
+          progreso: '',
+          alcance: null,
           estado: 'error',
           streaming: false,
           error: mensajeDeError(

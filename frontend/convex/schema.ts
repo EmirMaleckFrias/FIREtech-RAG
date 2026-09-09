@@ -179,6 +179,18 @@ export default defineSchema({
       ),
     ),
     error: v.optional(v.string()),
+    // Lo que el agente está haciendo dentro de una fase larga, en una frase
+    // para la usuaria ("Comprobando 31 afirmaciones · 12 listas"). Medido con
+    // pruebas externas el 8 sep 2026: "Comprobando cada afirmación" se quedaba
+    // mudo hasta dos minutos y el evaluador lo dio por colgado. Solo tiene
+    // sentido mientras `estado` no es final; el cliente lo ignora después.
+    progreso: v.optional(v.string()),
+    // Si la pregunta pidió limitar la respuesta a un documento concreto
+    // ("únicamente el PDF X"): la pista que dio, el documento al que se
+    // resolvió (o null si no se reconoció) y si la búsqueda acotada encontró
+    // algo (si no, se buscó en todos y la respuesta lo dice). Forma en
+    // `src/types.ts` (AlcanceTurno).
+    alcance: v.optional(v.any()),
     creadoEn: v.number(),
   })
     .index("porSesionYCreacion", ["sessionId", "creadoEn"])
@@ -614,6 +626,10 @@ export default defineSchema({
     // para buscar el ancla e0 también con sinónimos y siglas. Opcional porque
     // las entradas anteriores a la marca no lo llevan.
     variantes: v.optional(v.array(v.string())),
+    // Pista del documento al que la pregunta pide limitarse (clasificador
+    // `documento`), para que la segunda vez que se hace la misma pregunta,
+    // con la clase en caché y sin clasificador, el alcance no se pierda.
+    documento: v.optional(v.string()),
     creadoEn: v.number(),
     usos: v.number(),
   }).index("porClave", ["clave"]),

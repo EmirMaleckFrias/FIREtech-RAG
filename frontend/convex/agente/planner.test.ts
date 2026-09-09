@@ -351,3 +351,26 @@ describe("variantes", () => {
     expect((await clasificar("q", [])).consultaEn).toBe("");
   });
 });
+
+describe("clasificar: la pista del documento", () => {
+  test("recoge el documento al que el mensaje pide limitarse, también cuando es genérico", async () => {
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", consulta_en: "", documento: "el PDF indexado" }));
+    expect((await clasificar("Usando únicamente el PDF indexado, analiza este escenario", [])).documento).toBe("el PDF indexado");
+    const kwargs = espia.mock.calls[0][0] as { messages: Array<{ content: string }> };
+    expect(kwargs.messages[0].content).toContain('"documento"');
+    expect(kwargs.messages[0].content).toContain("el PDF indexado");
+  });
+
+  test("ADVERSARIAL: sin pista, con pista desmesurada o con el clasificador caído, la pista queda vacía", async () => {
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", consulta_en: "" }));
+    expect((await clasificar("q", [])).documento).toBe("");
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", documento: "x".repeat(201) }));
+    expect((await clasificar("q", [])).documento).toBe("");
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", documento: 42 }));
+    expect((await clasificar("q", [])).documento).toBe("");
+    espia.mockRejectedValueOnce(new Error("caído"));
+    const r = await clasificar("q", []);
+    expect(r.clase).toBe("documental");
+    expect(r.documento ?? "").toBe("");
+  });
+});

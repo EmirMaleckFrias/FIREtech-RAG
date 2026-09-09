@@ -1115,3 +1115,32 @@ describe("veredictos iniciales", () => {
     expect(r.informe.afirmaciones.map((a) => a.veredicto)).toEqual([verificador.SOSTENIDA, verificador.SOSTENIDA]);
   });
 });
+
+describe("aviso de avance de la barrera (alAvanzar)", () => {
+  test("reenvía el avance del verificador y anuncia cada ronda de corrección con sus fallos", async () => {
+    process.env.PRE_RESPONSE_REVIEW_MAX_REVISIONS = "2";
+    const ch = frag();
+    const falsa = `El AUC fue 0.99 ${cita(ch)}.`;
+    const corregida = `El AUC fue 0.94 ${cita(ch)}.`;
+    juez
+      .mockResolvedValueOnce(veredictoJson("no_sostenida", "dice 0.94"))
+      .mockResolvedValueOnce(veredictoJson("sostenida", "coincide"));
+    redactor.mockResolvedValueOnce(respuestaTexto(corregida));
+    const eventos: revisor.EventoRevision[] = [];
+
+    const resultado = await revisor.revisarAntesDePublicar("q", falsa, [], [ch], null, null, null, undefined, {
+      alAvanzar: (e) => eventos.push(e),
+    });
+
+    expect(resultado.contenido).toBe(corregida);
+    // Verificación del borrador (0 de 1, 1 de 1), la ronda con UN fallo, y la
+    // verificación de la corrección (la frase cambió: se juzga de nuevo).
+    expect(eventos).toEqual([
+      { fase: "verificando", hechas: 0, total: 1 },
+      { fase: "verificando", hechas: 1, total: 1 },
+      { fase: "corrigiendo", ronda: 1, rondas: 2, fallos: 1 },
+      { fase: "verificando", hechas: 0, total: 1 },
+      { fase: "verificando", hechas: 1, total: 1 },
+    ]);
+  });
+});

@@ -823,11 +823,31 @@ async function dictaminarEnLotes(
   a: Ajustes,
   tel: Telemetria,
   pregunta = "",
+  alAvanzar?: (hechas: number, total: number) => void,
 ): Promise<{ fallos: Fallos; nota: string; todosCaidos: boolean }> {
   const trozos: Pendiente[][] = [];
   for (let i = 0; i < pendientes.length; i += lote) trozos.push(pendientes.slice(i, i + lote));
 
-  const resultados = await Promise.allSettled(trozos.map((t) => dictaminar(t, a, tel, pregunta)));
+  // El aviso de avance no puede tumbar el juicio: un fallo al escribirlo se
+  // traga aquí y el veredicto sigue su camino.
+  const total = pendientes.length;
+  let hechas = 0;
+  const avisar = () => {
+    try {
+      alAvanzar?.(hechas, total);
+    } catch (exc) {
+      console.warn("aviso de avance del verificador fallido", String(exc).slice(0, 120));
+    }
+  };
+  avisar();
+  const resultados = await Promise.allSettled(
+    trozos.map((t) =>
+      dictaminar(t, a, tel, pregunta).finally(() => {
+        hechas += t.length;
+        avisar();
+      }),
+    ),
+  );
 
   const fallos: Fallos = new Map();
   const caidos: string[] = [];
@@ -1010,6 +1030,12 @@ export interface OpcionesVerificacion {
    *  pregunta. Sin ella, la comprobación de entidad solo puede apoyarse en el
    *  texto y el apartado de la frase. */
   pregunta?: string;
+  /** Aviso de avance: cuántas afirmaciones nuevas hay que juzgar en esta
+   *  llamada (`total`) y cuántas han vuelto ya del juez (`hechas`). Se llama
+   *  con (0, total) antes de mandar nada y una vez por lote que termina, bien
+   *  o mal. Es lo que permite enseñar "Comprobando 31 afirmaciones · 12
+   *  listas" en vez de un título mudo durante dos minutos. */
+  alAvanzar?: (hechas: number, total: number) => void;
 }
 
 export async function verificar(
@@ -1176,7 +1202,7 @@ export async function verificar(
   let ok = !haySinCita;
   if (pendientes.length) {
     const lote = Math.max(1, Math.floor(a.maxAfirmacionesPorLote) || 1);
-    const resultado = await dictaminarEnLotes(pendientes, lote, a, t, opciones.pregunta ?? "");
+    const resultado = await dictaminarEnLotes(pendientes, lote, a, t, opciones.pregunta ?? "", opciones.alAvanzar);
     nota = resultado.nota;
     if (resultado.todosCaidos) {
       // Se conserva lo determinista (las citas que no resuelven) y se deja

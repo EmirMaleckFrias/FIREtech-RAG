@@ -33,6 +33,7 @@ import { claveDe as claveDePlan } from "./cachePlan";
 import * as evidencia from "./evidencia";
 import * as verificador from "./verificador";
 import * as revisor from "./revisor";
+import * as alcance from "./alcance";
 import {
   HERRAMIENTAS,
   INSTRUCCION_SIN_DOCUMENTOS,
@@ -235,7 +236,7 @@ export const correr = internalAction({
       //    una repregunta ("y en la otra cohorte?") depende de la conversación.
       const cacheable = args.historial.length === 0;
       const clavePlan = claveDePlan(args.texto, a.modelo, VERSION_PROMPT);
-      let enCache: { items: unknown[]; preguntaEn: string; clase: string | null; variantes?: string[] } | null = null;
+      let enCache: { items: unknown[]; preguntaEn: string; clase: string | null; variantes?: string[]; documento?: string } | null = null;
       if (cacheable) {
         try {
           enCache = await ctx.runQuery(internal.agente.cachePlan.leer, { clave: clavePlan, ahora: Date.now() });
@@ -267,7 +268,7 @@ export const correr = internalAction({
           : null;
       const clasificacion: planner.Clasificacion =
         (enCache?.clase ?? null) !== null
-          ? { clase: enCache!.clase as planner.Clase, consulta: args.texto, consultaEn: enCache!.preguntaEn ?? "" }
+          ? { clase: enCache!.clase as planner.Clase, consulta: args.texto, consultaEn: enCache!.preguntaEn ?? "", documento: enCache!.documento ?? "" }
           : await planner.clasificar(args.texto, args.historial, tel);
       const clase = clasificacion.clase;
       const consulta = clasificacion.consulta;
@@ -286,8 +287,41 @@ export const correr = internalAction({
         return;
       }
 
+      // 1b. Alcance: si la pregunta pide limitarse a un documento, se resuelve
+      //     la pista contra los documentos de la persona y se convierte en el
+      //     filtro `documentId` de TODAS las búsquedas del turno (plan y
+      //     extras). Ver agente/alcance.ts para las reglas y el caso medido.
+      const pistaDocumento = (clasificacion.documento ?? "").trim();
+      let alcanceTurno: alcance.Alcance = { tipo: "sin_pista" };
+      if (pistaDocumento) {
+        try {
+          const nombrados = await ctx.runQuery(internal.agente.alcance.documentosDe, { propietario: args.userId });
+          alcanceTurno = alcance.elegirDocumento(pistaDocumento, nombrados);
+        } catch (exc) {
+          console.warn("no se pudieron listar los documentos para el alcance", exc);
+        }
+        tel.fija({
+          alcance_pista: pistaDocumento,
+          alcance: alcanceTurno.tipo,
+          alcance_documento: alcanceTurno.tipo === "elegido" ? alcanceTurno.nombre : null,
+        });
+      }
+      const documentoElegido = alcanceTurno.tipo === "elegido" ? alcanceTurno : null;
+      // Filtros vigentes para las búsquedas del turno. Se vacían si la
+      // búsqueda acotada no encuentra nada (ver el paso 3).
+      let filtrosAlcance: FiltrosBusqueda = documentoElegido ? { documentId: String(documentoElegido.id) } : {};
+      const alcancePublicable = (encontrado: boolean) =>
+        pistaDocumento
+          ? {
+              pista: pistaDocumento,
+              documento: documentoElegido?.nombre ?? null,
+              candidatos: alcanceTurno.tipo === "ambiguo" ? alcanceTurno.candidatos : undefined,
+              encontrado,
+            }
+          : undefined;
+
       // 2. Plan de evidencia. El ancla e0 es SIEMPRE la pregunta literal.
-      await actualizar({ estado: "buscando" });
+      await actualizar({ estado: "buscando", alcance: alcancePublicable(true) });
       if (abandonado) return;
       let items: planner.PuntoPlan[] = [];
       // El inglés del ancla sale del clasificador cuando no corre el
@@ -312,7 +346,7 @@ export const correr = internalAction({
             try {
               await ctx.runMutation(internal.agente.cachePlan.guardar, {
                 clave: clavePlan, pregunta: args.texto, modelo: a.modelo, version: VERSION_PROMPT,
-                clase, items, preguntaEn, variantes,
+                clase, items, preguntaEn, variantes, documento: pistaDocumento,
               });
             } catch (exc) {
               console.warn("no se pudo guardar el plan en caché", exc);
@@ -325,7 +359,7 @@ export const correr = internalAction({
         void ctx
           .runMutation(internal.agente.cachePlan.guardar, {
             clave: clavePlan, pregunta: args.texto, modelo: a.modelo, version: VERSION_PROMPT,
-            clase, items: [], preguntaEn, variantes: [],
+            clase, items: [], preguntaEn, variantes: [], documento: pistaDocumento,
           })
           .catch(() => undefined);
       }
@@ -344,15 +378,28 @@ export const correr = internalAction({
       //    modelo. Aquí es donde la variación entre corridas deja de existir:
       //    la misma pregunta recupera la misma evidencia.
       const limiteEvidenciaMs = Math.min(a.prefetchTimeoutS * 1000, restanteS() * 1000);
-      const ev = await evidencia.ejecutarPlan(
+      let ev = await evidencia.ejecutarPlan(
         ctx,
         args.userId,
         plan,
         modo,
-        {},
+        filtrosAlcance,
         tel,
         limiteEvidenciaMs,
       );
+      // La búsqueda acotada al documento pedido no encontró NADA: puede que
+      // el documento no hable de eso, o que la pista se resolviera al
+      // documento equivocado. En los dos casos lo honesto es buscar en todos
+      // y decir en la respuesta que lo que sale no es de ese documento, en
+      // vez de una abstención que la usuaria no puede distinguir de "el
+      // documento no lo dice".
+      let alcanceEncontrado = true;
+      if (documentoElegido && ev.acumulado.size === 0 && !ev.puntos.some((p) => p.recuperacion === "error")) {
+        tel.incr("alcance_sin_resultados");
+        alcanceEncontrado = false;
+        filtrosAlcance = {};
+        ev = await evidencia.ejecutarPlan(ctx, args.userId, plan, modo, {}, tel, Math.min(limiteEvidenciaMs, restanteS() * 1000));
+      }
       const acumulado = new Map<string, Fragmento>(ev.acumulado);
       const mapa: Record<string, string[]> = { ...ev.mapa };
       const grados: Record<string, string> = { ...ev.grados };
@@ -377,8 +424,13 @@ export const correr = internalAction({
         recuperacion,
       });
       const fuentes = () => fuentesPayload(acumulado.values(), mapa, grados);
-      await actualizar({ hops, sources: fuentes() });
+      await actualizar({ hops, sources: fuentes(), alcance: alcancePublicable(alcanceEncontrado) });
       if (abandonado) return;
+
+      // Lo que el redactor tiene que saber del alcance. Va como mensaje de
+      // sistema DESPUÉS de la evidencia, en el canal de instrucciones y no en
+      // el de datos.
+      const notaAlcance = notaDeAlcance(pistaDocumento, alcanceTurno, alcanceEncontrado);
 
       // 4. Los mensajes: prompt, modo, historial, pregunta y la evidencia como
       //    intercambio de herramientas sintético (el formato que el modelo ya
@@ -389,6 +441,7 @@ export const correr = internalAction({
         ...args.historial.map((m) => ({ role: m.role, content: m.content })),
         { role: "user", content: args.texto },
         ...evidencia.mensajesSinteticos(ev, plan),
+        ...(notaAlcance ? [{ role: "system", content: notaAlcance } as Mensaje] : []),
       ];
 
       // 5. Redacción, con búsquedas extra acotadas.
@@ -410,6 +463,15 @@ export const correr = internalAction({
         plan.map((p) => [p.id, p.evidenceNeeded]),
       );
       const conocidos = new Map<string, verificador.Afirmacion>();
+      // El avance dentro de una fase, en una frase para la usuaria. Solo se
+      // escribe cuando cambia: cada escritura es una mutación.
+      let ultimoProgreso = "";
+      let enBarrera = false;
+      const escribirProgreso = async (texto: string) => {
+        if (texto === ultimoProgreso || abandonado) return;
+        ultimoProgreso = texto;
+        await actualizar({ progreso: texto });
+      };
       const anticipadas: Promise<unknown>[] = [];
       let verificadoHasta = 0;
       const anticipar = (borradorParcial: string) => {
@@ -426,6 +488,9 @@ export const correr = internalAction({
             })
             .then((inf) => {
               for (const [k, af] of verificador.veredictosDe(inf)) conocidos.set(k, af);
+              // Una anticipada que aterriza ya en la barrera no debe pisar el
+              // texto de la barrera con el de la redacción.
+              if (!enBarrera) void escribirProgreso(textoDeProgresoRedactando(conocidos.size));
             })
             .catch((exc: unknown) => console.warn("verificación anticipada fallida", String(exc).slice(0, 120))),
         );
@@ -622,7 +687,9 @@ export const correr = internalAction({
             const puntoDeclarado = String(argumentos.punto ?? "").trim();
             const puntoDelPlan = plan.find((p) => p.id === puntoDeclarado);
             const punto = puntoDelPlan ? puntoDelPlan.id : "extra";
-            const filtros = filtrosDe(argumentos);
+            // El alcance manda sobre lo que el modelo pida: una búsqueda extra
+            // no puede salirse del documento al que la pregunta se limitó.
+            const filtros = { ...filtrosDe(argumentos), ...filtrosAlcance };
             const hop: Hop = {
               n: hops.length + 1,
               query: etiquetaDeLlamada(argumentos, args.texto),
@@ -670,14 +737,16 @@ export const correr = internalAction({
                 // filtros dejan la búsqueda vacía se repite sin ellos y se
                 // avisa: recuperar con un aviso es honesto, devolver cero en
                 // silencio no.
-                if (!resultado.fragmentos.length && Object.keys(filtros).length) {
-                  // Sin filtros, pero NUNCA sin propietario: el corpus de
-                  // cada persona es lo único que este reintento no relaja.
+                // Se relajan SOLO los filtros que puso el modelo: el del
+                // alcance (el documento al que la pregunta pidió limitarse) se
+                // mantiene, y el corpus de la persona no se relaja nunca.
+                const propios = filtrosDe(argumentos);
+                if (!resultado.fragmentos.length && Object.keys(propios).length) {
                   const sinFiltros = await conTopeExtra(evidencia.buscarYCalificar(
-                    ctx, args.userId, consulta, puntoDelPlan?.evidenceNeeded ?? consulta, punto, modo, {}, tel,
+                    ctx, args.userId, consulta, puntoDelPlan?.evidenceNeeded ?? consulta, punto, modo, filtrosAlcance, tel,
                   ));
                   if (sinFiltros.fragmentos.length) {
-                    const detalle = Object.entries(filtros).map(([k, val]) => `${k}=${JSON.stringify(val)}`).join(", ");
+                    const detalle = Object.entries(propios).map(([k, val]) => `${k}=${JSON.stringify(val)}`).join(", ");
                     aviso =
                       `AVISO: con los filtros que pusiste (${detalle}) no había NINGÚN ` +
                       "fragmento, así que la búsqueda se repitió SIN filtros y esto es lo " +
@@ -744,7 +813,9 @@ export const correr = internalAction({
       }
 
       // 6. Barrera de fidelidad. El borrador sigue privado hasta aquí.
-      await actualizar({ estado: "revisando" });
+      enBarrera = true;
+      ultimoProgreso = textoDeProgresoRevisando(conocidos.size);
+      await actualizar({ estado: "revisando", progreso: ultimoProgreso });
       if (abandonado) return;
       // Las verificaciones anticipadas que sigan en vuelo están a punto de
       // terminar: se esperan un poco, no indefinidamente (una colgada no
@@ -767,7 +838,10 @@ export const correr = internalAction({
         // podría comprobarla. Sin historial son la misma cadena.
         const r = await revisor.revisarAntesDePublicar(
           consulta, contenido, mensajes, fragmentos, requerida, mapa, restanteS(), tel,
-          { veredictosIniciales: conocidos },
+          {
+            veredictosIniciales: conocidos,
+            alAvanzar: (evento) => void escribirProgreso(textoDeProgreso(evento, conocidos.size)),
+          },
         );
         contenido = r.contenido;
         informe = r.informe;
@@ -914,3 +988,63 @@ async function responderSinDocumentos(
   console.warn(`respuesta sin documentos vacía (finish_reason=${razon})`);
   return "No he podido completar la respuesta esta vez. Vuelve a intentarlo o reformula la pregunta.";
 }
+
+// --- Textos de avance y de alcance ---------------------------------------------
+
+function plural(n: number, singular: string, plural: string): string {
+  return `${n} ${n === 1 ? singular : plural}`;
+}
+
+/** Mientras se redacta: cuántas afirmaciones del borrador ya se juzgaron. */
+export function textoDeProgresoRedactando(conocidas: number): string {
+  return conocidas > 0 ? `${plural(conocidas, "afirmación ya comprobada", "afirmaciones ya comprobadas")} sobre la marcha` : "";
+}
+
+/** Al entrar en la barrera, antes de que el verificador diga cuántas quedan. */
+export function textoDeProgresoRevisando(conocidas: number): string {
+  return conocidas > 0
+    ? `${plural(conocidas, "afirmación comprobada", "afirmaciones comprobadas")} · revisando el resto`
+    : "Contrastando cada afirmación con su fuente";
+}
+
+/** Un evento de la barrera, en la frase que ve la usuaria. */
+export function textoDeProgreso(evento: revisor.EventoRevision, conocidas: number): string {
+  if (evento.fase === "corrigiendo") {
+    const ronda = evento.rondas > 1 ? ` · ronda ${evento.ronda} de ${evento.rondas}` : "";
+    return `Corrigiendo ${plural(evento.fallos, "afirmación sin respaldo", "afirmaciones sin respaldo")}${ronda}`;
+  }
+  if (evento.total === 0) return textoDeProgresoRevisando(conocidas);
+  return `Comprobando ${plural(evento.total, "afirmación", "afirmaciones")} · ${evento.hechas} de ${evento.total} listas`;
+}
+
+/** Lo que el redactor tiene que saber del alcance pedido. Vacío si no se pidió. */
+export function notaDeAlcance(pista: string, resultado: alcance.Alcance, encontrado: boolean): string {
+  if (!pista || resultado.tipo === "sin_pista") return "";
+  if (resultado.tipo === "elegido") {
+    if (encontrado) {
+      return (
+        `ALCANCE: quien pregunta pidió responder únicamente con el documento «${resultado.nombre}» ` +
+        `(se refirió a él como "${pista}"). Toda la evidencia que has recibido es de ese documento y las ` +
+        "búsquedas que hagas también se limitarán a él. No menciones ni supongas otros documentos."
+      );
+    }
+    return (
+      `AVISO DE ALCANCE: quien pregunta pidió responder únicamente con el documento «${resultado.nombre}» ` +
+      `(se refirió a él como "${pista}"), pero en ese documento no se encontró NADA sobre esto, así que la ` +
+      "búsqueda se hizo en todos sus documentos. Empieza la respuesta diciendo que ese documento no lo trata " +
+      "y que lo que sigue sale de otros documentos, nombrándolos. No le atribuyas a ese documento ningún dato."
+    );
+  }
+  if (resultado.tipo === "ambiguo") {
+    return (
+      `AVISO DE ALCANCE: quien pregunta pidió limitarse a "${pista}", pero eso no identifica un documento: hay ` +
+      `${resultado.candidatos} que encajan, así que se buscó en todos. Di al principio de qué documento sale ` +
+      "cada dato y no mezcles dos documentos en una misma afirmación. Si quiere uno concreto, tendrá que nombrarlo."
+    );
+  }
+  return (
+    `AVISO DE ALCANCE: quien pregunta pidió limitarse a "${pista}", pero ningún documento indexado se llama así, ` +
+    "así que se buscó en todos. Dilo al principio de la respuesta y nombra de qué documento sale cada dato."
+  );
+}
+

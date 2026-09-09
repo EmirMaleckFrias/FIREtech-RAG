@@ -308,8 +308,10 @@ Nombres de las exportaciones que consume el frontend:
 ### Estado del turno del asistente
 El agente actualiza el mensaje del asistente por `estado`:
 `pensando` → `buscando` → `redactando` → `revisando` → `listo` | `error`,
-y va escribiendo `plan`, `hops`, `sources`, `content`, `verificacion` y
-`metrics` en la misma fila. **El borrador NO se publica hasta que la barrera
+y va escribiendo `plan`, `hops`, `sources`, `content`, `verificacion`,
+`metrics`, `progreso` (frase de avance dentro de la fase: "Comprobando 31
+afirmaciones · 12 de 31 listas") y `alcance` (si la pregunta pidió limitarse a
+un documento: `{pista, documento, candidatos?, encontrado}`) en la misma fila. **El borrador NO se publica hasta que la barrera
 lo aprueba**: `content` se queda vacío mientras `estado` no sea `listo`.
 
 Formas que viajan al frontend, **idénticas a las de hoy** para no romper la

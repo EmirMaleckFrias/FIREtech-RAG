@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as agente_alcance from "../agente/alcance.js";
 import type * as agente_bucle from "../agente/bucle.js";
 import type * as agente_cacheCalificaciones from "../agente/cacheCalificaciones.js";
 import type * as agente_cachePlan from "../agente/cachePlan.js";
@@ -85,6 +86,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  "agente/alcance": typeof agente_alcance;
   "agente/bucle": typeof agente_bucle;
   "agente/cacheCalificaciones": typeof agente_cacheCalificaciones;
   "agente/cachePlan": typeof agente_cachePlan;
