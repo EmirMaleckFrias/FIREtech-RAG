@@ -10,6 +10,7 @@ import { observarSistema } from './lib/theme';
 import { iniciarPreferencias } from './lib/preferencias';
 import './styles.css';
 import './settings.css';
+import './responsive.css';
 
 // El tema ya lo aplico el script inline de index.html (antes de pintar).
 // Esto solo engancha los cambios de tema del SISTEMA, para que la opcion

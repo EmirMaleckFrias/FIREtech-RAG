@@ -1,0 +1,110 @@
+/* Adaptación compartida: el ancho útil puede ser menor que el viewport
+   cuando conversaciones y fuentes ocupan columnas en escritorio. */
+.header-right { flex-shrink: 0; }
+.message-list, .msg-body, .biblio-centro, .ficha { min-width: 0; }
+.msg-body, .msg-user-bubble, .tl-vineta, .user-confirm-text {
+  overflow-wrap: anywhere;
+}
+.biblio-rejilla {
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
+}
+.docs-header, .settings-header, .sources-header { flex-shrink: 0; }
+.docs-body > * { flex-shrink: 0; }
+.docs-body, .settings-scroll, .users-list, .biblio-cuerpo {
+  overscroll-behavior-y: contain;
+}
+.notion-card-header { flex-wrap: wrap; }
+.notion-card-heading { flex-basis: 120px; }
+.notion-connection-badge { max-width: 100%; white-space: normal; }
+.notion-card-body { overflow-wrap: anywhere; }
+.biblio-cabecera {
+  padding-top: calc(15px + env(safe-area-inset-top));
+  padding-left: calc(20px + env(safe-area-inset-left));
+  padding-right: calc(20px + env(safe-area-inset-right));
+}
+.biblio-cuerpo {
+  padding-bottom: calc(40px + env(safe-area-inset-bottom));
+  padding-left: calc(6px + env(safe-area-inset-left));
+  padding-right: calc(6px + env(safe-area-inset-right));
+}
+.modo-menu {
+  max-height: min(360px, 55dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.resumen-pasos { flex-wrap: wrap; }
+.tl-cabecera { flex-wrap: wrap; }
+.tl-titulo { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 820px) {
+  /* Evitar el zoom al enfocar también en biblioteca y formularios nuevos. */
+  input:not([type='checkbox']):not([type='radio']), select, textarea {
+    font-size: 16px;
+  }
+  .welcome-logos { max-width: 100%; flex-wrap: wrap; }
+  .modo-menu {
+    min-width: 0;
+    width: min(320px, calc(100vw - 64px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  }
+}
+
+@media (max-width: 600px) {
+  /* Una altura definida deja al cuerpo desplazable el espacio restante,
+     incluso con las tres integraciones abiertas. */
+  .docs-panel {
+    height: 85vh;
+    height: 85dvh;
+  }
+  .docs-inner, .settings-inner, .sources-inner.fuentes-inner {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+  .settings-redesign .settings-tabs .auth-tab {
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    min-height: 48px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .biblio-buscador { flex: 1 1 100%; }
+  .biblio-orden { margin-left: 0; max-width: 100%; }
+  .biblio-orden select { min-width: 0; max-width: 100%; }
+  .tl-herramienta .tl-fila { flex-wrap: wrap; }
+  .tl-consulta { max-width: 100%; flex: 1 1 110px; }
+  .tl-meta { white-space: normal; overflow-wrap: anywhere; }
+  .notion-steps { grid-template-columns: 1fr; }
+  .notion-steps > div {
+    display: grid;
+    grid-template-columns: 23px minmax(0, 1fr);
+    column-gap: 8px;
+  }
+  .notion-steps > div > span { grid-row: span 2; }
+  .notion-steps small { grid-column: 2; }
+}
+
+/* Horizontal y ventanas bajas: los paneles aprovechan toda la altura. */
+@media (max-height: 500px) and (max-width: 1100px) {
+  .docs-panel, .settings-panel.settings-redesign, .sources-panel.fuentes-panel {
+    top: 0;
+    height: 100vh;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+  .sheet-grabber { display: none; }
+  .welcome-intro { padding-block: 8px; }
+  .welcome-logos { margin-bottom: 8px; }
+}
+
+@media (pointer: coarse) {
+  /* Áreas reales: los controles contiguos no comparten zonas de pulsación. */
+  .icon-btn, .doc-action-btn, .doc-confirm-btn, .user-act-btn,
+  .biblio-chip, .modo-boton, .modo-item, .settings-text-button,
+  .fuentes-header-actions button, .fuentes-actions button {
+    min-height: 44px;
+  }
+  .icon-btn, .doc-action-btn, .fuentes-header-actions button { min-width: 44px; }
+  .notion-bases-lista label { min-height: 44px; }
+  .user-actions, .ficha-acciones { flex-wrap: wrap; gap: 8px; }
+}

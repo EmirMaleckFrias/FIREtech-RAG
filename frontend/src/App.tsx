@@ -312,6 +312,21 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
     () => typeof window === 'undefined' || window.matchMedia('(min-width: 1101px)').matches,
   );
 
+  // Al pasar a modo overlay, cerrar los paneles que antes ocupaban columnas.
+  // Volver a escritorio conserva la elección de la usuaria.
+  useEffect(() => {
+    const sidebar = window.matchMedia('(min-width: 821px)');
+    const sources = window.matchMedia('(min-width: 1101px)');
+    const closeSidebar = () => { if (!sidebar.matches) setSidebarOpen(false); };
+    const closeSources = () => { if (!sources.matches) setSourcesOpen(false); };
+    sidebar.addEventListener('change', closeSidebar);
+    sources.addEventListener('change', closeSources);
+    return () => {
+      sidebar.removeEventListener('change', closeSidebar);
+      sources.removeEventListener('change', closeSources);
+    };
+  }, []);
+
   // Vuelta de la pantalla de Notion: el servidor devuelve a la usuaria a
   // `/?notion=conectado|cancelado|error`. Se lee UNA vez al montar (si hacía
   // falta entrar, la pantalla de acceso conservó la URL y se lee al montar
