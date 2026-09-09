@@ -260,7 +260,7 @@ describe("SYSTEM_PROMPT y herramientas", () => {
     // Dice la verdad sobre los idiomas: ya no afirma que todo se buscó en inglés.
     expect(SYSTEM_PROMPT).toContain("Cada resultado de arriba dice en qué idiomas se buscó");
     expect(SYSTEM_PROMPT).not.toMatch(/ya se buscaron también en inglés/);
-    expect(VERSION_PROMPT).toBe("v5");
+    expect(VERSION_PROMPT).toBe("v6");
   });
 
   test("la fórmula de ausencia del prompt y la abstención segura las reconoce el verificador como abstención", () => {

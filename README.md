@@ -281,7 +281,7 @@ otro texto vale falso; vacío deja el default.
 | `RERANK_TOP_K` | `12` | Se lee, pero hoy ningún módulo la consulta (los fragmentos por punto los fija el modo: 8 y 12). |
 | `SEARCH_TOP_K` | `60` | Candidatos por consulta en cada lado de la búsqueda híbrida. |
 | `ENVIRONMENT` | `production` | Etiqueta del entorno. Se lee, pero hoy ningún módulo la consulta. |
-| `PROMPT_VERSION` | `v5` | Se muestra en Ajustes > Sistema. La telemetría del mensaje lleva la constante `VERSION_PROMPT` de `agente/prompt.ts`. |
+| `PROMPT_VERSION` | `v6` | Se muestra en Ajustes > Sistema. La telemetría del mensaje lleva la constante `VERSION_PROMPT` de `agente/prompt.ts`. |
 | `DOMINIO_PERMITIDO` | `airobotix.net` | Dominio de correo exigido para darse de alta y para entrar. |
 | `UPLOAD_LIMIT_MB` | `100` | Tope por fichero. La subida por URL firmada no limita el tamaño (el POST tiene 2 minutos); el techo real es la ingesta, que carga el fichero en una acción de Node con 512 MiB y 10 minutos. |
 

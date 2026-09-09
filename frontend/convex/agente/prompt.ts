@@ -19,7 +19,11 @@ import { avisoRetraccion, cita, fuente, localizador, type Fragmento } from "../l
 
 // v5 (septiembre 2026): regla 14 sobre la entidad. Cambiar la versión invalida
 // la caché del plan, que lleva la versión en su clave.
-export const VERSION_PROMPT = "v5";
+// v6 (9 sep 2026): la caché del plan pasa a guardar las partes de una pregunta
+// compuesta y la pista del documento; las entradas de v5 no las tienen y, con
+// la clase en caché, el clasificador no vuelve a correr para rellenarlas.
+// Subir la versión invalida esa caché (la clave la incluye).
+export const VERSION_PROMPT = "v6";
 
 export const NOMBRE_BUSCAR = "buscar_documentos";
 export const NOMBRE_INVENTARIO = "listar_documentos";

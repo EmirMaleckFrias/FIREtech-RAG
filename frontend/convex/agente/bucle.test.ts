@@ -446,7 +446,7 @@ describe("camino no documental", () => {
     const metrics = metricasDe(m);
     expect(metrics.meta.clase).toBe("sobre_el_asistente");
     expect(metrics.meta.modo).toBe("normal");
-    expect(metrics.meta.prompt_version).toBe("v5");
+    expect(metrics.meta.prompt_version).toBe("v6");
     expect(metrics.por_componente.agente.rondas).toBe(1);
 
     // Nada del pipeline documental se tocó.
@@ -1455,8 +1455,8 @@ describe("inglés del ancla, reformulaciones y telemetría", () => {
     await t.run(async (ctx) => {
       const { claveDe } = await import("./cachePlan");
       await ctx.db.insert("planes", {
-        clave: claveDe(PREGUNTA, "openai/gpt-5.4", "v5"),
-        pregunta: PREGUNTA, modelo: "openai/gpt-5.4", version: "v5", clase: "documental",
+        clave: claveDe(PREGUNTA, "openai/gpt-5.4", "v6"),
+        pregunta: PREGUNTA, modelo: "openai/gpt-5.4", version: "v6", clase: "documental",
         items: [], preguntaEn: EN, creadoEn: Date.now(), usos: 1,
       });
     });
