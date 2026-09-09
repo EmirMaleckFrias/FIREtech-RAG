@@ -147,7 +147,7 @@ describe("fuentesPayload", () => {
       title: "Un paper",
       citation: "Allegri et al., 2023",
       doi: "10.1000/x",
-      locator: "pág. 12",
+      locator: "pág. 12-13",
       fuente: "Allegri et al., 2023",
       plan_items: ["e0", "e2"],
       grado: "directa",

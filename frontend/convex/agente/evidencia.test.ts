@@ -863,8 +863,8 @@ describe("variantes y candidatos", () => {
     expect(p.fragmentos).toEqual([]);
     expect(p.candidatos).toHaveLength(evidencia.MAX_CANDIDATOS_TELEMETRIA);
     expect(p.candidatos?.some((c) => c.p === 99)).toBe(false);
-    expect(p.candidatos?.[0]).toEqual({ f: "a.pdf", p: 1, sp: [1, 2], loc: "pág. 1" });
-    expect(p.candidatos?.[1]).toEqual({ f: "a.pdf", p: 2, sp: [2, 3], sec: "Results", loc: "pág. 2" });
+    expect(p.candidatos?.[0]).toEqual({ f: "a.pdf", p: 1, sp: [1, 2], loc: "pág. 1-2" });
+    expect(p.candidatos?.[1]).toEqual({ f: "a.pdf", p: 2, sp: [2, 3], sec: "Results", loc: "pág. 2-3" });
     // Un punto en error no tiene candidatos, pero el campo existe.
     busqueda.lanzar = new Error("caída");
     const roto = await punto(item("e1", "q", "d"), modo(4));

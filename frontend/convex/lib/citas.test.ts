@@ -1,6 +1,6 @@
 // Prueba de humo del arnés: lógica pura, sin despliegue ni red.
 import { describe, expect, test } from "vitest";
-import { cita, claveCita, localizador, pareceAbstencion } from "./citas";
+import { cita, claveCita, localizador, nuevaRegexCitas, pareceAbstencion } from "./citas";
 
 const base = { _id: "x", text: "t", sourceFile: "paper.pdf", page: 4, chunkType: "text" };
 
@@ -39,5 +39,26 @@ describe("citas", () => {
     // respuesta sin respaldo, que es el peor caso del sistema.
     expect(pareceAbstencion("El AUC fue de 0,94 en la cohorte.")).toBe(false);
     expect(pareceAbstencion("No se pudo encontrar rápidamente")).toBe(false);
+  });
+});
+
+
+describe("fragmento que cruza de página", () => {
+  test("se cita con el rango; con una sola página o sin páginas de origen no cambia nada", () => {
+    expect(localizador({ ...base, documentType: "pdf", sourcePages: [4, 5] })).toBe("pág. 4-5");
+    // Desordenadas o repetidas: el rango va de la menor a la mayor.
+    expect(localizador({ ...base, documentType: "pdf", sourcePages: [5, 4, 5] })).toBe("pág. 4-5");
+    expect(localizador({ ...base, documentType: "pdf", sourcePages: [4] })).toBe("pág. 4");
+    expect(localizador({ ...base, documentType: "pdf", sourcePages: [] })).toBe("pág. 4");
+    expect(localizador({ ...base, documentType: "pdf" })).toBe("pág. 4");
+    expect(cita({ ...base, documentType: "pdf", sourcePages: [4, 5] })).toBe("[paper.pdf, pág. 4-5]");
+  });
+
+  test("ADVERSARIAL: el rango casa con el patrón de citas y resuelve con la misma clave que la cita del fragmento", () => {
+    const conRango = cita({ ...base, documentType: "pdf", sourcePages: [4, 5] });
+    expect(nuevaRegexCitas().test(conRango)).toBe(true);
+    expect(claveCita("[paper.pdf, pág. 4-5]")).toBe(claveCita(conRango));
+    // Y no se confunde con la cita de la página sola.
+    expect(claveCita(conRango)).not.toBe(claveCita(cita({ ...base, documentType: "pdf" })));
   });
 });

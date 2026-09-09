@@ -80,8 +80,21 @@ export function localizador(ch: {
   page: number;
   chunkType: string;
   section?: string | null;
+  sourcePages?: number[] | null;
 }): string {
-  if (ch.documentType === "pdf" && ch.page) return `pág. ${ch.page}`;
+  if (ch.documentType === "pdf" && ch.page) {
+    // Un fragmento de PDF nunca cruza de página, salvo cuando el propio
+    // párrafo lo hace (una frase cortada por el salto de página): ese lleva
+    // las dos páginas en `sourcePages`. Citarlo solo por la primera dejaba la
+    // cita una página por detrás cuando el dato caía en la segunda, que es el
+    // residuo del desfase que una revisión externa detectó el 8 sep 2026.
+    // Con el rango, quien abre el PDF encuentra el dato en una de las dos.
+    const paginas = [...new Set([ch.page, ...(ch.sourcePages ?? [])])]
+      .filter((n) => Number.isInteger(n) && n > 0)
+      .sort((a, b) => a - b);
+    if (paginas.length >= 2) return `pág. ${paginas[0]}-${paginas[paginas.length - 1]}`;
+    return `pág. ${ch.page}`;
+  }
   if (ch.chunkType === "table") {
     // En una hoja de cálculo cada fragmento ES una fila; en Word es una tabla
     // entera, y llamarla fila engañaría a quien la busque.
@@ -100,6 +113,7 @@ export function cita(ch: {
   page: number;
   chunkType: string;
   section?: string | null;
+  sourcePages?: number[] | null;
 }): string {
   return `[${fuente(ch)}, ${localizador(ch)}]`;
 }

@@ -43,6 +43,41 @@ export const ABSTENCION_SEGURA =
   "No encuentro respaldo suficiente en los documentos para responder con la " +
   "fidelidad requerida.";
 
+/** Abstención cuando la barrera NO llegó a comprobar el borrador: venció el
+ *  reloj antes de la primera verificación completa. Es un texto DISTINTO a
+ *  propósito: `ABSTENCION_SEGURA` dice que los documentos no respaldan la
+ *  respuesta, y aquí no se sabe. Medido el 9 sep 2026 con una pregunta que
+ *  exigía un inventario de 150 afirmaciones: el redactor gastó 383 s, la
+ *  auditoría no cupo en lo que quedaba, y la usuaria leyó "no encuentro
+ *  respaldo en los documentos" cuando el documento sí respaldaba casi todo.
+ *  Es la misma confusión que el proyecto prohíbe en la recuperación (una
+ *  búsqueda en error no es una ausencia), en el texto que más se lee. Casa
+ *  con los patrones de abstención por "no pude comprobar". */
+export const ABSTENCION_POR_TIEMPO =
+  "No pude comprobar la respuesta en el tiempo disponible: la evidencia se recuperó, " +
+  "pero la comprobación de cada afirmación no terminó a tiempo. Vuelve a preguntar " +
+  "acotando la pregunta o dividiéndola en partes.";
+
+/** Abstención cuando el verificador no pudo dictaminar nada (caído, o sin
+ *  ninguna señal): tampoco se sabe si los documentos respaldan o no. */
+export const ABSTENCION_SIN_DICTAMEN =
+  "No pude comprobar la respuesta: la evidencia se recuperó, pero la comprobación " +
+  "de las afirmaciones no estuvo disponible. Vuelve a intentarlo en unos minutos.";
+
+/** El texto de abstención que corresponde a cada motivo. Solo se dice que
+ *  los documentos no respaldan cuando de verdad se comprobó el borrador y no
+ *  se sostuvo (rechazado tras corregir, vacío, o un error DESPUÉS de un
+ *  informe con fallos bloqueantes); si no llegó a comprobarse, lo honesto es
+ *  decir eso. */
+export function textoDeAbstencion(motivo: string | null, ultimoInforme: Verificacion | null): string {
+  if (motivo === "timeout") return ABSTENCION_POR_TIEMPO;
+  if (motivo === "sin_senal") return ABSTENCION_SIN_DICTAMEN;
+  if (motivo === "error") {
+    return ultimoInforme && bloqueantes(ultimoInforme).length ? ABSTENCION_SEGURA : ABSTENCION_SIN_DICTAMEN;
+  }
+  return ABSTENCION_SEGURA;
+}
+
 export interface OpcionesRevision {
   /** Veredictos ya emitidos sobre frases del borrador (misma clave que
    *  `verificador.claveDeAfirmacion`), obtenidos por el bucle verificando el
@@ -59,6 +94,9 @@ export interface OpcionesRevision {
   /** Comprobación de ausencias contra el índice, inyectada por el bucle (ver
    *  verificador.OpcionesVerificacion.dondeAparecen). */
   dondeAparecen?: (expresiones: string[]) => Promise<Hallazgo[]>;
+  /** Claves ya contadas en la telemetría del turno (ver
+   *  verificador.OpcionesVerificacion.contabilizadas). */
+  contabilizadas?: Set<string>;
 }
 
 /** Lo que la barrera va haciendo. `verificando` llega desde el verificador
@@ -83,6 +121,12 @@ export interface ResultadoRevision {
    *  primera sesión de estrés sobre Convex: tres preguntas sobre papers
    *  acabaron en abstención y no había forma de saber por qué. */
   informeBorrador: Verificacion | null;
+  /** Tamaño del borrador cuando se abstuvo sin ningún informe (el reloj venció
+   *  antes de la primera verificación): cuántos caracteres, cuántas
+   *  afirmaciones auditables y cuántas declaraciones de ausencia tenía. Sin
+   *  esto, una abstención por tiempo no dejaba ni un número con el que saber
+   *  qué había escrito el redactor. Lo calcula el troceador, sin juez. */
+  tamanoBorrador?: { caracteres: number; afirmaciones: number; ausencias: number } | null;
   /** Frases que la eliminación determinista quitó del texto publicado por no
    *  poder sostenerse con la evidencia (vacío si no hizo falta o se abstuvo). */
   frasesEliminadas: string[];
@@ -516,7 +560,18 @@ function limpiarLineas(texto: string): string {
     }
     salida.push(conCitasRecolocadas[i]);
   }
-  return salida.join("\n").replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").trim();
+  // Una línea en blanco entre dos viñetas es el hueco que deja una viñeta
+  // borrada (la costura conserva su salto de línea): en Markdown parte la
+  // lista en dos. Se quita. Medido el 9 sep 2026 en una respuesta publicada
+  // por tope a la que el recorte quitó cuatro líneas de "Lo que no está".
+  const esVineta = (l: string) => /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(l);
+  const compacta: string[] = [];
+  for (let i = 0; i < salida.length; i++) {
+    const enBlanco = !salida[i].trim();
+    if (enBlanco && i > 0 && i + 1 < salida.length && esVineta(salida[i - 1]) && esVineta(salida[i + 1])) continue;
+    compacta.push(salida[i]);
+  }
+  return compacta.join("\n").replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export interface Recorte {
@@ -774,6 +829,7 @@ export async function revisarAntesDePublicar(
       pregunta,
       alAvanzar: (hechas, total) => opciones.alAvanzar?.({ fase: "verificando", hechas, total }),
       dondeAparecen: opciones.dondeAparecen,
+      contabilizadas: opciones.contabilizadas,
     });
     for (const [k, af] of verificador.veredictosDe(informe)) conocidos.set(k, af);
     return informe;
@@ -874,16 +930,18 @@ export async function revisarAntesDePublicar(
     console.warn(`Revisión previa no disponible; abstención segura (${motivo}: ${String(exc)}).`);
   }
 
-  const informeSeguro = await verificador.verificar(
-    ABSTENCION_SEGURA, fragmentos, planParaAbstencion, mapaPlan, t,
-  );
+  const motivoFinal = motivo ?? "rechazada_tras_correccion";
+  const texto = textoDeAbstencion(motivoFinal, ultimoInforme);
+  const informeSeguro = await verificador.verificar(texto, fragmentos, planParaAbstencion, mapaPlan, t);
+  const { trozos, ausencias } = verificador._trocear(borrador);
   return {
-    contenido: ABSTENCION_SEGURA,
+    contenido: texto,
     informe: informeSeguro,
     revisiones: maxRevisiones,
     usoAbstencionSegura: true,
-    motivoAbstencion: motivo ?? "rechazada_tras_correccion",
+    motivoAbstencion: motivoFinal,
     informeBorrador: ultimoInforme,
+    tamanoBorrador: { caracteres: borrador.length, afirmaciones: trozos.length, ausencias: ausencias.length },
     frasesEliminadas: [],
     publicadaTrasTope: false,
   };

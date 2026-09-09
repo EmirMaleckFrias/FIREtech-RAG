@@ -1086,6 +1086,27 @@ export interface OpcionesVerificacion {
    *  tiene acceso al índice; sin él las ausencias no se comprueban, que es el
    *  comportamiento anterior. Ver agente/ausencias.ts. */
   dondeAparecen?: (expresiones: string[]) => Promise<Hallazgo[]>;
+  /** Claves "contador|texto" ya contadas en la telemetría de este turno. Los
+   *  veredictos deterministas (identificador sin respaldo, ausencia refutada)
+   *  se vuelven a emitir en cada ronda porque no se reutilizan como los del
+   *  juez, y sin esto la misma frase se contaba en la verificación anticipada,
+   *  en la barrera y en cada corrección (medido: 2 ausencias refutadas cuando
+   *  era una). El bucle pasa un conjunto por turno. */
+  contabilizadas?: Set<string>;
+}
+
+/** Suma al contador solo lo que no se haya contado ya en este turno. */
+function contarUnaVez(t: Telemetria, opciones: OpcionesVerificacion, contador: string, textos: string[]): void {
+  let nuevos = 0;
+  for (const texto of textos) {
+    const clave = `${contador}|${texto}`;
+    if (opciones.contabilizadas) {
+      if (opciones.contabilizadas.has(clave)) continue;
+      opciones.contabilizadas.add(clave);
+    }
+    nuevos += 1;
+  }
+  if (nuevos) t.incr(contador, nuevos);
 }
 
 /** Las declaraciones de ausencia que el índice desmiente, como afirmaciones
@@ -1130,7 +1151,7 @@ async function refutarAusencias(
       }),
     );
   }
-  if (salida.length) t.incr("ausencias_refutadas", salida.length);
+  contarUnaVez(t, opciones, "ausencias_refutadas", salida.map((a) => a.texto));
   return salida;
 }
 
@@ -1291,7 +1312,7 @@ export async function verificar(
     // sin gastar juez.
     const idsSinRespaldo = identificadoresSinRespaldo(texto, hermanos.map((c) => c.text));
     if (idsSinRespaldo.length) {
-      t.incr("identificadores_sin_respaldo", idsSinRespaldo.length);
+      contarUnaVez(t, opciones, "identificadores_sin_respaldo", idsSinRespaldo.map((id) => `${texto}|${id}`));
       afirmaciones.push({
         ...af,
         veredicto: NO_SOSTENIDA,

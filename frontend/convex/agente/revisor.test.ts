@@ -207,7 +207,7 @@ describe("revisarAntesDePublicar", () => {
       [ch],
     );
 
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_SIN_DICTAMEN);
     expect(resultado.usoAbstencionSegura).toBe(true);
     expect(revisor.aprobada(resultado.informe)).toBe(true);
     expect(juez).toHaveBeenCalledTimes(1);
@@ -324,7 +324,7 @@ describe("revisarAntesDePublicar", () => {
 
     const resultado = await revisor.revisarAntesDePublicar("q", `El AUC fue 0.94 ${cita(ch)}.`, [], [ch]);
 
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_SIN_DICTAMEN);
     expect(redactor).not.toHaveBeenCalled();
     expect(revisor.aprobada(resultado.informe)).toBe(true);
     expect(resultado.informe.afirmaciones).toEqual([]);
@@ -586,7 +586,7 @@ describe("cobertura en el camino completo", () => {
       { c1: ["e1"] },
     );
 
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_SIN_DICTAMEN);
     expect(resultado.usoAbstencionSegura).toBe(true);
     expect(resultado.informe.cobertura.map((c) => [c.id, c.estado])).toEqual([
       ["e1", "evidencia_no_usada"],
@@ -645,7 +645,12 @@ describe("tope de tiempo", () => {
     await vi.advanceTimersByTimeAsync(200);
 
     const resultado = await pendiente;
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_POR_TIEMPO);
+    expect(resultado.motivoAbstencion).toBe("timeout");
+    // Sin informe (el reloj venció durante la primera verificación) queda al
+    // menos el tamaño del borrador para el diagnóstico.
+    expect(resultado.informeBorrador).toBeNull();
+    expect(resultado.tamanoBorrador).toEqual({ caracteres: `El AUC fue 0.94 ${cita(ch)}.`.length, afirmaciones: 1, ausencias: 0 });
     expect(resultado.usoAbstencionSegura).toBe(true);
     expect(resultado.informe.cobertura.map((c) => [c.id, c.estado])).toEqual([
       ["e1", "evidencia_no_usada"],
@@ -665,7 +670,7 @@ describe("tope de tiempo", () => {
     await vi.advanceTimersByTimeAsync(3000);
 
     const resultado = await pendiente;
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_POR_TIEMPO);
   });
 
   test("el trabajo que pierde la carrera no altera el resultado ni deja un rechazo sin manejar", async () => {
@@ -682,7 +687,7 @@ describe("tope de tiempo", () => {
     // El juez colgado acaba fallando después: no puede tumbar el proceso.
     rechazarJuez(new Error("tarde y mal"));
     await vi.advanceTimersByTimeAsync(10);
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_POR_TIEMPO);
   });
 
   test("un tiempo disponible agotado o negativo aún concede el segundo mínimo", async () => {
@@ -903,7 +908,7 @@ describe("publicación quirúrgica", () => {
     await vi.advanceTimersByTimeAsync(1000);
     const resultado = await pendiente;
     // `sinSenal` corta antes con su propio motivo: no hay con qué publicar.
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_SIN_DICTAMEN);
     expect(resultado.publicadaTrasTope).toBe(false);
   });
 
@@ -913,7 +918,7 @@ describe("publicación quirúrgica", () => {
     const pendiente = revisor.revisarAntesDePublicar("q", `${buenas[0]} ${mala}`, [], [ch], null, null, 1);
     await vi.advanceTimersByTimeAsync(1000);
     const resultado = await pendiente;
-    expect(resultado.contenido).toBe(revisor.ABSTENCION_SEGURA);
+    expect(resultado.contenido).toBe(revisor.ABSTENCION_POR_TIEMPO);
     expect(resultado.motivoAbstencion).toBe("timeout");
     expect(resultado.publicadaTrasTope).toBe(false);
   });
@@ -1184,5 +1189,37 @@ describe("ausencia refutada en la barrera", () => {
     };
     expect(revisor.bloqueantes(informe)).toHaveLength(1);
     expect(revisor.aprobada(informe)).toBe(false);
+  });
+});
+
+
+describe("recorte: listas sin huecos", () => {
+  test("quitar una viñeta del medio no deja una línea en blanco que parta la lista", () => {
+    const ch = frag();
+    const contenido =
+      `Intro con dato ${cita(ch)}.\n\n## Lo que no está\n\n` +
+      "- No encuentro el orden de entrada en los documentos.\n" +
+      "- El AUC del otro estudio fue 0.99.\n" +
+      "- No encuentro qué contactor conmuta en los documentos.\n" +
+      "- No encuentro qué barras alimenta el generador en los documentos.\n";
+    const informe: Verificacion = {
+      afirmaciones: [
+        { texto: "El AUC del otro estudio fue 0.99", cita: "", veredicto: verificador.SIN_CITA, motivo: "sin cita", fragmento_id: "", fragmentos: [] },
+      ],
+      evidencia_sin_cubrir: [], cobertura: [], citas_sin_resolver: [], fidelidad: null, ok: false, nota: "",
+    };
+    const recorte = revisor._recortar(contenido, informe);
+    expect(recorte).not.toBeNull();
+    expect(recorte!.eliminadas).toEqual(["El AUC del otro estudio fue 0.99"]);
+    const lineas = recorte!.texto.split("\n");
+    const vinetas = lineas.filter((l) => l.startsWith("- "));
+    expect(vinetas).toHaveLength(3);
+    // Ninguna línea en blanco entre dos viñetas.
+    for (let i = 1; i + 1 < lineas.length; i++) {
+      if (!lineas[i].trim()) expect(lineas[i - 1].startsWith("- ") && lineas[i + 1].startsWith("- ")).toBe(false);
+    }
+    // El encabezado y la introducción siguen ahí.
+    expect(recorte!.texto).toContain("## Lo que no está");
+    expect(recorte!.texto).toContain(`Intro con dato ${cita(ch)}.`);
   });
 });

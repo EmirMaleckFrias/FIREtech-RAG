@@ -584,6 +584,9 @@ export const correr = internalAction({
         plan.map((p) => [p.id, p.evidenceNeeded]),
       );
       const conocidos = new Map<string, verificador.Afirmacion>();
+      // Lo ya contado en la telemetría por los veredictos deterministas, que se
+      // reemiten en cada ronda (ver verificador.OpcionesVerificacion.contabilizadas).
+      const contabilizadas = new Set<string>();
       // El avance dentro de una fase, en una frase para la usuaria. Solo se
       // escribe cuando cambia: cada escritura es una mutación.
       let ultimoProgreso = "";
@@ -607,6 +610,7 @@ export const correr = internalAction({
               veredictosPrevios: conocidos,
               pregunta: consulta,
               dondeAparecen,
+              contabilizadas,
             })
             .then((inf) => {
               for (const [k, af] of verificador.veredictosDe(inf)) conocidos.set(k, af);
@@ -966,6 +970,7 @@ export const correr = internalAction({
             veredictosIniciales: conocidos,
             alAvanzar: (evento) => void escribirProgreso(textoDeProgreso(evento, conocidos.size)),
             dondeAparecen,
+            contabilizadas,
           },
         );
         contenido = r.contenido;
@@ -994,6 +999,8 @@ export const correr = internalAction({
           tel.fija({
             barrera: {
               motivo: r.motivoAbstencion,
+              // Qué tamaño tenía el borrador aunque no llegara a verificarse.
+              borrador: r.tamanoBorrador ?? null,
               informe_borrador: r.informeBorrador
                 ? {
                     afirmaciones: r.informeBorrador.afirmaciones.map((af) => ({
@@ -1016,6 +1023,7 @@ export const correr = internalAction({
             pregunta: consulta,
             veredictosPrevios: conocidos,
             dondeAparecen,
+            contabilizadas,
           });
         } catch (exc) {
           console.error("La verificación falló; la respuesta se publica sin anotar", exc);

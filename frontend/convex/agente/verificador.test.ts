@@ -1573,3 +1573,28 @@ describe("ausencias refutadas", () => {
     expect(informe.ok).toBe(true);
   });
 });
+
+
+describe("citas con rango de páginas y contadores por turno", () => {
+  test("una cita 'pág. 4-5' resuelve contra el fragmento que cruza esas páginas", async () => {
+    const ch = { ...frag("c1", "La conversión fue del 31.6%.", "e.pdf", 4), documentType: "pdf", sourcePages: [4, 5] };
+    expect(cita(ch)).toBe("[e.pdf, pág. 4-5]");
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "coincide" }] }));
+    const informe = await verificar(`La conversión fue del 31.6% ${cita(ch)}.`, [ch]);
+    expect(veredictos(informe)).toEqual([SOSTENIDA]);
+    expect(informe.citas_sin_resolver).toEqual([]);
+  });
+
+  test("ADVERSARIAL: un identificador sin respaldo se cuenta una vez por turno aunque se verifique tres veces", async () => {
+    const ch = frag("c1", "El ensayo NCT01234567 incluyó 400 pacientes.", "e.pdf", 3);
+    const texto = `El ensayo NCT09999999 incluyó 400 pacientes ${cita(ch)}.`;
+    const tel = new Telemetria();
+    const contabilizadas = new Set<string>();
+    for (let i = 0; i < 3; i++) await verificar(texto, [ch], null, null, tel, { contabilizadas });
+    expect((tel.resumen() as { counters: Record<string, number> }).counters.identificadores_sin_respaldo).toBe(1);
+    // Sin el conjunto compartido, el comportamiento anterior: una vez por ronda.
+    const tel2 = new Telemetria();
+    for (let i = 0; i < 3; i++) await verificar(texto, [ch], null, null, tel2);
+    expect((tel2.resumen() as { counters: Record<string, number> }).counters.identificadores_sin_respaldo).toBe(3);
+  });
+});

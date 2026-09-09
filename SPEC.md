@@ -507,7 +507,11 @@ mencionar el plan, los ids de los puntos, las herramientas o los resultados de b
   2026" era un pie de página).
 - **localizador**, según lo que exista de verdad en el formato: `pág. N` (PDF con página),
   `tabla N` (tabla de Word), `fila N` (fila de hoja de cálculo o CSV), `sección: X` (si hay
-  encabezado), `fragmento N` (último recurso).
+  encabezado), `fragmento N` (último recurso). Un fragmento de PDF que cruza de página (solo
+  pasa cuando el propio párrafo lo hace) se cita con el rango, `pág. 12-13`: citarlo por la
+  primera dejaba la cita una página por detrás cuando el dato caía en la segunda, el residuo
+  del desfase detectado el 8 sep 2026. El patrón de citas ya admite el rango y la interfaz lo
+  expande a páginas concretas.
 
 Patrón que reconoce una cita en una respuesta (idéntico al del backend anterior y al del
 evaluador):
@@ -530,6 +534,17 @@ no (?:aparece|figura|consta)
 no hay (?:evidencia|informaci[oó]n|datos)
 los documentos no (?:indican|mencionan|contienen|permiten)
 ```
+
+Hay tres textos de abstención, y cuál se publica depende del motivo (`revisor.textoDeAbstencion`):
+`ABSTENCION_SEGURA` ("No encuentro respaldo suficiente en los documentos…") solo cuando la
+evidencia no sostuvo el borrador o el borrador venía vacío; `ABSTENCION_POR_TIEMPO` ("No pude
+comprobar la respuesta en el tiempo disponible…") cuando el reloj venció antes de la primera
+verificación completa; `ABSTENCION_SIN_DICTAMEN` cuando el verificador no pudo dictaminar nada.
+Antes era un único texto y la abstención por tiempo culpaba a los documentos: medido el 9 sep
+2026, un inventario de 150 afirmaciones agotó el reloj y la usuaria leyó "no encuentro respaldo"
+sobre un documento que respaldaba casi todo. Los tres casan con los patrones de abajo. Cuando
+la barrera se abstiene sin ningún informe, `tamanoBorrador` (caracteres, afirmaciones y
+ausencias del borrador, contadas por el troceador) va a `metrics.meta.barrera.borrador`.
 
 Estas expresiones son las mismas en el verificador y en el evaluador: si divergieran, medirían
 cosas distintas.

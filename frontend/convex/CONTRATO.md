@@ -260,6 +260,10 @@ fallan todos queda `ok=false` sin veredictos. `evidencia_sin_cubrir` son los
 puntos con estado `evidencia_no_usada`, **nunca** los `sin_resultados`.
 
 ### `convex/agente/revisor.ts`
+
+Tres textos de abstención según el motivo (`textoDeAbstencion`): `ABSTENCION_SEGURA`
+solo cuando la evidencia no sostuvo el borrador; `ABSTENCION_POR_TIEMPO` y
+`ABSTENCION_SIN_DICTAMEN` cuando no se llegó a comprobar. Ver SPEC §9.3.
 ```ts
 export const ABSTENCION_SEGURA: string;
 export interface ResultadoRevision {
