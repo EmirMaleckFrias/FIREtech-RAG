@@ -21,13 +21,15 @@ export function Header({
       <div className="header-left">
         <button
           type="button"
-          className="icon-btn"
+          className="icon-btn header-chats-btn"
           onClick={onToggleSidebar}
           title={sidebarOpen ? 'Ocultar conversaciones' : 'Mostrar conversaciones'}
-          aria-label="Alternar panel de conversaciones"
-          aria-pressed={sidebarOpen}
+          aria-label={sidebarOpen ? 'Ocultar conversaciones' : 'Mostrar conversaciones'}
+          aria-expanded={sidebarOpen}
+          aria-controls="conversation-sidebar"
         >
           <IconPanelLeft />
+          <span className="header-chats-label">Chats</span>
         </button>
         {title !== null && <span className="header-title">{title}</span>}
       </div>

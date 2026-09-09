@@ -385,6 +385,7 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
 
   const selectSession = useCallback(
     (id: Id<'sessions'>) => {
+      if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
       if (id === currentSessionId) return;
       fijarPendiente(null);
       setCurrentSessionId(id);
@@ -395,6 +396,7 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
   );
 
   const newConversation = useCallback(() => {
+    if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
     fijarPendiente(null);
     setCurrentSessionId(null);
     setSelectedMsgId(null);
@@ -672,6 +674,7 @@ function Aplicacion({ onSignOut }: AplicacionProps) {
         onNew={newConversation}
         onOpenDocuments={openDocuments}
         onOpenSettings={openSettings}
+        onClose={() => setSidebarOpen(false)}
       />
       {sidebarOpen && (
         <div

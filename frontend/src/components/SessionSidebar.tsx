@@ -1,7 +1,7 @@
 import { useState, type KeyboardEvent } from 'react';
 import type { Id } from '../../convex/_generated/dataModel';
 import { ROLE_LABEL, type EstadoConexion, type SessionInfo, type UserRole } from '../types';
-import { IconDocument, IconPlus, IconSettings, IconSpinner, IconTrash } from './icons';
+import { IconDocument, IconPlus, IconSettings, IconSpinner, IconTrash, IconX } from './icons';
 
 interface SessionSidebarProps {
   open: boolean;
@@ -25,6 +25,7 @@ interface SessionSidebarProps {
   onNew: () => void;
   onOpenDocuments: () => void;
   onOpenSettings: () => void;
+  onClose: () => void;
 }
 
 // Del estado de la conexión solo se pinta el MALO. "En línea" con su punto
@@ -79,6 +80,7 @@ export function SessionSidebar({
   onNew,
   onOpenDocuments,
   onOpenSettings,
+  onClose,
 }: SessionSidebarProps) {
   // Borrado con confirmación inline en dos pasos, como en el panel de
   // documentos: nunca window.confirm. Una sola confirmación abierta a la vez.
@@ -114,8 +116,14 @@ export function SessionSidebar({
   };
 
   return (
-    <aside className={`sidebar ${open ? '' : 'sidebar-closed'}`}>
+    <aside id="conversation-sidebar" aria-label="Historial de conversaciones" className={`sidebar ${open ? '' : 'sidebar-closed'}`}>
       <div className="sidebar-inner">
+        <div className="sidebar-mobile-heading">
+          <span>Conversaciones</span>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Cerrar conversaciones">
+            <IconX />
+          </button>
+        </div>
         <div className="sidebar-brand">
           <img className="brand-logo brand-logo-ai" src="/ai-robotix.png" alt="AI ROBOTIX" />
           <img className="brand-logo brand-logo-project" src="/alzheimer-project.png" alt="Alzheimer Project" />

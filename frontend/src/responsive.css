@@ -1,6 +1,7 @@
 /* Adaptación compartida: el ancho útil puede ser menor que el viewport
    cuando conversaciones y fuentes ocupan columnas en escritorio. */
 .header-right { flex-shrink: 0; }
+.header-chats-label, .sidebar-mobile-heading { display: none; }
 .message-list, .msg-body, .biblio-centro, .ficha { min-width: 0; }
 .msg-body, .msg-user-bubble, .tl-vineta, .user-confirm-text {
   overflow-wrap: anywhere;
@@ -37,6 +38,27 @@
 .tl-titulo { min-width: 0; overflow-wrap: anywhere; }
 
 @media (max-width: 820px) {
+  .header-chats-btn { width: auto; gap: 7px; padding-inline: 10px; }
+  .header-chats-label { display: inline; font-size: 13px; font-weight: 600; }
+  .sidebar {
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar-inner { flex: 1; min-height: 0; height: auto; }
+  .sidebar-mobile-heading {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2px 8px 10px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .sidebar-mobile-heading .icon-btn { min-width: 44px; min-height: 44px; }
+  .sidebar-brand, .sidebar-bottom, .new-chat-btn { flex-shrink: 0; }
+  .session-list { overscroll-behavior-y: contain; }
   /* Evitar el zoom al enfocar también en biblioteca y formularios nuevos. */
   input:not([type='checkbox']):not([type='radio']), select, textarea {
     font-size: 16px;
@@ -85,6 +107,7 @@
 
 /* Horizontal y ventanas bajas: los paneles aprovechan toda la altura. */
 @media (max-height: 500px) and (max-width: 1100px) {
+  .sidebar-mobile-heading + .sidebar-brand { display: none; }
   .docs-panel, .settings-panel.settings-redesign, .sources-panel.fuentes-panel {
     top: 0;
     height: 100vh;
