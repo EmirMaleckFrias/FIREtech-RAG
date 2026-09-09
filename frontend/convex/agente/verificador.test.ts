@@ -15,6 +15,7 @@ import { Telemetria } from "../lib/telemetry";
 import { cita, type Fragmento } from "../lib/citas";
 import * as revisor from "./revisor";
 import {
+  _esAusenciaPura,
   CITA_NO_RESUELVE,
   NO_SOSTENIDA,
   PARCIAL,
@@ -569,18 +570,16 @@ describe("declaraciones de ausencia", () => {
     expect(informe.ok).toBe(false);
   });
 
-  test("una declaración de ausencia con dígito dentro del tramo se audita contra la cita", async () => {
-    // Consecuencia deliberada de la regla del contrato ("no contienen
-    // dígitos"): "a 90 días" lleva un dígito, así que viaja al juez, que tiene
-    // instrucción de devolver "parcial" si el fragmento no trata el asunto.
+  test("una ausencia que solo nombra cifras del asunto que falta NO se audita (antes sí, por la regla del dígito)", async () => {
+    // Cambio deliberado del 9 sep 2026. Antes cualquier dígito quitaba la
+    // exención ("a 90 días" la perdía) y la frase viajaba al juez; en
+    // producción eso convirtió declaraciones honestas en afirmaciones sin
+    // cita, bloqueantes, que el recorte de la barrera borró. Ahora lo que
+    // quita la exención es una cifra con forma de medida o una segunda
+    // cláusula, no un número que solo nombra lo que falta.
     const ch = frag("c1", "La conversión fue del 31.6%.", "e.pdf", 3);
     espia.mockResolvedValueOnce(
-      respuestaJson({
-        veredictos: [
-          { i: 0, veredicto: "parcial", motivo: "declaración de ausencia, no una atribución" },
-          { i: 1, veredicto: "sostenida", motivo: "consta" },
-        ],
-      }),
+      respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "consta" }] }),
     );
 
     const informe = await verificar(
@@ -588,8 +587,11 @@ describe("declaraciones de ausencia", () => {
       [ch],
     );
 
-    expect(veredictos(informe)).toEqual([PARCIAL, SOSTENIDA]);
-    expect(ultimoMensaje(espia.mock.calls[0])).toContain("mortalidad a 90 días");
+    expect(veredictos(informe)).toEqual([SOSTENIDA]);
+    expect(informe.afirmaciones[0].texto).toBe("La conversión fue del 31.6%");
+    // Al juez solo le llega la frase que afirma, no la que declara el hueco.
+    expect(ultimoMensaje(espia.mock.calls[0])).not.toContain("mortalidad a 90 días");
+    expect(informe.ok).toBe(true);
     expect(revisor.aprobada(informe)).toBe(true);
   });
 
@@ -1420,5 +1422,73 @@ describe("aviso de avance (alAvanzar)", () => {
     const avisos: unknown[] = [];
     await verificar(texto, [c1], null, null, undefined, { veredictosPrevios: veredictosDe(previo), alAvanzar: (h, t) => avisos.push([h, t]) });
     expect(avisos).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Declaraciones de ausencia dentro de una respuesta larga
+// ---------------------------------------------------------------------------
+describe("declaraciones puras de ausencia", () => {
+  test("REGRESIÓN de producción: la ausencia que nombra GEN 1 sigue siendo ausencia", () => {
+    // Medido el 9 sep 2026: estas dos frases se auditaron como afirmación sin
+    // cita y el recorte de la barrera las borró de la sección "Lo que no
+    // está", dejando la respuesta más completa de lo que era.
+    expect(
+      _esAusenciaPura("No encuentro qué barras concretas recibe la APU cuando asume la carga de GEN 1 en los documentos."),
+    ).toBe(true);
+    expect(_esAusenciaPura("No encuentro qué ocurre tras la falla de GEN 2 en los documentos.")).toBe(true);
+    // Otros números que solo nombran lo que falta: sistema, año, compartimiento.
+    expect(_esAusenciaPura("No encuentro el sistema doble de 28 Vcc en los documentos.")).toBe(true);
+    expect(_esAusenciaPura("No aparece el estudio de 2023 en los documentos.")).toBe(true);
+    expect(_esAusenciaPura("Los documentos no indican qué barras del compartimiento P6 se desconectan.")).toBe(true);
+    // Y las que ya funcionaban, sin ningún número.
+    expect(_esAusenciaPura("No pude comprobar el orden de entrada en los documentos.")).toBe(true);
+  });
+
+  test("ADVERSARIAL: esto NO puede servir de comodín para colar un dato sin cita", () => {
+    // Una cifra con forma de medida, con o sin cláusula adversativa.
+    expect(_esAusenciaPura("No hay datos de X, pero el AUC fue 0,94.")).toBe(false);
+    expect(_esAusenciaPura("No encuentro el desglose; la conversión fue del 31,6 %.")).toBe(false);
+    expect(_esAusenciaPura("No encuentro el dato: la mortalidad fue 30 % menor en el brazo tratado.")).toBe(false);
+    expect(_esAusenciaPura("No hay información del reclutamiento y hubo 412 participantes en los documentos.")).toBe(false);
+    // Una segunda cláusula, aunque no lleve ninguna cifra.
+    expect(_esAusenciaPura("No encuentro el orden, aunque el generador de la APU entra primero.")).toBe(false);
+    expect(_esAusenciaPura("No aparece la lógica, sin embargo la batería alimenta la barra caliente.")).toBe(false);
+    // Y lo que no declara ninguna ausencia sigue siendo una afirmación.
+    expect(_esAusenciaPura("La batería alimenta la barra de batería caliente.")).toBe(false);
+  });
+
+  test("de punta a punta: la sección 'Lo que no está' no bloquea ni se cuenta como afirmación sin cita", async () => {
+    const ch = frag("c1", "Los alternadores suministran la corriente del sistema.", "M6U1.pdf", 7);
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "coincide" }] }));
+
+    const informe = await verificar(
+      `Los alternadores suministran la corriente del sistema ${cita(ch)}.\n\n` +
+        "## Lo que no está\n\n" +
+        "- No encuentro qué barras concretas recibe la APU cuando asume la carga de GEN 1 en los documentos.\n" +
+        "- No encuentro qué ocurre tras la falla de GEN 2 en los documentos.\n",
+      [ch],
+    );
+
+    // Una sola afirmación auditada, la que cita; las dos ausencias no entran.
+    expect(veredictos(informe)).toEqual([SOSTENIDA]);
+    expect(informe.ok).toBe(true);
+    expect(informe.fidelidad).toBe(1);
+    expect(informe.afirmaciones.some((a) => a.texto.includes("GEN 1"))).toBe(false);
+  });
+
+  test("ADVERSARIAL de punta a punta: una ausencia que además afirma una cifra SÍ sale como sin_cita", async () => {
+    const ch = frag("c1", "Los alternadores suministran la corriente del sistema.", "M6U1.pdf", 7);
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "coincide" }] }));
+
+    const informe = await verificar(
+      `Los alternadores suministran la corriente del sistema ${cita(ch)}.\n\n` +
+        "No encuentro el desglose de cargas en los documentos, pero la barra de reserva soporta 0,5 A.\n",
+      [ch],
+    );
+
+    expect(veredictos(informe)).toContain(SIN_CITA);
+    expect(informe.ok).toBe(false);
+    expect(informe.afirmaciones.some((a) => a.veredicto === SIN_CITA && a.texto.includes("0,5 A"))).toBe(true);
   });
 });

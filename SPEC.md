@@ -549,13 +549,24 @@ anterior hasta ella. Dentro del tramo:
    diga, incluida una declaración de ausencia con cita ("No hay evidencia de que reduzca la
    mortalidad [cita]" es una afirmación sobre esa fuente). Su cita tiene que resolver.
 2. Las **demás frases del tramo se auditan contra la misma cita**, salvo las declaraciones
-   **puras** de ausencia: casan con los patrones de abstención y **no contienen dígitos**.
-   Esas se saltan y no cuentan como `sin_cita`.
+   **puras** de ausencia: casan con los patrones de abstención y no afirman nada de su cosecha,
+   es decir no llevan una cifra con forma de medida (decimal o porcentaje, o un número justo
+   detrás de un verbo de afirmación) ni una segunda cláusula (`pero`, `aunque`, `sin embargo`,
+   `no obstante`, `en cambio`, `mientras que`, o un punto y coma). Esas se saltan y no cuentan
+   como `sin_cita`. Un número que solo NOMBRA lo que falta no las descalifica: "GEN 1",
+   "el sistema doble de 28 Vcc", "el estudio de 2023" son identificadores, no medidas.
+
+   Antes la regla era "no contienen dígitos", en bloque, y el 9 sep 2026 se midió el daño en
+   producción: una respuesta sobre sistemas eléctricos de aeronave publicada por tope perdió
+   cuatro líneas de su sección "Lo que no está", justo las que mencionaban GEN 1 y GEN 2,
+   porque cada una perdía la exención, quedaba `sin_cita` (bloqueante) y el recorte quirúrgico
+   la borraba. Borrar la declaración de un hueco es peor que no haberla escrito: deja la
+   respuesta aparentando una completitud que no tiene.
 3. Una cita sin frase propia (`dato [a] [b]`) es una segunda cita de la frase anterior; una que
    va delante de todo texto se adosa a la primera frase que la sigue.
 4. La **cola** tras la última cita sigue el criterio 2: una ausencia pura se salta; cualquier
-   otra frase queda `sin_cita` ("No hay datos de X, pero el AUC fue 0,94" tiene un dígito y se
-   audita).
+   otra frase queda `sin_cita` ("No hay datos de X, pero el AUC fue 0,94" lleva cláusula
+   adversativa y una cifra con forma de medida, así que se audita).
 5. Encabezados de lista (terminan en `:`), restos sin letras ni dígitos y frases que ya llevan
    `[inventario del índice]` no se juzgan.
 

@@ -342,10 +342,12 @@ así nunca llegaba a `citas_sin_resolver`. La regla correcta:
    cita tiene que resolver contra un fragmento recuperado.
 2. Las demás frases del mismo tramo se auditan contra la misma cita, salvo
    que sean una declaración PURA de ausencia: casan con
-   `PATRONES_ABSTENCION`, **no contienen dígitos** y no llevan cita propia.
+   `PATRONES_ABSTENCION`, **no afirman nada de su cosecha** (ni cifra con forma de medida ni
+   segunda cláusula, ver `AFIRMA_CIFRA` y `OTRA_CLAUSULA` en el verificador) y no llevan cita
+   propia. Un número que solo nombra lo que falta ("GEN 1", "28 Vcc") no las descalifica.
    Esas se saltan y no cuentan como `sin_cita`.
 3. En la cola tras la última cita se aplica el mismo criterio: "No hay datos
-   de X" se salta; "No hay datos de X, pero el AUC fue 0,94" tiene un dígito,
+   de X" se salta; "No hay datos de X, pero el AUC fue 0,94" afirma una cifra,
    se audita y queda `sin_cita` (bloqueante), que es lo correcto.
 4. `pareceAbstencion` sobre la respuesta ENTERA solo decide el caso en que no
    hay ninguna cita en todo el texto.

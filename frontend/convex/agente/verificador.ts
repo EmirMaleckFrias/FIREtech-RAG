@@ -176,9 +176,27 @@ const FIN_DE_FRASE = /(?<=[.;:!?])\s+/;
 // Una "frase" sin ninguna letra ni dígito no afirma nada: es puntuación
 // suelta, una viñeta o un separador.
 const TIENE_CONTENIDO = /[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/;
-// Un dígito dentro de una declaración de ausencia delata que además afirma
-// algo ("No hay datos de X, pero el AUC fue 0,94").
-const TIENE_DIGITO = /\d/;
+// Qué delata que una declaración de ausencia además AFIRMA algo. Dos señales:
+// la forma del número y una segunda cláusula.
+//
+// Antes esto era "contiene un dígito", en bloque, y se llevó por delante
+// declaraciones honestas: en aviación y en medicina el sujeto de la ausencia
+// se nombra con números ("GEN 1", "el sistema doble de 28 Vcc", "el estudio
+// de 2023"), así que la frase perdía la exención, se auditaba como afirmación
+// sin cita (bloqueante) y el recorte de la barrera la borraba. Medido en
+// producción el 9 sep 2026: una respuesta publicada por tope perdió cuatro
+// líneas de su sección "Lo que no está", justo las que mencionaban GEN 1 y
+// GEN 2, y quedó aparentando más completitud de la que tenía. Borrar la
+// declaración de un hueco es peor que no haberla escrito.
+//
+// Lo que sí delata una cifra afirmada es su forma (decimal o porcentaje, que
+// es como se escriben las medidas) o un verbo de afirmación justo delante; un
+// entero pegado a un nombre es un identificador, no una medida. Y una
+// cláusula adversativa (o un punto y coma) es la costura por la que se cuela
+// un dato dentro de una abstención.
+const AFIRMA_CIFRA =
+  /\d[.,]\d|\d\s*%|\b(?:fue|fueron|es|son|era|eran|hubo|hab[íi]an?|alcanz[óo]|mide|miden|equivale|represent[óa]|incluy[óe])\b[^.;]{0,24}\d/i;
+const OTRA_CLAUSULA = /\b(?:pero|aunque|sin embargo|no obstante|en cambio|mientras que)\b|;/i;
 // Una línea que es un encabezado Markdown: "## Resultados" o "**Lo que no
 // está**". El Python solo reconocía los encabezados que acaban en ":", y el
 // modelo actual escribe los suyos en negrita: sin esto, "**Lo que no está**"
@@ -309,12 +327,18 @@ function tieneAlgoQueJuzgar(frase: string): boolean {
  *  contrario de lo que dice el fragmento; y una cita inventada pegada a una
  *  frase así nunca llegaba a `citas_sin_resolver`. Por eso esta función NO se
  *  aplica a la frase dueña de la cita (esa se audita siempre, ver
- *  `_trocear`), y solo salta una frase si además de casar con los patrones
- *  no contiene ningún dígito: "No hay datos de X, pero el AUC fue 0,94"
- *  afirma una cifra y tiene que auditarse. */
-function esAusenciaPura(frase: string): boolean {
-  return pareceAbstencion(frase) && !TIENE_DIGITO.test(frase);
+ *  `_trocear`), y solo salta una frase que, además de casar con los patrones,
+ *  no afirme nada de su cosecha: ni una cifra con forma de medida, ni una
+ *  segunda cláusula que cuele un dato ("No hay datos de X, pero el AUC fue
+ *  0,94" afirma una cifra y tiene que auditarse). Un número que solo nombra
+ *  aquello que falta ("GEN 1", "28 Vcc") no es una afirmación: ver
+ *  `AFIRMA_CIFRA`. */
+export function _esAusenciaPura(frase: string): boolean {
+  return pareceAbstencion(frase) && !AFIRMA_CIFRA.test(frase) && !OTRA_CLAUSULA.test(frase);
 }
+
+/** Alias interno, para no tocar los usos de dentro del módulo. */
+const esAusenciaPura = _esAusenciaPura;
 
 /** Un trozo auditable: el texto y las citas que lo respaldan (ninguna en la cola). */
 export interface Trozo {
