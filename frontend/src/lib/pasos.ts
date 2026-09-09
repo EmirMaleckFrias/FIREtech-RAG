@@ -252,8 +252,11 @@ export function resumenDelTurno(msg: Pick<ChatMessage, 'hops' | 'verificacion' |
 /** Cómo se resolvió el alcance pedido, en una frase corta para el paso de buscar. */
 export function textoDeAlcance(alcance: AlcanceTurno): string {
   if (alcance.documento !== null) {
+    // Resuelto por el tema y no por el nombre: se dice, porque pudo
+    // entenderse mal y la usuaria es quien puede verlo.
+    const como = alcance.por_contenido ? ' (por su contenido)' : '';
     return alcance.encontrado
-      ? `solo en «${alcance.documento}»`
+      ? `solo en «${alcance.documento}»${como}`
       : `«${alcance.documento}» no tenía nada sobre esto: se buscó en todos`;
   }
   if (typeof alcance.candidatos === 'number' && alcance.candidatos > 1) {

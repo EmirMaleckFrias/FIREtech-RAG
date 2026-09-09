@@ -333,6 +333,30 @@ export const correr = internalAction({
         try {
           const nombrados = await ctx.runQuery(internal.agente.alcance.documentosDe, { propietario: args.userId });
           alcanceTurno = alcance.elegirDocumento(pistaDocumento, nombrados);
+          // La pista no encaja con ningún NOMBRE, pero puede describir el
+          // documento por su tema ("el PDF de sistemas eléctricos y
+          // electrónicos de aeronaves", medido el 9 sep 2026: el fichero se
+          // llama `--M6U1_PDF.pdf` y no tiene título). Se pregunta al índice
+          // léxico, que es quien sabe de qué habla cada documento, y solo se
+          // acota si uno DOMINA la muestra.
+          if (alcanceTurno.tipo === "desconocido") {
+            const conteos = await ctx.runQuery(internal.agente.alcance.documentosPorContenido, {
+              propietario: args.userId,
+              pista: pistaDocumento,
+            });
+            const id = alcance.dominante(conteos);
+            const doc = id ? nombrados.find((d) => String(d.id) === id) : undefined;
+            if (doc) {
+              alcanceTurno = {
+                tipo: "elegido",
+                id: doc.id,
+                nombre: (doc.titulo ?? "").trim() || doc.fileName,
+                generico: false,
+                porContenido: true,
+              };
+              tel.incr("alcance_por_contenido");
+            }
+          }
         } catch (exc) {
           console.warn("no se pudieron listar los documentos para el alcance", exc);
         }
@@ -352,6 +376,7 @@ export const correr = internalAction({
               pista: pistaDocumento,
               documento: documentoElegido?.nombre ?? null,
               candidatos: alcanceTurno.tipo === "ambiguo" ? alcanceTurno.candidatos : undefined,
+              por_contenido: documentoElegido?.porContenido === true ? true : undefined,
               encontrado,
             }
           : undefined;
@@ -1092,10 +1117,16 @@ export function textoDeProgreso(evento: revisor.EventoRevision, conocidas: numbe
 export function notaDeAlcance(pista: string, resultado: alcance.Alcance, encontrado: boolean): string {
   if (!pista || resultado.tipo === "sin_pista") return "";
   if (resultado.tipo === "elegido") {
+    // Resuelto por el tema y no por el nombre: el redactor tiene que decir a
+    // qué documento entendió que se refería, porque pudo entenderlo mal.
+    const comoSeResolvio = resultado.porContenido
+      ? ` No lo nombró: se refirió a él como "${pista}" y es el único documento del que trata eso, así que ` +
+        "di al principio de la respuesta con qué documento estás respondiendo."
+      : ` (se refirió a él como "${pista}").`;
     if (encontrado) {
       return (
-        `ALCANCE: quien pregunta pidió responder únicamente con el documento «${resultado.nombre}» ` +
-        `(se refirió a él como "${pista}"). Toda la evidencia que has recibido es de ese documento y las ` +
+        `ALCANCE: quien pregunta pidió responder únicamente con el documento «${resultado.nombre}»` +
+        `${comoSeResolvio} Toda la evidencia que has recibido es de ese documento y las ` +
         "búsquedas que hagas también se limitarán a él. No menciones ni supongas otros documentos."
       );
     }

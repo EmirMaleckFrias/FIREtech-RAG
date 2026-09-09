@@ -283,6 +283,16 @@ documentos listos de quien pregunta (nombre de fichero sin extensión y título,
   no se elige ninguno (`ambiguo`); si ninguno, `desconocido`.
 - **Pista genérica** (solo artículos, genéricos y formato): si hay UN solo documento de ese
   formato es ese (el caso medido); si hay varios, `ambiguo`.
+- **Por su contenido**, solo si no encajó ningún nombre: la pista puede describir el documento
+  por su tema ("el PDF de sistemas eléctricos y electrónicos de aeronaves", medido el 9 sep 2026:
+  el fichero se llama `--M6U1_PDF.pdf` y no tiene título, así que por nombre no encajaba nada).
+  Se cuentan los aciertos de las palabras de la pista en el índice léxico de los fragmentos
+  (muestra de 60, solo el corpus de quien pregunta) y se elige el documento que DOMINA: al menos
+  8 aciertos, el 60 % de la muestra y el doble que el siguiente. Si están repartidos no se acota:
+  acotar al documento equivocado produce una abstención indistinguible de "el documento no lo
+  dice". Cuando el alcance se resuelve así, el redactor recibe la orden de decir al principio con
+  qué documento está respondiendo, y la interfaz lo marca "(por su contenido)": la deducción pudo
+  ser errónea y quien pregunta es quien puede verlo. Contador `alcance_por_contenido`.
 
 Con documento elegido, todas las búsquedas del turno (plan y extras, incluido el reintento que
 relaja los filtros del modelo) llevan `documentId`; si la búsqueda acotada no trae nada se

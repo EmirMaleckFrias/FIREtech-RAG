@@ -37,8 +37,9 @@ export interface DocumentoNombrado {
 
 export type Alcance =
   | { tipo: "sin_pista" }
-  /** Un solo documento encaja: la búsqueda se limita a él. */
-  | { tipo: "elegido"; id: Id<"documents">; nombre: string; generico: boolean }
+  /** Un solo documento encaja: la búsqueda se limita a él. `porContenido`
+   *  cuando no encajó por nombre y se resolvió por el tema del documento. */
+  | { tipo: "elegido"; id: Id<"documents">; nombre: string; generico: boolean; porContenido?: boolean }
   /** Varios encajan (o la pista es genérica y hay varios de ese formato). */
   | { tipo: "ambiguo"; candidatos: number; generico: boolean }
   /** La pista nombra algo que no está entre los documentos. */
@@ -147,6 +148,69 @@ export function elegirDocumento(pista: string, documentos: DocumentoNombrado[]):
   if (encajan.length > 1) return { tipo: "ambiguo", candidatos: nombres.size, generico: false };
   return { tipo: "desconocido" };
 }
+
+/** Cuántos fragmentos de la muestra léxica se miran para resolver una pista
+ *  por su contenido. */
+export const MUESTRA_CONTENIDO = 60;
+/** Aciertos mínimos para afirmar algo: con dos o tres fragmentos sueltos no
+ *  se elige un documento. */
+export const ACIERTOS_MINIMOS = 8;
+/** Parte de la muestra que tiene que estar en el mismo documento. */
+export const DOMINIO_MINIMO = 0.6;
+
+/** Aciertos léxicos de la pista, por documento, de más a menos. */
+export interface AciertosDocumento {
+  documentId: string;
+  aciertos: number;
+}
+
+/** El documento que DOMINA la muestra, o null si no hay uno claro.
+ *
+ *  Es el desempate de las pistas que describen el documento por su tema en
+ *  vez de nombrarlo ("el PDF de sistemas eléctricos y electrónicos de
+ *  aeronaves", medido el 9 sep 2026 en el despliegue: el fichero se llama
+ *  `--M6U1_PDF.pdf` y no tiene título, así que por nombre no encajaba nada y
+ *  la pregunta se buscaba en todo el corpus con un aviso confuso).
+ *
+ *  Exige mayoría Y el doble que el siguiente: si los aciertos están
+ *  repartidos, la pista no identifica un documento y es mejor buscar en todos
+ *  y decirlo que acotar al equivocado, que produciría una abstención
+ *  indistinguible de "el documento no lo dice". */
+export function dominante(conteos: AciertosDocumento[]): string | null {
+  if (!conteos.length) return null;
+  const total = conteos.reduce((n, c) => n + c.aciertos, 0);
+  if (total < ACIERTOS_MINIMOS) return null;
+  const [primero, segundo] = conteos;
+  if (primero.aciertos / total < DOMINIO_MINIMO) return null;
+  if (segundo && primero.aciertos < 2 * segundo.aciertos) return null;
+  return primero.documentId;
+}
+
+/** Aciertos de la pista por documento, con el índice léxico de los
+ *  fragmentos: el mismo que usa la búsqueda, sin llamar a ningún modelo.
+ *  Solo el corpus de quien pregunta. */
+export const documentosPorContenido = internalQuery({
+  args: { propietario: v.id("users"), pista: v.string() },
+  handler: async (ctx, { propietario, pista }): Promise<AciertosDocumento[]> => {
+    const consulta = palabrasQueIdentifican(pista).join(" ");
+    if (consulta === "") return [];
+    const filas = await ctx.db
+      .query("chunks")
+      .withSearchIndex("porTexto", (q) => q.search("text", consulta).eq("propietario", propietario))
+      .take(MUESTRA_CONTENIDO);
+    const porDocumento = new Map<string, number>();
+    for (const f of filas) {
+      const id = (f.documentId ?? "").trim();
+      if (id === "") continue;
+      porDocumento.set(id, (porDocumento.get(id) ?? 0) + 1);
+    }
+    return [...porDocumento]
+      .map(([documentId, aciertos]) => ({ documentId, aciertos }))
+      // Empate: por id, para que dos corridas de la misma pregunta resuelvan
+      // el alcance igual.
+      .sort((a, b) => b.aciertos - a.aciertos || a.documentId.localeCompare(b.documentId));
+  },
+});
 
 /** Los documentos listos de la persona, con lo justo para reconocerlos por
  *  su nombre. Solo su corpus: el alcance de una pregunta no puede resolverse

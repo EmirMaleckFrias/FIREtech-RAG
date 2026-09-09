@@ -68,6 +68,7 @@ export function normalizeAlcance(value: unknown): AlcanceTurno | null {
     pista,
     documento: typeof o.documento === 'string' && o.documento.trim() !== '' ? o.documento.trim() : null,
     ...(candidatos !== undefined ? { candidatos } : {}),
+    ...(o.por_contenido === true ? { por_contenido: true } : {}),
     encontrado: o.encontrado !== false,
   };
 }

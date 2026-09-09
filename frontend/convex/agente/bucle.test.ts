@@ -1966,3 +1966,119 @@ describe("los hops del plan se escriben punto por punto", () => {
     expect(m.estado).toBe("listo");
   });
 });
+
+describe("alcance por el contenido cuando la pista no nombra el fichero", () => {
+  /** Documento con fragmentos suyos, para que la pista se pueda resolver por
+   *  el índice léxico igual que en producción. */
+  async function conCorpus(t: Base, ids: Ids, docs: Array<[fileName: string, texto: string, n: number]>) {
+    return await t.run(async (ctx) => {
+      const salida: Id<"documents">[] = [];
+      for (const [fileName, texto, n] of docs) {
+        const documentRef = await ctx.db.insert("documents", {
+          fileName, sha256: fileName, pages: 1, chunks: n, status: "ready", propietario: ids.userId, ingestadoEn: 1,
+        });
+        for (let i = 0; i < n; i++) {
+          await ctx.db.insert("chunks", {
+            text: texto, contexto: "", embedding: [], sourceFile: fileName, page: 1, chunkType: "text",
+            documentId: String(documentRef), documentRef, propietario: ids.userId,
+          });
+        }
+        salida.push(documentRef);
+      }
+      return salida;
+    });
+  }
+  const notaDeSistema = () =>
+    mensajesDe(modelo.llamadas[0]).filter((m) => m.role === "system").map((m) => String(m.content)).join("\n");
+
+  test("el caso medido: 'el PDF de sistemas eléctricos y electrónicos de aeronaves' se resuelve al único que trata de eso", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    const [electrico] = await conCorpus(t, ids, [
+      ["--M6U1_PDF.pdf", "El sistema eléctrico de la aeronave y sus sistemas electrónicos", 10],
+      ["meteorologia.pdf", "La aeronave despega con viento cruzado", 4],
+    ]);
+    clasificar.mockResolvedValue({
+      clase: "documental", consulta: PREGUNTA, documento: "el PDF de sistemas eléctricos y electrónicos de aeronaves",
+    });
+    porPunto = { e0: { fragmentos: [frag("c1", { sourceFile: "--M6U1_PDF.pdf" })] } };
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    // El nombre del fichero no dice nada de sistemas eléctricos: quien lo
+    // resuelve es el índice, y la búsqueda queda acotada igual.
+    expect(ejecutarPlan.mock.calls[0][4]).toEqual({ documentId: String(electrico) });
+    expect(escrituras.filter((c) => c.alcance).pop()?.alcance).toMatchObject({
+      documento: "--M6U1_PDF.pdf", por_contenido: true, encontrado: true,
+    });
+    // Y el redactor tiene que decir con qué documento está respondiendo,
+    // porque el documento se dedujo del tema y pudo deducirse mal.
+    expect(notaDeSistema()).toContain("No lo nombró");
+    expect(notaDeSistema()).toContain("di al principio de la respuesta con qué documento estás respondiendo");
+    const m = await fila(t, ids.messageId);
+    expect(metricasDe(m).counters.alcance_por_contenido).toBe(1);
+    expect(metricasDe(m).meta.alcance).toBe("elegido");
+  });
+
+  test("ADVERSARIAL: si el tema está repartido entre documentos no se acota a ninguno", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    await conCorpus(t, ids, [
+      ["uno.pdf", "El sistema eléctrico de la aeronave", 6],
+      ["dos.pdf", "El sistema eléctrico de la aeronave", 6],
+    ]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF del sistema eléctrico de la aeronave" });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    expect(ejecutarPlan.mock.calls[0][4]).toEqual({});
+    expect(escrituras.filter((c) => c.alcance).pop()?.alcance).toMatchObject({ documento: null });
+    expect(notaDeSistema()).toContain("ningún documento indexado se llama así");
+    expect(metricasDe(await fila(t, ids.messageId)).counters.alcance_por_contenido).toBeUndefined();
+  });
+
+  test("ADVERSARIAL: el nombre manda sobre el contenido, y el documento de otra persona no se elige", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    // "guia_hta" encaja por NOMBRE; el otro documento propio habla mucho más
+    // de hipertensión, y no debe ganarle al nombre.
+    const [guia] = await conCorpus(t, ids, [
+      ["guia_hta.pdf", "Recomendaciones de tratamiento", 2],
+      ["revision.pdf", "La hipertensión arterial y su guía de manejo de la hipertensión", 20],
+    ]);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "la guía HTA" });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    await handlerDirecto(ctxDirecto(t).ctx, argsDe(ids));
+    expect(ejecutarPlan.mock.calls[0][4]).toEqual({ documentId: String(guia) });
+
+    // Y una pista que solo casa con el documento de OTRA cuenta no elige
+    // nada: ese documento, para quien pregunta, no existe.
+    const t2 = nuevaBase();
+    const ids2 = await sembrar(t2);
+    await conCorpus(t2, ids2, [["propio.pdf", "Notas de la reunión", 2]]);
+    await t2.run(async (ctx) => {
+      const otro = await ctx.db.insert("users", {
+        email: "otro@airobotix.net", rol: "lector", bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1,
+      });
+      const ajeno = await ctx.db.insert("documents", {
+        fileName: "ajeno.pdf", sha256: "ajeno", pages: 1, chunks: 20, status: "ready", propietario: otro, ingestadoEn: 1,
+      });
+      for (let i = 0; i < 20; i++) {
+        await ctx.db.insert("chunks", {
+          text: "El sistema eléctrico de la aeronave y sus sistemas electrónicos", contexto: "", embedding: [],
+          sourceFile: "ajeno.pdf", page: 1, chunkType: "text", documentId: String(ajeno), documentRef: ajeno, propietario: otro,
+        });
+      }
+    });
+    clasificar.mockResolvedValue({
+      clase: "documental", consulta: PREGUNTA, documento: "el PDF de sistemas eléctricos y electrónicos de aeronaves",
+    });
+    const { escrituras } = ctxDirecto(t2);
+    await handlerDirecto(ctxDirecto(t2).ctx, argsDe(ids2));
+    expect(ejecutarPlan.mock.calls[1][4]).toEqual({});
+    expect(escrituras.every((c) => !c.alcance || (c.alcance as { documento: string | null }).documento === null)).toBe(true);
+  });
+});

@@ -285,6 +285,10 @@ export interface AlcanceTurno {
   pista: string;
   documento: string | null;
   candidatos?: number;
+  /** El documento no encajaba por nombre: se resolvio por su contenido (la
+   *  pista lo describia por su tema). Se dice en la interfaz porque pudo
+   *  entenderse mal. */
+  por_contenido?: boolean;
   encontrado: boolean;
 }
 

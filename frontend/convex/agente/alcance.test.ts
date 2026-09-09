@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import schema from "../schema";
-import { elegirDocumento, palabrasQueIdentifican, type DocumentoNombrado } from "./alcance";
+import { ACIERTOS_MINIMOS, dominante, elegirDocumento, palabrasQueIdentifican, type DocumentoNombrado } from "./alcance";
 
 const modules = import.meta.glob("/convex/**/*.*s");
 
@@ -90,5 +90,66 @@ describe("documentosDe", () => {
     const deOtro = await t.query(internal.agente.alcance.documentosDe, { propietario: otro });
     expect(deOtro.map((d) => d.fileName)).toEqual(["ajeno.pdf"]);
     expect(deOtro[0]).not.toHaveProperty("titulo");
+  });
+});
+
+describe("resolver la pista por el contenido", () => {
+  test("dominante exige mayoría y el doble que el siguiente", () => {
+    expect(dominante([{ documentId: "a", aciertos: 40 }, { documentId: "b", aciertos: 5 }])).toBe("a");
+    // ADVERSARIAL: aciertos repartidos. Acotar al primero sería acotar a un
+    // documento que no es "el de eso", y la respuesta saldría vacía sin que
+    // nadie pueda distinguirlo de "el documento no lo dice".
+    expect(dominante([{ documentId: "a", aciertos: 20 }, { documentId: "b", aciertos: 18 }])).toBeNull();
+    // Mayoría pero sin doblar al segundo.
+    expect(dominante([{ documentId: "a", aciertos: 12 }, { documentId: "b", aciertos: 7 }, { documentId: "c", aciertos: 1 }])).toBeNull();
+    // ADVERSARIAL: muestra minúscula. Tres fragmentos sueltos no eligen nada.
+    expect(dominante([{ documentId: "a", aciertos: 3 }])).toBeNull();
+    expect(dominante([])).toBeNull();
+    expect(dominante([{ documentId: "a", aciertos: ACIERTOS_MINIMOS }])).toBe("a");
+  });
+
+  test("documentosPorContenido cuenta por documento, solo del corpus de quien pregunta", async () => {
+    const t = convexTest(schema, modules);
+    const { ana, doc1, doc2, ajeno } = await t.run(async (ctx) => {
+      const base = { rol: "lector" as const, bloqueado: false, creadoEn: 1, ultimoAccesoEn: 1 };
+      const ana = await ctx.db.insert("users", { email: "ana@airobotix.net", ...base });
+      const otro = await ctx.db.insert("users", { email: "otro@airobotix.net", ...base });
+      const documento = (propietario: Id<"users">, fileName: string) =>
+        ctx.db.insert("documents", {
+          fileName, sha256: fileName, pages: 1, chunks: 1, status: "ready", propietario, ingestadoEn: 1,
+        });
+      const doc1 = await documento(ana, "--M6U1_PDF.pdf");
+      const doc2 = await documento(ana, "meteorologia.pdf");
+      const ajeno = await documento(otro, "ajeno.pdf");
+      const chunk = (propietario: Id<"users">, documentRef: Id<"documents">, text: string) =>
+        ctx.db.insert("chunks", {
+          text, contexto: "", embedding: [], sourceFile: "x.pdf", page: 1, chunkType: "text",
+          documentId: String(documentRef), documentRef, propietario,
+        });
+      for (let i = 0; i < 10; i++) await chunk(ana, doc1, "El sistema eléctrico de la aeronave y sus sistemas electrónicos");
+      for (let i = 0; i < 2; i++) await chunk(ana, doc2, "La aeronave despega con viento cruzado");
+      for (let i = 0; i < 20; i++) await chunk(otro, ajeno, "Sistemas eléctricos y electrónicos de aeronaves");
+      return { ana, doc1, doc2, ajeno };
+    });
+
+    const conteos = await t.query(internal.agente.alcance.documentosPorContenido, {
+      propietario: ana,
+      pista: "el PDF de sistemas eléctricos y electrónicos de aeronaves",
+    });
+    // El documento de OTRA persona no aparece aunque sea el que más coincide.
+    expect(conteos.map((c) => c.documentId)).not.toContain(String(ajeno));
+    expect(conteos[0].documentId).toBe(String(doc1));
+    expect(conteos[0].aciertos).toBeGreaterThanOrEqual(10);
+    // El otro documento de la misma persona habla de meteorología: no cuenta.
+    expect(conteos.every((c) => c.documentId !== String(doc2))).toBe(true);
+    expect(dominante(conteos)).toBe(String(doc1));
+
+    // Una pista sin palabras que identifiquen no se resuelve por contenido:
+    // ese camino es el del formato (ver elegirDocumento).
+    expect(await t.query(internal.agente.alcance.documentosPorContenido, { propietario: ana, pista: "el PDF indexado" })).toEqual([]);
+    // Y una pista que no está en ningún fragmento no cuenta nada.
+    expect(
+      await t.query(internal.agente.alcance.documentosPorContenido, { propietario: ana, pista: "el PDF de resonancia magnética funcional" }),
+    ).toEqual([]);
   });
 });
