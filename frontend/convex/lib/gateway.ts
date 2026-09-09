@@ -98,7 +98,14 @@ function espera(ms: number): Promise<void> {
 // cinco puntos del plan hacían cola de a tres. Aquí cada pregunta corre en su
 // propia acción, así que esto es concurrencia POR PREGUNTA y puede ser más
 // generosa; lo que la acota de verdad es el límite de ritmo del gateway.
-const MAX_EN_VUELO = 8;
+// Configurable con GATEWAY_MAX_EN_VUELO (se lee al cargar el módulo): en
+// extendido, seis puntos del plan son doce llamadas al calificador, que con
+// ocho plazas van en dos oleadas; con doce irían en una, si el límite de
+// ritmo del gateway lo aguanta (los 429 se reintentan y quedan en el log).
+const MAX_EN_VUELO = (() => {
+  const n = Number(process.env.GATEWAY_MAX_EN_VUELO ?? "");
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 8;
+})();
 let _enVuelo = 0;
 const _cola: Array<() => void> = [];
 

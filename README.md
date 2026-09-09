@@ -240,6 +240,7 @@ otro texto vale falso; vacío deja el default.
 | `EMBEDDING_MODEL` | `openai/text-embedding-3-large` | Embeddings. Cambiarlo obliga a reindexar. |
 | `EMBEDDING_DIMS` | `3072` | Dimensiones que el gateway debe devolver; el índice vectorial está declarado con 3072. |
 | `LLM_TEMPERATURE` | `0` | Temperatura de todas las llamadas. |
+| `GATEWAY_MAX_EN_VUELO` | `8` | Llamadas simultáneas al gateway por acción. Con doce, los doce lotes del calificador de un plan de seis puntos van en una oleada en vez de dos, si el límite de ritmo del gateway lo aguanta (los 429 se reintentan y quedan en el log). Se lee al cargar el módulo: aplica al siguiente despliegue o reinicio. |
 | `AGENT_REASONING_EFFORT` | vacío | Techo del razonamiento del redactor. Vacío = manda el modo (`medium` normal, `high` extendido); `none` lo apaga; otro valor sustituye al del modo. |
 | `PLANNER_REASONING_EFFORT` | `high` | Razonamiento del planificador. |
 | `RERANK_REASONING_EFFORT` | `medium` | Razonamiento del calificador y del clasificador. |

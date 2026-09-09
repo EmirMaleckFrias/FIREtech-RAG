@@ -580,6 +580,18 @@ Un fragmento traído por dos puntos cubre los dos: se acepta antes que un falso 
 
 ## 11. Barrera de fidelidad (`agente/revisor.ts`)
 
+**Verificación anticipada.** El bucle verifica el borrador por párrafos según llega por el stream
+del redactor (cada vez que hay al menos 700 caracteres nuevos acabados en párrafo completo), con
+la misma función y las mismas opciones que la barrera; los veredictos del modelo se acumulan y la
+barrera arranca con ellos (`veredictosIniciales`), así que su primera verificación solo juzga la
+cola. No cambia ningún dictamen (la misma frase con la misma cita y el mismo apartado se juzga
+igual, se juzgue cuando se juzgue); solapa los 40 a 114 s de la primera verificación con los 95
+a 106 s de la redacción, medidos en producción el 8 sep 2026. Contador
+`verificaciones_anticipadas`, `metrics.meta.veredictos_anticipados`. Antes de entrar en la
+barrera se esperan como mucho 15 s a las anticipadas en vuelo; lo que no llegue se juzga otra vez.
+Del mismo modo, sin historial el planificador arranca a la vez que el clasificador (la consulta
+que planifica es la literal); con historial espera a la consulta autónoma.
+
 El borrador llega al redactor de la corrección como texto de OTRO redactor, dentro del mensaje
 del usuario y entre delimitadores, no como un turno `assistant` propio: medido en 2026 sobre
 doce combinaciones de modelo y dominio, un modelo corrige mucho más un error que lee como ajeno

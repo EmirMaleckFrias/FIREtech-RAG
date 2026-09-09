@@ -1092,3 +1092,26 @@ describe("atribución a otra entidad", () => {
     expect(recibidos[0].startsWith("PREGUNTA DE QUIEN CONSULTA: ¿cuál fue el AUC de p-tau217?")).toBe(true);
   });
 });
+
+describe("veredictos iniciales", () => {
+  test("una frase ya juzgada antes de la barrera no se vuelve a mandar al juez; la cola sí", async () => {
+    const ch = frag();
+    const conocida = `El AUC fue 0.94 ${cita(ch)}.`;
+    const borrador = `${conocida} La cohorte tuvo 412 pacientes ${cita(ch)}.`;
+    const iniciales = verificador.veredictosDe(
+      informe({
+        afirmaciones: [afirmacion({ texto: "El AUC fue 0.94", cita: cita(ch), veredicto: verificador.SOSTENIDA, motivo: "coincide", fragmentos: [ch._id] })],
+      }),
+    );
+    const pedidas: string[] = [];
+    juez.mockImplementation(async (kwargs: Record<string, unknown>) => {
+      const lineas = [...ultimoMensaje(kwargs).content.matchAll(/^\[(\d+)\] AFIRMACIÓN[^:]*: (.*)$/gm)];
+      for (const l of lineas) pedidas.push(l[2]);
+      return respuestaJson({ veredictos: lineas.map((l) => ({ i: Number(l[1]), veredicto: "sostenida", motivo: "ok" })) });
+    });
+    const r = await revisor.revisarAntesDePublicar("q", borrador, [], [ch], null, null, null, undefined, { veredictosIniciales: iniciales });
+    expect(r.contenido).toBe(borrador);
+    expect(pedidas).toEqual(["La cohorte tuvo 412 pacientes"]);
+    expect(r.informe.afirmaciones.map((a) => a.veredicto)).toEqual([verificador.SOSTENIDA, verificador.SOSTENIDA]);
+  });
+});

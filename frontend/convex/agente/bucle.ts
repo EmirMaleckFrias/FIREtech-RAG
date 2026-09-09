@@ -47,6 +47,13 @@ import type { FiltrosBusqueda } from "../search/hybrid";
 
 type Mensaje = Record<string, unknown>;
 
+/** Caracteres nuevos de borrador que hacen falta para lanzar otra verificación
+ *  anticipada: un párrafo o dos. Menos sería una llamada por frase. */
+const MIN_ANTICIPO_CHARS = 700;
+/** Cuánto se espera, como mucho, a las verificaciones anticipadas en vuelo
+ *  antes de entrar en la barrera. */
+const ESPERA_ANTICIPADAS_MS = 15_000;
+
 interface Hop {
   n: number;
   query: string;
@@ -246,6 +253,18 @@ export const correr = internalAction({
       // literal de quien pregunta (ver planner.Clasificacion).
       // Con la clase en caché, la versión inglesa del ancla también está en
       // caché (la guardó el planificador o el clasificador de la primera vez).
+      // Sin historial la consulta que se planifica es la literal, así que el
+      // planificador no necesita esperar al clasificador: se lanzan a la vez y
+      // se ahorran los 3 a 5 s del clasificador (medido el 8 sep 2026). Si la
+      // clase resulta no ser documental, el plan se desecha; una llamada de
+      // más en un saludo es barata comparada con un turno documental de tres
+      // minutos. Con historial no se puede: el planificador necesita la
+      // consulta autónoma que devuelve el clasificador.
+      const planEnCache = Boolean(enCache && Array.isArray(enCache.items) && enCache.items.length);
+      const planAnticipado =
+        cacheable && (enCache?.clase ?? null) === null && modo.planifica && !planEnCache
+          ? planner.planificar(args.texto, [], a.maxConsultasPlan, tel)
+          : null;
       const clasificacion: planner.Clasificacion =
         (enCache?.clase ?? null) !== null
           ? { clase: enCache!.clase as planner.Clase, consulta: args.texto, consultaEn: enCache!.preguntaEn ?? "" }
@@ -285,7 +304,7 @@ export const correr = internalAction({
           tel.incr("plan_cache_hits");
           void ctx.runMutation(internal.agente.cachePlan.contarUso, { clave: clavePlan }).catch(() => undefined);
         } else {
-          const r = await planner.planificar(consulta, args.historial, a.maxConsultasPlan, tel);
+          const r = planAnticipado ? await planAnticipado : await planner.planificar(consulta, args.historial, a.maxConsultasPlan, tel);
           items = r.items;
           preguntaEn = r.preguntaEn || preguntaEn;
           variantes = r.variantesPregunta ?? [];
@@ -376,6 +395,41 @@ export const correr = internalAction({
       // Detenida antes de redactar: no se gasta ni una llamada más.
       await actualizar({ estado: "redactando" });
       if (abandonado) return;
+
+      // Verificación ANTICIPADA: el borrador se juzga por párrafos según llega
+      // por el stream, en vez de esperar a que el redactor termine. Medido en
+      // producción el 8 sep 2026: redacción de 95 a 106 s seguida de una
+      // verificación de 40 a 114 s, las dos en serie. La misma frase con la
+      // misma cita y el mismo apartado recibe el mismo veredicto la juzgue
+      // quien la juzgue (`claveDeAfirmacion`), así que juzgarla antes no cambia
+      // nada del dictamen: la barrera arranca con estos veredictos y solo
+      // pregunta por la cola. Se corta en párrafos completos ("\n\n") para que
+      // cada frase lleve ya su cita; lo que quede sin cita en un parcial es un
+      // veredicto determinista que no se guarda, y se recalcula al final.
+      const requerida: Record<string, string> = Object.fromEntries(
+        plan.map((p) => [p.id, p.evidenceNeeded]),
+      );
+      const conocidos = new Map<string, verificador.Afirmacion>();
+      const anticipadas: Promise<unknown>[] = [];
+      let verificadoHasta = 0;
+      const anticipar = (borradorParcial: string) => {
+        if (!a.habilitarVerificacion) return;
+        const corte = borradorParcial.lastIndexOf("\n\n");
+        if (corte <= verificadoHasta || corte - verificadoHasta < MIN_ANTICIPO_CHARS) return;
+        verificadoHasta = corte;
+        tel.incr("verificaciones_anticipadas");
+        anticipadas.push(
+          verificador
+            .verificar(borradorParcial.slice(0, corte), [...acumulado.values()], requerida, mapa, tel, {
+              veredictosPrevios: conocidos,
+              pregunta: consulta,
+            })
+            .then((inf) => {
+              for (const [k, af] of verificador.veredictosDe(inf)) conocidos.set(k, af);
+            })
+            .catch((exc: unknown) => console.warn("verificación anticipada fallida", String(exc).slice(0, 120))),
+        );
+      };
       let hopsExtra = 0;
       let hopsSinAvance = 0;
       // Las consultas del plan ya se ejecutaron: repetirlas, en cualquiera de
@@ -443,7 +497,10 @@ export const correr = internalAction({
               if (trozo.modelo) modeloRonda = trozo.modelo;
             }
             if (trozo.finishReason) finish = trozo.finishReason;
-            if (trozo.texto) texto += trozo.texto;
+            if (trozo.texto) {
+              texto += trozo.texto;
+              anticipar(texto);
+            }
             for (const tc of trozo.toolCalls ?? []) {
               const e = llamadas.get(tc.index) ?? { id: "", name: "", arguments: "" };
               if (tc.id) e.id = tc.id;
@@ -689,9 +746,16 @@ export const correr = internalAction({
       // 6. Barrera de fidelidad. El borrador sigue privado hasta aquí.
       await actualizar({ estado: "revisando" });
       if (abandonado) return;
-      const requerida: Record<string, string> = Object.fromEntries(
-        plan.map((p) => [p.id, p.evidenceNeeded]),
-      );
+      // Las verificaciones anticipadas que sigan en vuelo están a punto de
+      // terminar: se esperan un poco, no indefinidamente (una colgada no
+      // puede retener la barrera; lo que no llegue se juzga otra vez).
+      if (anticipadas.length) {
+        await Promise.race([
+          Promise.allSettled(anticipadas),
+          new Promise((r) => setTimeout(r, ESPERA_ANTICIPADAS_MS)),
+        ]);
+        tel.fija({ veredictos_anticipados: conocidos.size });
+      }
       const fragmentos = [...acumulado.values()];
       let informe: verificador.Verificacion | null = null;
       let revisiones = 0;
@@ -703,6 +767,7 @@ export const correr = internalAction({
         // podría comprobarla. Sin historial son la misma cadena.
         const r = await revisor.revisarAntesDePublicar(
           consulta, contenido, mensajes, fragmentos, requerida, mapa, restanteS(), tel,
+          { veredictosIniciales: conocidos },
         );
         contenido = r.contenido;
         informe = r.informe;
@@ -748,7 +813,10 @@ export const correr = internalAction({
         }
       } else if (a.habilitarVerificacion && contenido) {
         try {
-          informe = await verificador.verificar(contenido, fragmentos, requerida, mapa, tel, { pregunta: consulta });
+          informe = await verificador.verificar(contenido, fragmentos, requerida, mapa, tel, {
+            pregunta: consulta,
+            veredictosPrevios: conocidos,
+          });
         } catch (exc) {
           console.error("La verificación falló; la respuesta se publica sin anotar", exc);
           tel.incr("verificacion_fallida");

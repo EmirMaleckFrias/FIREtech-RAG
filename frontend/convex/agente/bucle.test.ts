@@ -1180,7 +1180,7 @@ describe("barrera de revisión", () => {
     const m = await correrEn(t, ids, { modo: "extendido" });
 
     expect(revisar).not.toHaveBeenCalled();
-    expect(verificar).toHaveBeenCalledWith(RESPUESTA, expect.any(Array), { e0: planner.ANCLA_EVIDENCE_NEEDED, e1: "especificidad" }, { c1: ["e0"], c2: ["e1"] }, expect.anything(), { pregunta: PREGUNTA });
+    expect(verificar).toHaveBeenCalledWith(RESPUESTA, expect.any(Array), { e0: planner.ANCLA_EVIDENCE_NEEDED, e1: "especificidad" }, { c1: ["e0"], c2: ["e1"] }, expect.anything(), expect.objectContaining({ pregunta: PREGUNTA }));
     expect(m.estado).toBe("listo");
     expect(m.content).toBe(RESPUESTA);
     expect(m.verificacion).toMatchObject({ fidelidad: 1 });
@@ -1536,5 +1536,91 @@ describe("inglés del ancla, reformulaciones y telemetría", () => {
       "extra:2": [{ f: "a.pdf", p: 9, loc: "pág. 9" }, { f: "b.pdf", p: 2, sec: "Results", loc: "pág. 2" }],
     });
     expect(meta.verificacion).toMatchObject({ no_sostenidas: 1, entidad_distinta: 1, sostenidas: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Latencia: verificación anticipada durante el stream y plan en paralelo
+// ---------------------------------------------------------------------------
+describe("solapes que no cambian ningún veredicto", () => {
+  const parrafo = (n: number, cita: string) =>
+    `${"Frase larga número " + n + " sobre la evidencia recuperada del estudio, con detalle suficiente para pasar del umbral. ".repeat(6).trim()} ${cita}`;
+
+  test("el borrador se verifica por párrafos mientras llega, y la barrera arranca con esos veredictos", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const borrador = [parrafo(1, "[a.pdf, pág. 3]"), parrafo(2, "[a.pdf, pág. 3]"), parrafo(3, "[a.pdf, pág. 3]"), "Cola final [a.pdf, pág. 3]."].join("\n\n");
+    // El stream entrega el borrador en trozos de 200 caracteres.
+    const trozos: Trozo[] = [];
+    for (let i = 0; i < borrador.length; i += 200) trozos.push({ texto: borrador.slice(i, i + 200) });
+    trozos.push({ finishReason: "stop" }, { usage: USO, modelo: "openai/gpt-5.4" });
+    modelo.porDefecto = trozos;
+    // Cada verificación devuelve una afirmación sostenida distinta por texto.
+    let n = 0;
+    verificar.mockImplementation(async (texto) =>
+      informeVacio({
+        afirmaciones: [
+          { texto: `frase ${++n} de ${texto.length}`, cita: "[a.pdf, pág. 3]", veredicto: "sostenida", motivo: "ok", fragmento_id: "", fragmentos: ["c1"] },
+        ],
+      }),
+    );
+    let verificacionesAlRevisar = -1;
+    revisar.mockImplementation(async (_p, b, _m, _f, _r, _mapa, _t, _tel, opciones) => {
+      verificacionesAlRevisar = verificar.mock.calls.length;
+      expect(opciones?.veredictosIniciales?.size).toBeGreaterThanOrEqual(1);
+      return aprobar(b);
+    });
+
+    const m = await correrEn(t, ids);
+
+    expect(m.estado).toBe("listo");
+    // Hubo verificaciones ANTES de la barrera, sobre textos parciales que
+    // acaban en párrafo completo y son prefijos del borrador.
+    expect(verificacionesAlRevisar).toBeGreaterThanOrEqual(1);
+    for (const llamada of verificar.mock.calls) {
+      const parcial = llamada[0] as string;
+      expect(borrador.startsWith(parcial)).toBe(true);
+      expect(parcial.endsWith("]") || parcial.endsWith(".")).toBe(true);
+      expect((llamada[5] as { pregunta?: string }).pregunta).toBe(PREGUNTA);
+    }
+    expect(metricasDe(m).counters.verificaciones_anticipadas).toBe(verificacionesAlRevisar);
+    expect(metricasDe(m).meta.veredictos_anticipados).toBeGreaterThanOrEqual(1);
+  });
+
+  test("un borrador corto no dispara verificaciones anticipadas; con la verificación apagada tampoco", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    await correrEn(t, ids);
+    expect(verificar).not.toHaveBeenCalled();
+    expect(metricasDe(await fila(t, ids.messageId)).counters.verificaciones_anticipadas).toBeUndefined();
+  });
+
+  test("sin historial, el planificador arranca a la vez que el clasificador con la pregunta literal; con historial espera a la consulta autónoma", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    vi.stubEnv("ENABLE_QUERY_PLANNING", "true");
+    let planificarAntesDeClasificar = false;
+    clasificar.mockImplementation(async () => {
+      planificarAntesDeClasificar = planificar.mock.calls.length === 1;
+      return { clase: "documental", consulta: PREGUNTA };
+    });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    await correrEn(t, ids, { modo: "extendido" });
+    expect(planificarAntesDeClasificar).toBe(true);
+    expect(planificar).toHaveBeenCalledTimes(1);
+    expect(planificar).toHaveBeenCalledWith(PREGUNTA, [], expect.any(Number), expect.anything());
+
+    // Con historial, la consulta autónoma manda y el planificador espera.
+    const t2 = nuevaBase();
+    const ids2 = await sembrar(t2);
+    const historial = [{ role: "user", content: "háblame de p-tau217" }, { role: "assistant", content: "Es un biomarcador [a.pdf, pág. 1]." }];
+    clasificar.mockResolvedValue({ clase: "documental", consulta: "AUC de p-tau217 en la otra cohorte" });
+    planificar.mockClear();
+    await correrEn(t2, ids2, { modo: "extendido", texto: "¿y en la otra cohorte?", historial });
+    expect(planificar).toHaveBeenCalledTimes(1);
+    expect(planificar.mock.calls[0][0]).toBe("AUC de p-tau217 en la otra cohorte");
+    expect(planificar.mock.calls[0][1]).toEqual(historial);
   });
 });

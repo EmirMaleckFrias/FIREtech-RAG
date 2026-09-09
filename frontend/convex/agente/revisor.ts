@@ -42,6 +42,17 @@ export const ABSTENCION_SEGURA =
   "No encuentro respaldo suficiente en los documentos para responder con la " +
   "fidelidad requerida.";
 
+export interface OpcionesRevision {
+  /** Veredictos ya emitidos sobre frases del borrador (misma clave que
+   *  `verificador.claveDeAfirmacion`), obtenidos por el bucle verificando el
+   *  borrador por párrafos mientras se redactaba. Medido en producción el 8
+   *  sep 2026: la verificación del borrador tardaba de 40 a 114 s en serie
+   *  DESPUÉS de una redacción de 95 a 106 s; solapar las dos ahorra casi toda
+   *  la primera sin cambiar ningún veredicto (la misma frase con la misma
+   *  cita se juzga igual, se juzgue cuando se juzgue). */
+  veredictosIniciales?: ReadonlyMap<string, Afirmacion>;
+}
+
 export interface ResultadoRevision {
   contenido: string;
   informe: Verificacion;
@@ -689,6 +700,7 @@ export async function revisarAntesDePublicar(
   mapaPlan: Record<string, string[]> | null = null,
   tiempoDisponibleS: number | null = null,
   tel?: Telemetria,
+  opciones: OpcionesRevision = {},
 ): Promise<ResultadoRevision> {
   const a = ajustes();
   const t = tel ?? new Telemetria();
@@ -723,7 +735,10 @@ export async function revisarAntesDePublicar(
   // Veredictos acumulados de las rondas de este turno: una frase que la
   // corrección no toca no se vuelve a juzgar (ver
   // verificador.OpcionesVerificacion.veredictosPrevios).
-  const conocidos = new Map<string, Afirmacion>();
+  // Arranca con los veredictos que el bucle ya obtuvo verificando el borrador
+  // por párrafos MIENTRAS el redactor escribía: la primera verificación de
+  // aquí solo juzga lo que aún no se juzgó (normalmente la cola).
+  const conocidos = new Map<string, Afirmacion>(opciones.veredictosIniciales ?? []);
   const verificar = async (texto: string): Promise<Verificacion> => {
     const informe = await verificador.verificar(texto, fragmentos, evidenciaRequerida, mapaPlan, t, {
       veredictosPrevios: conocidos,
