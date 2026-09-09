@@ -349,6 +349,12 @@ así nunca llegaba a `citas_sin_resolver`. La regla correcta:
 3. En la cola tras la última cita se aplica el mismo criterio: "No hay datos
    de X" se salta; "No hay datos de X, pero el AUC fue 0,94" afirma una cifra,
    se audita y queda `sin_cita` (bloqueante), que es lo correcto.
+3b. Las ausencias que se saltan se comprueban contra el índice (`agente/ausencias.ts`,
+   inyectado por el bucle como `OpcionesVerificacion.dondeAparecen`): si la
+   expresión identificadora que declaran ausente no estaba en la evidencia y
+   sí está, como palabra entera, en un fragmento del alcance, la frase entra
+   como `ausencia_refutada` (bloqueante) con fichero y página. "No pude
+   comprobar X" no se refuta. Ver SPEC §10.1 punto 6.
 4. `pareceAbstencion` sobre la respuesta ENTERA solo decide el caso en que no
    hay ninguna cita en todo el texto.
 

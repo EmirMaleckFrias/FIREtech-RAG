@@ -1144,3 +1144,45 @@ describe("aviso de avance de la barrera (alAvanzar)", () => {
     ]);
   });
 });
+
+describe("ausencia refutada en la barrera", () => {
+  test("bloquea, la crítica dice qué escribir, y la corrección con 'no pude comprobar' se aprueba sin volver a caer", async () => {
+    process.env.PRE_RESPONSE_REVIEW_MAX_REVISIONS = "1";
+    const ch = frag();
+    const borrador = `El AUC fue 0.94 ${cita(ch)}. No encuentro nada sobre el 737 en los documentos.`;
+    const corregido = `El AUC fue 0.94 ${cita(ch)}. No pude comprobar lo del 737 en los documentos.`;
+    const dondeAparecen = vi.fn(async (exprs: string[]) =>
+      exprs.filter((e) => e === "737").map((e) => ({ expresion: e, sourceFile: "M6U1.pdf", page: 12 })),
+    );
+    juez.mockResolvedValue(veredictoJson("sostenida", "coincide"));
+    redactor.mockResolvedValueOnce(respuestaTexto(corregido));
+
+    const resultado = await revisor.revisarAntesDePublicar("q", borrador, [], [ch], null, null, null, undefined, { dondeAparecen });
+
+    expect(resultado.contenido).toBe(corregido);
+    expect(resultado.revisiones).toBe(1);
+    expect(resultado.usoAbstencionSegura).toBe(false);
+    expect(revisor.aprobada(resultado.informe)).toBe(true);
+    // La crítica que vio el redactor: qué pasó y qué escribir.
+    const critica = ultimoMensaje(redactor.mock.calls[0][0] as Record<string, unknown>).content;
+    expect(critica).toContain("ausencia refutada");
+    expect(critica).toContain("M6U1.pdf, pág. 12");
+    expect(critica).toContain('"No pude comprobar X en los documentos"');
+    expect(critica).toContain("No escribas lo que dice esa página");
+    // El índice se consultó por el 737 en la primera verificación; la
+    // corrección ya no afirma ausencia, así que no hay segunda acusación.
+    expect(dondeAparecen).toHaveBeenCalledWith(["737"]);
+    expect(resultado.informe.afirmaciones.every((a) => a.veredicto !== verificador.AUSENCIA_REFUTADA)).toBe(true);
+  });
+
+  test("bloqueantes incluye la ausencia refutada", () => {
+    const informe: Verificacion = {
+      afirmaciones: [
+        { texto: "No encuentro X", cita: "", veredicto: verificador.AUSENCIA_REFUTADA, motivo: "m", fragmento_id: "", fragmentos: [] },
+      ],
+      evidencia_sin_cubrir: [], cobertura: [], citas_sin_resolver: [], fidelidad: null, ok: false, nota: "",
+    };
+    expect(revisor.bloqueantes(informe)).toHaveLength(1);
+    expect(revisor.aprobada(informe)).toBe(false);
+  });
+});

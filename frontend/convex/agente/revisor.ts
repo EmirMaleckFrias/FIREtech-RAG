@@ -14,6 +14,7 @@ import * as gateway from "../lib/gateway";
 import { Telemetria } from "../lib/telemetry";
 import { claveCita, nuevaRegexCitas, type Fragmento } from "../lib/citas";
 import * as verificador from "./verificador";
+import type { Hallazgo } from "./ausencias";
 import type { Afirmacion, Verificacion } from "./verificador";
 
 const SISTEMA = `Eres el redactor final de un sistema RAG para investigación
@@ -55,6 +56,9 @@ export interface OpcionesRevision {
    *  y la usuaria vea qué pasa: cuántas afirmaciones se están juzgando y
    *  cuántas han vuelto, o qué ronda de corrección va y con cuántos fallos. */
   alAvanzar?: (evento: EventoRevision) => void;
+  /** Comprobación de ausencias contra el índice, inyectada por el bucle (ver
+   *  verificador.OpcionesVerificacion.dondeAparecen). */
+  dondeAparecen?: (expresiones: string[]) => Promise<Hallazgo[]>;
 }
 
 /** Lo que la barrera va haciendo. `verificando` llega desde el verificador
@@ -96,6 +100,7 @@ const BLOQUEANTES: ReadonlySet<string> = new Set([
   verificador.NO_SOSTENIDA,
   verificador.CITA_NO_RESUELVE,
   verificador.SIN_CITA,
+  verificador.AUSENCIA_REFUTADA,
 ]);
 
 /** Afirmaciones cuya cita no las sostiene. */
@@ -207,6 +212,18 @@ export function _critica(informe: Verificacion, opciones: OpcionesCritica = {}):
           "El dato existe pero es de otra entidad: o lo atribuyes explícitamente a esa " +
           "entidad, nombrándola en la misma frase y sin presentarlo como respuesta a lo " +
           "que se pregunta, o lo eliminas y declaras que para lo preguntado no lo encuentras.",
+      );
+      continue;
+    }
+    if (af.veredicto === verificador.AUSENCIA_REFUTADA) {
+      // La frase dice que algo no está y sí está: la búsqueda no lo trajo.
+      // Se le dice al redactor exactamente qué escribir, porque su tendencia
+      // es rellenar con lo que cree que dice esa página, y no la tiene.
+      lineas.push(
+        `- ausencia refutada: '${af.texto.replace(/'/g, "\\'")}'; ${motivo}. ` +
+          "No puedes afirmar que eso no está en los documentos: la búsqueda no lo trajo, que es distinto. " +
+          "Sustituye la frase por la fórmula \"No pude comprobar X en los documentos\" (con X lo que " +
+          "declarabas ausente) o elimínala. No escribas lo que dice esa página: no la tienes.",
       );
       continue;
     }
@@ -756,6 +773,7 @@ export async function revisarAntesDePublicar(
       // otra entidad cuando la frase no nombra la preguntada.
       pregunta,
       alAvanzar: (hechas, total) => opciones.alAvanzar?.({ fase: "verificando", hechas, total }),
+      dondeAparecen: opciones.dondeAparecen,
     });
     for (const [k, af] of verificador.veredictosDe(informe)) conocidos.set(k, af);
     return informe;

@@ -28,6 +28,7 @@ const VEREDICTOS: readonly Veredicto[] = [
   'no_sostenida',
   'cita_no_resuelve',
   'sin_cita',
+  'ausencia_refutada',
   'sin_verificar',
 ];
 

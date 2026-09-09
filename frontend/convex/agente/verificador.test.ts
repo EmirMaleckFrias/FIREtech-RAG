@@ -16,6 +16,7 @@ import { cita, type Fragmento } from "../lib/citas";
 import * as revisor from "./revisor";
 import {
   _esAusenciaPura,
+  AUSENCIA_REFUTADA,
   CITA_NO_RESUELVE,
   NO_SOSTENIDA,
   PARCIAL,
@@ -468,7 +469,7 @@ describe("troceo", () => {
   });
 
   test("_trocear: sin citas no hay trozos y lo dice; con citas la cabecera y la puntuación se saltan", () => {
-    expect(_trocear("No encuentro nada.")).toEqual({ trozos: [], hayCitas: false });
+    expect(_trocear("No encuentro nada.")).toEqual({ trozos: [], hayCitas: false, ausencias: [] });
     const { trozos, hayCitas } = _trocear("Resultados:\n- Uno [a.pdf, pág. 1].\n; Dos [b.pdf, pág. 2].");
     expect(hayCitas).toBe(true);
     expect(trozos).toEqual([
@@ -1490,5 +1491,85 @@ describe("declaraciones puras de ausencia", () => {
     expect(veredictos(informe)).toContain(SIN_CITA);
     expect(informe.ok).toBe(false);
     expect(informe.afirmaciones.some((a) => a.veredicto === SIN_CITA && a.texto.includes("0,5 A"))).toBe(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Ausencias refutadas por el índice
+// ---------------------------------------------------------------------------
+describe("ausencias refutadas", () => {
+  const hallazgo737 = vi.fn(async (exprs: string[]) =>
+    exprs.filter((e) => e === "737").map((e) => ({ expresion: e, sourceFile: "M6U1.pdf", page: 12 })),
+  );
+
+  test("el caso medido: una abstención entera sobre el 737 se refuta con la página donde sí está", async () => {
+    hallazgo737.mockClear();
+    const ch = frag("c1", "El generador de la APU asumirá la carga del generador fallido.", "M6U1.pdf", 31);
+    const informe = await verificar(
+      "No encuentro que esto se describa específicamente para el 737 en los documentos.",
+      [ch], null, null, undefined, { dondeAparecen: hallazgo737 },
+    );
+    expect(hallazgo737).toHaveBeenCalledWith(["737"]);
+    expect(veredictos(informe)).toEqual([AUSENCIA_REFUTADA]);
+    expect(informe.ok).toBe(false);
+    expect(informe.afirmaciones[0].motivo).toContain("M6U1.pdf, pág. 12");
+    expect(informe.afirmaciones[0].motivo).toContain("no recuperó");
+    expect(revisor.aprobada(informe)).toBe(false);
+  });
+
+  test("en una respuesta con citas, la línea de 'Lo que no está' que miente entra como bloqueante y las demás no", async () => {
+    hallazgo737.mockClear();
+    const ch = frag("c1", "El generador de la APU asumirá la carga del generador fallido.", "M6U1.pdf", 31);
+    espia.mockResolvedValueOnce(respuestaJson({ veredictos: [{ i: 0, veredicto: "sostenida", motivo: "coincide" }] }));
+    const informe = await verificar(
+      `El generador de la APU asume la carga del generador fallido ${cita(ch)}.\n\n` +
+        "## Lo que no está\n\n" +
+        "- No encuentro que esto se describa específicamente para el 737 en los documentos.\n" +
+        "- No encuentro qué barras concretas recibe la APU en los documentos.\n" +
+        "- No encuentro la figura 14-2 en los documentos.\n",
+      [ch], null, null, undefined, { dondeAparecen: hallazgo737 },
+    );
+    // APU estaba en la evidencia: esa frase no se pregunta. 14-2 se pregunta y
+    // no aparece. Solo el 737 se refuta.
+    expect(hallazgo737).toHaveBeenCalledWith(["737", "14-2"]);
+    expect(veredictos(informe).sort()).toEqual([AUSENCIA_REFUTADA, SOSTENIDA].sort());
+    const refutada = informe.afirmaciones.find((a) => a.veredicto === AUSENCIA_REFUTADA)!;
+    expect(refutada.texto).toContain("737");
+    expect(informe.ok).toBe(false);
+  });
+
+  test("ADVERSARIAL: 'no pude comprobar X' no se refuta, porque no afirma ausencia (si no, la corrección no tendría salida)", async () => {
+    hallazgo737.mockClear();
+    const ch = frag("c1", "texto", "M6U1.pdf", 31);
+    const informe = await verificar(
+      "No pude comprobar lo del 737 en los documentos.",
+      [ch], null, null, undefined, { dondeAparecen: hallazgo737 },
+    );
+    expect(hallazgo737).not.toHaveBeenCalled();
+    expect(veredictos(informe)).toEqual([]);
+    expect(informe.ok).toBe(true);
+  });
+
+  test("ADVERSARIAL: si el índice falla no se acusa a nadie, y sin callback nada cambia", async () => {
+    const ch = frag("c1", "texto", "M6U1.pdf", 31);
+    const roto = vi.fn(async () => {
+      throw new Error("índice caído");
+    });
+    const conFallo = await verificar("No encuentro nada del 737 en los documentos.", [ch], null, null, undefined, { dondeAparecen: roto });
+    expect(roto).toHaveBeenCalled();
+    expect(veredictos(conFallo)).toEqual([]);
+    expect(conFallo.ok).toBe(true);
+    const sinCallback = await verificar("No encuentro nada del 737 en los documentos.", [ch]);
+    expect(veredictos(sinCallback)).toEqual([]);
+    expect(sinCallback.ok).toBe(true);
+  });
+
+  test("ADVERSARIAL: un hallazgo de una expresión que ninguna frase declaraba ausente se ignora", async () => {
+    const ch = frag("c1", "texto", "M6U1.pdf", 31);
+    const raro = vi.fn(async () => [{ expresion: "A320", sourceFile: "otro.pdf", page: 5 }]);
+    const informe = await verificar("No encuentro nada del 737 en los documentos.", [ch], null, null, undefined, { dondeAparecen: raro });
+    expect(veredictos(informe)).toEqual([]);
+    expect(informe.ok).toBe(true);
   });
 });

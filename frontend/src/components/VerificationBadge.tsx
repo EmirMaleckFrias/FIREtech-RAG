@@ -34,6 +34,7 @@ const ESTILO: Record<Veredicto, { etiqueta: string; clase: string; grave: boolea
   no_sostenida: { etiqueta: 'No sostenida', clase: 'verif-mal', grave: true },
   cita_no_resuelve: { etiqueta: 'Cita sin fuente', clase: 'verif-mal', grave: true },
   sin_cita: { etiqueta: 'Sin ninguna cita', clase: 'verif-mal', grave: true },
+  ausencia_refutada: { etiqueta: 'Dice que no está, y sí está', clase: 'verif-mal', grave: true },
   sin_verificar: { etiqueta: 'Sin comprobar', clase: 'verif-aviso', grave: true },
 };
 
@@ -84,6 +85,8 @@ export function VerificationBadge({ informe }: VerificationBadgeProps) {
     ? `${sostenidas} de ${afirmaciones.length} afirmaciones respaldadas por su fuente`
     : [
         cuenta(afirmaciones, 'sin_cita') > 0 && 'la respuesta no cita ninguna fuente',
+        cuenta(afirmaciones, 'ausencia_refutada') > 0 &&
+          `${cuenta(afirmaciones, 'ausencia_refutada')} afirmación(es) de ausencia desmentida(s) por los documentos`,
         cuenta(afirmaciones, 'cita_no_resuelve') > 0 &&
           `${cuenta(afirmaciones, 'cita_no_resuelve')} cita(s) sin fuente recuperada`,
         otraEntidad > 0 && `${otraEntidad} dato(s) de otra entidad`,

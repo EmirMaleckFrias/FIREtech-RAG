@@ -220,6 +220,9 @@ export type Veredicto =
   | 'cita_no_resuelve'
   /** La respuesta afirma y no cita nada, sin declarar ausencia de evidencia. */
   | 'sin_cita'
+  /** Declara que algo no está en los documentos y sí está: la expresión que
+   *  declara ausente aparece en un fragmento que la búsqueda no trajo. */
+  | 'ausencia_refutada'
   | 'sin_verificar';
 
 export interface Afirmacion {

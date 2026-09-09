@@ -2082,3 +2082,73 @@ describe("alcance por el contenido cuando la pista no nombra el fichero", () => 
     expect(escrituras.every((c) => !c.alcance || (c.alcance as { documento: string | null }).documento === null)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Comprobación de ausencias: la conexión del bucle con el índice
+// ---------------------------------------------------------------------------
+describe("comprobación de ausencias contra el índice", () => {
+  type Opciones = { dondeAparecen?: (e: string[]) => Promise<Array<{ expresion: string; sourceFile: string; page: number | null }>> };
+  async function conChunk(t: Base, ids: Ids, fileName: string, text: string, page: number): Promise<Id<"documents">> {
+    return await t.run(async (ctx) => {
+      const documentRef = await ctx.db.insert("documents", {
+        fileName, sha256: fileName, pages: 1, chunks: 1, status: "ready", propietario: ids.userId, ingestadoEn: 1,
+      });
+      await ctx.db.insert("chunks", {
+        text, contexto: "", embedding: [], sourceFile: fileName, page, chunkType: "text",
+        documentId: String(documentRef), documentRef, propietario: ids.userId,
+      });
+      return documentRef;
+    });
+  }
+
+  test("la barrera y la verificación directa reciben la comprobación, que busca en el corpus de quien pregunta y recuerda lo ya preguntado", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    await conChunk(t, ids, "--M6U1_PDF.pdf", "En el ejemplo del Boeing 737 las fuentes principales son GEN 1 y GEN 2.", 12);
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const { ctx } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    const opciones = revisar.mock.calls[0][8] as Opciones;
+    expect(typeof opciones.dondeAparecen).toBe("function");
+    const primera = await opciones.dondeAparecen!(["737", "A320"]);
+    expect(primera).toEqual([{ expresion: "737", sourceFile: "--M6U1_PDF.pdf", page: 12 }]);
+    // Memoria: se borra el fragmento y la respuesta sigue siendo la misma,
+    // porque la expresión ya se preguntó en este turno.
+    await t.run(async (ctx) => {
+      for (const c of await ctx.db.query("chunks").collect()) await ctx.db.delete(c._id);
+    });
+    expect(await opciones.dondeAparecen!(["737"])).toEqual(primera);
+  });
+
+  test("ADVERSARIAL: con la pregunta acotada a un documento, lo que está en otro documento no refuta nada", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    await conChunk(t, ids, "M6U1.pdf", "Este documento habla de contactores y barras.", 3);
+    await conChunk(t, ids, "otro.pdf", "El Boeing 737 aparece aquí, en otro documento.", 8);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, documento: "el PDF M6U1" });
+    porPunto = { e0: { fragmentos: [frag("c1", { sourceFile: "M6U1.pdf" })] } };
+    const { ctx } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    const opciones = revisar.mock.calls[0][8] as Opciones;
+    // El 737 solo está en el otro documento: dentro del alcance no existe.
+    expect(await opciones.dondeAparecen!(["737"])).toEqual([]);
+    // Y lo que sí está en el documento acotado se encuentra con su página.
+    expect(await opciones.dondeAparecen!(["contactores"])).toEqual([{ expresion: "contactores", sourceFile: "M6U1.pdf", page: 3 }]);
+  });
+
+  test("sin revisión previa, la verificación directa también lleva la comprobación", async () => {
+    process.env.ENABLE_PRE_RESPONSE_REVIEW = "false";
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    const { ctx } = ctxDirecto(t);
+    await handlerDirecto(ctx, argsDe(ids));
+    expect(revisar).not.toHaveBeenCalled();
+    const opciones = verificar.mock.calls[verificar.mock.calls.length - 1][5] as Opciones;
+    expect(typeof opciones.dondeAparecen).toBe("function");
+  });
+});

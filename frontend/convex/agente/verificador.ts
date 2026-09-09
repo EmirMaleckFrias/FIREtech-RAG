@@ -51,6 +51,7 @@ import {
   pareceAbstencion,
   type Fragmento,
 } from "../lib/citas";
+import { apareceEn, expresionesAComprobar, type Hallazgo } from "./ausencias";
 
 // Veredictos posibles de una afirmación. "sin_verificar" es el estado por
 // defecto y el que se usa ante cualquier fallo: nunca se aprueba por omisión.
@@ -64,6 +65,13 @@ export const CITA_NO_RESUELVE = "cita_no_resuelve";
 // revés. Una abstención legítima tampoco lleva citas, así que las dos se
 // distinguen por el TEXTO, con los mismos patrones que el evaluador.
 export const SIN_CITA = "sin_cita";
+// La respuesta declara que algo NO está en los documentos y sí está: la
+// expresión que declara ausente aparece, como palabra entera, en un fragmento
+// del alcance que la búsqueda no trajo. Es una búsqueda que no llegó, no una
+// ausencia, y para quien investiga hace el mismo daño que un dato inventado.
+// Veredicto determinista (ver agente/ausencias.ts), bloqueante: el redactor
+// tiene que cambiar "no encuentro X" por "no pude comprobar X" o quitarlo.
+export const AUSENCIA_REFUTADA = "ausencia_refutada";
 export const SIN_VERIFICAR = "sin_verificar";
 
 export const VEREDICTOS_MODELO: ReadonlySet<string> = new Set([SOSTENIDA, NO_SOSTENIDA, PARCIAL]);
@@ -197,6 +205,11 @@ const TIENE_CONTENIDO = /[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/;
 const AFIRMA_CIFRA =
   /\d[.,]\d|\d\s*%|\b(?:fue|fueron|es|son|era|eran|hubo|hab[íi]an?|alcanz[óo]|mide|miden|equivale|represent[óa]|incluy[óe])\b[^.;]{0,24}\d/i;
 const OTRA_CLAUSULA = /\b(?:pero|aunque|sin embargo|no obstante|en cambio|mientras que)\b|;/i;
+// La fórmula de "no pude comprobar X" NO afirma que X no esté: dice que la
+// comprobación no llegó. Por eso no se refuta contra el índice; si se
+// refutara, la corrección que la barrera pide ("cambia no encuentro por no
+// pude comprobar") volvería a caer en la ronda siguiente, sin salida.
+const NO_COMPROBADO = /no (?:pude|se pudo|fue posible) comprobar/i;
 // Una línea que es un encabezado Markdown: "## Resultados" o "**Lo que no
 // está**". El Python solo reconocía los encabezados que acaban en ":", y el
 // modelo actual escribe los suyos en negrita: sin esto, "**Lo que no está**"
@@ -494,11 +507,14 @@ function trozoDe(respuesta: string, texto: string, citas: CitaHallada[], encabez
  *
  *  `hayCitas` dice si apareció alguna cita en todo el texto: es lo único que
  *  decide si `pareceAbstencion` sobre la respuesta ENTERA tiene la palabra. */
-export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolean } {
+export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolean; ausencias: string[] } {
   // Se acumulan textos con sus citas halladas y se convierten en trozos al
   // final, porque una cita consecutiva se añade a TODAS las frases del tramo
   // en curso después de haberlas emitido.
   const acumulado: Array<{ texto: string; citas: CitaHallada[]; encabezado: string }> = [];
+  // Las declaraciones puras de ausencia que se saltan: no se auditan contra
+  // una cita, pero sí se comprueban contra el índice (`refutarAusencias`).
+  const ausencias: string[] = [];
   // Bajo qué encabezado cae una posición: el último que empieza antes.
   const encabezados = encabezadosDe(respuesta);
   const encabezadoEn = (pos: number): string => {
@@ -550,7 +566,10 @@ export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolea
       // Una cita que iba delante de todo el texto pertenece a la primera
       // frase que la sigue, que pasa a ser dueña de ella.
       const previas = k === 0 ? huerfanas : [];
-      if (!esDuena && !previas.length && esAusenciaPura(frase)) return;
+      if (!esDuena && !previas.length && esAusenciaPura(frase)) {
+        ausencias.push(frase);
+        return;
+      }
       indicesTramo.push(acumulado.length);
       acumulado.push({ texto: frase, citas: [...previas, hallada], encabezado: encabezadoEn(posFrase + 1) });
     });
@@ -570,7 +589,8 @@ export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolea
         huerfanas = [];
         continue;
       }
-      if (!esAusenciaPura(frase)) acumulado.push({ texto: frase, citas: [], encabezado });
+      if (esAusenciaPura(frase)) ausencias.push(frase);
+      else acumulado.push({ texto: frase, citas: [], encabezado });
     }
   }
   // Respuesta que es solo citas, sin una frase con contenido: no se pierden.
@@ -579,6 +599,7 @@ export function _trocear(respuesta: string): { trozos: Trozo[]; hayCitas: boolea
   return {
     trozos: acumulado.map(({ texto, citas, encabezado }) => trozoDe(respuesta, texto, citas, encabezado)),
     hayCitas,
+    ausencias,
   };
 }
 
@@ -1060,6 +1081,57 @@ export interface OpcionesVerificacion {
    *  o mal. Es lo que permite enseñar "Comprobando 31 afirmaciones · 12
    *  listas" en vez de un título mudo durante dos minutos. */
   alAvanzar?: (hechas: number, total: number) => void;
+  /** Dónde aparecen en el corpus (y en el alcance del turno) unas expresiones
+   *  que la respuesta declara ausentes. Lo inyecta el bucle, que es quien
+   *  tiene acceso al índice; sin él las ausencias no se comprueban, que es el
+   *  comportamiento anterior. Ver agente/ausencias.ts. */
+  dondeAparecen?: (expresiones: string[]) => Promise<Hallazgo[]>;
+}
+
+/** Las declaraciones de ausencia que el índice desmiente, como afirmaciones
+ *  `AUSENCIA_REFUTADA` con el sitio donde sí aparece la expresión. Solo se
+ *  pregunta por las expresiones que no estaban en la evidencia recuperada
+ *  (si estaban, la frase habla de una relación, no de que el término no
+ *  exista). Un fallo del índice no acusa a nadie: se traga y no hay veredicto. */
+async function refutarAusencias(
+  ausencias: string[],
+  fragmentos: Fragmento[],
+  opciones: OpcionesVerificacion,
+  t: Telemetria,
+): Promise<Afirmacion[]> {
+  if (!opciones.dondeAparecen) return [];
+  // Solo las que afirman ausencia; "no pude comprobar" queda fuera (ver NO_COMPROBADO).
+  const afirmanAusencia = ausencias.filter((f) => !NO_COMPROBADO.test(f));
+  if (!afirmanAusencia.length) return [];
+  const expresiones = expresionesAComprobar(afirmanAusencia, fragmentos.map((f) => f.text));
+  if (!expresiones.length) return [];
+  let hallazgos: Hallazgo[];
+  try {
+    hallazgos = await opciones.dondeAparecen(expresiones);
+  } catch (exc) {
+    console.warn("comprobación de ausencias no disponible", String(exc).slice(0, 160));
+    return [];
+  }
+  const salida: Afirmacion[] = [];
+  for (const h of hallazgos) {
+    const frase = afirmanAusencia.find((f) => apareceEn(h.expresion, [f]));
+    // Una acusación por frase: si dos expresiones de la misma frase aparecen,
+    // basta la primera para que el redactor la corrija.
+    if (!frase || salida.some((a) => a.texto === frase)) continue;
+    const donde = `${h.sourceFile}${h.page !== null ? `, pág. ${h.page}` : ""}`;
+    salida.push(
+      afirmacion({
+        texto: frase,
+        cita: "",
+        veredicto: AUSENCIA_REFUTADA,
+        motivo:
+          `«${h.expresion}» sí aparece en ${donde}, en un fragmento que la búsqueda no recuperó: ` +
+          "no se puede afirmar que no está en los documentos",
+      }),
+    );
+  }
+  if (salida.length) t.incr("ausencias_refutadas", salida.length);
+  return salida;
 }
 
 export async function verificar(
@@ -1073,13 +1145,36 @@ export async function verificar(
   const a = ajustes();
   const t = tel ?? new Telemetria();
   const previos = opciones.veredictosPrevios;
-  const { trozos, hayCitas } = _trocear(respuesta);
+  const { trozos, hayCitas, ausencias } = _trocear(respuesta);
 
   if (!hayCitas) {
     // Sin ninguna cita hay dos casos opuestos y hay que separarlos, porque
     // tratarlos igual convierte el fallo más grave en un visto bueno. Es el
     // ÚNICO sitio donde `pareceAbstencion` sobre el texto entero decide algo.
     if (pareceAbstencion(respuesta)) {
+      // Una abstención entera también puede ser falsa: "No encuentro nada del
+      // 737 en los documentos" con el 737 en la página 12. Es el caso más
+      // corto y más frecuente de ausencia falsa, y aquí no hay cita que la
+      // delate: solo el índice.
+      const frasesAusencia = frasesDe(respuesta).filter((f) => esAusenciaPura(f));
+      const refutadas = await refutarAusencias(
+        frasesAusencia.length ? frasesAusencia : [respuesta.trim()],
+        fragmentos,
+        opciones,
+        t,
+      );
+      if (refutadas.length) {
+        return conCobertura(
+          informeVacio({
+            afirmaciones: refutadas,
+            ok: false,
+            nota: "la respuesta se abstiene, pero declara ausente algo que sí está en los documentos",
+          }),
+          evidenciaRequerida,
+          mapaPlan,
+          fragmentos,
+        );
+      }
       return conCobertura(
         informeVacio({ nota: "la respuesta se abstiene y no cita: correcto, nada que atribuir" }),
         evidenciaRequerida,
@@ -1222,8 +1317,13 @@ export async function verificar(
   }
   if (reutilizadas) t.incr("veredictos_reutilizados", reutilizadas);
 
+  // Las declaraciones de ausencia que el troceador saltó se comprueban contra
+  // el índice; las que resulten falsas entran al informe como bloqueantes.
+  const refutadas = await refutarAusencias(ausencias, fragmentos, opciones, t);
+  afirmaciones.push(...refutadas);
+
   let nota = "";
-  let ok = !haySinCita;
+  let ok = !haySinCita && !refutadas.length;
   if (pendientes.length) {
     const lote = Math.max(1, Math.floor(a.maxAfirmacionesPorLote) || 1);
     const resultado = await dictaminarEnLotes(pendientes, lote, a, t, opciones.pregunta ?? "", opciones.alAvanzar);

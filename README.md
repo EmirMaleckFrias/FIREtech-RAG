@@ -84,6 +84,11 @@ operación diaria (cuentas, documentos, telemetría, variables) en
   respuesta empieza diciéndolo. Cuando la pista no identifica uno ("el PDF" con varios PDF) se
   busca en todos y la respuesta dice de qué documento sale cada dato. El paso de buscar enseña a
   qué se acotó.
+- **Decir que algo no está también se comprueba.** Una respuesta que declara "no encuentro X
+  en los documentos" no tiene cita que auditar, y podía ser falsa cuando la búsqueda no llegó a
+  la página correcta. Ahora la expresión declarada ausente se busca en el índice, dentro del
+  alcance de la pregunta; si aparece en un fragmento que no se recuperó, la barrera bloquea la
+  frase y exige cambiarla por "no pude comprobar X".
 - **Cada parte de la pregunta se marca al terminar.** Las partes se buscan en paralelo pero
   acaban en momentos distintos, y cada una pasa a verde en cuanto cierra la suya, con sus
   fragmentos y sus documentos, en vez de aparecer todas hechas de golpe al final.

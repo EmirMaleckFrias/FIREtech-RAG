@@ -34,6 +34,7 @@ import * as evidencia from "./evidencia";
 import * as verificador from "./verificador";
 import * as revisor from "./revisor";
 import * as alcance from "./alcance";
+import { normalizar as claveDeExpresion, type Hallazgo } from "./ausencias";
 import {
   HERRAMIENTAS,
   INSTRUCCION_SIN_DOCUMENTOS,
@@ -381,6 +382,32 @@ export const correr = internalAction({
             }
           : undefined;
 
+      // Comprobación de ausencias (agente/ausencias.ts): el verificador pide
+      // dónde aparecen las expresiones que la respuesta declara ausentes, y
+      // esto lo resuelve contra el índice, dentro del alcance del turno. Con
+      // memoria: la misma expresión se pregunta una vez aunque la barrera
+      // verifique tres veces.
+      const memoAusencias = new Map<string, Hallazgo | null>();
+      const dondeAparecen = async (expresiones: string[]): Promise<Hallazgo[]> => {
+        const nuevas = expresiones.filter((e) => !memoAusencias.has(claveDeExpresion(e)));
+        if (nuevas.length) {
+          const hallazgos = await ctx.runQuery(internal.agente.ausencias.dondeAparecen, {
+            propietario: args.userId,
+            documentId: filtrosAlcance.documentId,
+            expresiones: nuevas,
+          });
+          for (const e of nuevas) {
+            memoAusencias.set(
+              claveDeExpresion(e),
+              hallazgos.find((h) => claveDeExpresion(h.expresion) === claveDeExpresion(e)) ?? null,
+            );
+          }
+        }
+        return expresiones
+          .map((e) => memoAusencias.get(claveDeExpresion(e)))
+          .filter((h): h is Hallazgo => h !== null && h !== undefined);
+      };
+
       // 2. Plan de evidencia. El ancla e0 es SIEMPRE la pregunta literal.
       await actualizar({ estado: "buscando", alcance: alcancePublicable(true) });
       if (abandonado) return;
@@ -579,6 +606,7 @@ export const correr = internalAction({
             .verificar(borradorParcial.slice(0, corte), [...acumulado.values()], requerida, mapa, tel, {
               veredictosPrevios: conocidos,
               pregunta: consulta,
+              dondeAparecen,
             })
             .then((inf) => {
               for (const [k, af] of verificador.veredictosDe(inf)) conocidos.set(k, af);
@@ -937,6 +965,7 @@ export const correr = internalAction({
           {
             veredictosIniciales: conocidos,
             alAvanzar: (evento) => void escribirProgreso(textoDeProgreso(evento, conocidos.size)),
+            dondeAparecen,
           },
         );
         contenido = r.contenido;
@@ -986,6 +1015,7 @@ export const correr = internalAction({
           informe = await verificador.verificar(contenido, fragmentos, requerida, mapa, tel, {
             pregunta: consulta,
             veredictosPrevios: conocidos,
+            dondeAparecen,
           });
         } catch (exc) {
           console.error("La verificación falló; la respuesta se publica sin anotar", exc);

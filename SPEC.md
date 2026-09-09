@@ -569,6 +569,28 @@ anterior hasta ella. Dentro del tramo:
    adversativa y una cifra con forma de medida, así que se audita).
 5. Encabezados de lista (terminan en `:`), restos sin letras ni dígitos y frases que ya llevan
    `[inventario del índice]` no se juzgan.
+6. Las declaraciones puras de ausencia que se saltan en 2 y 4 **se comprueban contra el índice**
+   (`agente/ausencias.ts`). Una ausencia no tiene cita contra la que auditarse, así que hasta
+   ahora salía a pantalla con la fidelidad intacta aunque fuera falsa. Medido el 9 sep 2026 con
+   una pregunta descuidada de varias partes en modo normal: "No encuentro que esto se describa
+   específicamente para el 737 en los documentos", cuando el PDF dedica al Boeing 737 las páginas
+   12 y 14; esas páginas no se recuperaron porque una sola búsqueda se repartió entre cuatro
+   subpreguntas, y el modelo confundió "no está en lo que me dieron" con "no está en el documento".
+   Para quien investiga, una ausencia falsa hace el mismo daño que un dato inventado.
+
+   Lo único que se puede demostrar con certeza, y lo único que se afirma: la frase declara ausente
+   una **expresión identificadora** (sigla en mayúsculas, nombre propio, o token con dígitos que
+   no sea un número pequeño suelto ni un año: "737", "P9", "14-2", "A320", "APU", "Boeing 737",
+   "90 KVA"; no "cuatro", "3", "28" ni "2023"), esa expresión **no aparece en ningún fragmento
+   recuperado** (si aparece, la frase habla de una relación entre cosas que sí vio, no de que el
+   término no exista) y **sí aparece como palabra entera y frase contigua** en un fragmento del
+   alcance del turno (el corpus de quien pregunta, o el documento al que se acotó). Entonces la
+   afirmación entra al informe con veredicto **`ausencia_refutada`**, bloqueante, con el fichero y
+   la página donde sí aparece. La fórmula "No pude comprobar X" no se refuta: no afirma ausencia,
+   y es justo lo que la crítica pide escribir en su lugar (sin contar lo que dice esa página, que
+   el redactor no tiene). Una abstención entera sin citas pasa por la misma comprobación. El bucle
+   inyecta la búsqueda (`OpcionesVerificacion.dondeAparecen`) con memoria por turno; si el índice
+   falla no se acusa a nadie. Contador `ausencias_refutadas`.
 
 Si la respuesta **no tiene ninguna cita**: si casa con los patrones de abstención, informe
 vacío y correcto ("nada que atribuir"); si cita el inventario, correcto; en cualquier otro
