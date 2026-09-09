@@ -13,8 +13,10 @@ export const NOMBRE_NUBE: Record<ProveedorNube, string> = {
 };
 
 export const ICONO_NUBE: Record<ProveedorNube, string> = {
-  google: '/google-drive.svg',
-  onedrive: '/onedrive.svg',
+  // Recursos publicados por cada proveedor. No son dibujos recreados: Drive
+  // sale del Brand Resource Center de Google y OneDrive de su CDN de Office.
+  google: 'https://www.gstatic.com/marketing-cms/assets/images/a1/a6/49e0b7d9453b9b2a56526c0df3ff/drive.webp=s160-fcrop64=1,00000000ffffffff-rw',
+  onedrive: 'https://res.cdn.office.net/files/fabric-cdn-prod_20221209.001/assets/brand-icons/product/svg/onedrive_48x1.svg',
 };
 
 export const PROVEEDORES_NUBE: readonly ProveedorNube[] = ['google', 'onedrive'];
