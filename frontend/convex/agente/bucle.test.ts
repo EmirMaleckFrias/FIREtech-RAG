@@ -560,6 +560,7 @@ describe("camino documental, modo normal", () => {
         recuperacion: "hibrida",
         relevancia_verificada: true,
         ms: 25,
+        en_curso: false,
       },
     ]);
     const fuentes = fuentesDe(m);
@@ -922,6 +923,7 @@ describe("búsquedas extra", () => {
       recuperacion: "hibrida",
       relevancia_verificada: true,
       ms: expect.any(Number),
+      en_curso: false,
     });
     const catalogo = herramientaDe(modelo.llamadas[1], "call_inv");
     expect(catalogo).toContain("Hay 2 documentos indexados y 8 fragmentos en total");
@@ -1262,7 +1264,8 @@ describe("escrituras del avance", () => {
     const t = nuevaBase();
     const ids = await sembrar(t);
     porPunto = { e0: { fragmentos: [frag("c1")] } };
-    // 3 = hops+sources del plan, 4 = "redactando".
+    // 3 = los marcadores del plan (uno por punto, antes de buscar),
+    // 4 = hops+sources del plan ya buscado.
     const { ctx, escrituras } = ctxDirecto(t, { falla: (n) => n === 3 || n === 4 });
 
     await handlerDirecto(ctx, argsDe(ids));
@@ -1270,7 +1273,7 @@ describe("escrituras del avance", () => {
     const m = await fila(t, ids.messageId);
     expect(m.estado).toBe("listo");
     expect(m.content).toBe(RESPUESTA);
-    expect(escrituras).toHaveLength(6);
+    expect(escrituras).toHaveLength(7);
     expect(stream).toHaveBeenCalledTimes(1);
     expect(revisar).toHaveBeenCalledTimes(1);
     // Lo que falló en la escritura 3 se recupera en la publicación final.
@@ -1819,6 +1822,147 @@ describe("progreso del turno", () => {
     const revisando = escrituras.find((c) => c.estado === "revisando");
     expect(revisando?.progreso).toBe("Contrastando cada afirmación con su fuente");
     const m = await fila(t, ids.messageId);
+    expect(m.estado).toBe("listo");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cada parte de la pregunta se marca en cuanto termina
+// ---------------------------------------------------------------------------
+describe("los hops del plan se escriben punto por punto", () => {
+  /** El hop en la forma corta que le importa a la interfaz: "buscando" (una
+   *  búsqueda en marcha) o el estado con el que se cerró. */
+  const forma = (h: Hop): string => (h.en_curso ? "buscando" : `${h.estado}/${h.recuperacion}`);
+  const escrituraDeHops = (escrituras: Array<Record<string, unknown>>): string[][] =>
+    escrituras.filter((c) => Array.isArray(c.hops)).map((c) => (c.hops as Hop[]).map(forma));
+
+  const planDeDos = () =>
+    planificar.mockResolvedValue({
+      items: [
+        { id: "x", query: "especificidad de p-tau217", queryEn: "specificity of p-tau217", evidenceNeeded: "especificidad" },
+      ],
+      preguntaEn: "What is the AUC of p-tau217?",
+    });
+
+  test("primero un marcador por punto y luego cada punto según acaba, sin esperar a los demás", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    planDeDos();
+    porPunto = { e0: { fragmentos: [frag("c1")] }, e1: { fragmentos: [frag("c2", { page: 8 })] } };
+    // El segundo punto del plan acaba ANTES que el primero, que es lo que pasa
+    // de verdad: se buscan en paralelo y cada calificador tarda lo suyo.
+    ejecutarPlan.mockImplementation(async (_ctx, _propietario, plan, _modo, _filtros, _tel, _limite, opciones) => {
+      const ev = evidenciaDe(plan);
+      for (const i of [1, 0]) {
+        opciones?.alTerminarPunto?.(ev.puntos[i], i);
+        await Promise.resolve();
+      }
+      return ev;
+    });
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids, { modo: EXTENDIDO.nombre }));
+
+    const secuencia = escrituraDeHops(escrituras);
+    // Los dos marcadores, luego el segundo punto hecho, luego los dos.
+    expect(secuencia.slice(0, 3)).toEqual([
+      ["buscando", "buscando"],
+      ["buscando", "cubierto/hibrida"],
+      ["cubierto/hibrida", "cubierto/hibrida"],
+    ]);
+    // Y el marcador llega ANTES de que se ejecute el plan: la interfaz enseña
+    // las partes buscando desde el primer instante.
+    const antesDelPlan = escrituras.findIndex((c) => Array.isArray(c.hops));
+    expect(antesDelPlan).toBeGreaterThanOrEqual(0);
+    expect(escrituras[antesDelPlan].hops).toHaveLength(2);
+
+    // El estado final es exactamente el de siempre: los hops del retorno, con
+    // su tiempo y sus documentos, y ninguno marcado como en curso.
+    const m = await fila(t, ids.messageId);
+    const finales = hopsDe(m);
+    expect(finales.map((h) => [h.n, h.plan_item, h.resultados, h.estado])).toEqual([
+      [1, "e0", 1, "cubierto"],
+      [2, "e1", 1, "cubierto"],
+    ]);
+    expect(finales.every((h) => h.en_curso === false || h.en_curso === undefined)).toBe(true);
+    expect(finales.every((h) => Number(h.ms ?? 0) > 0)).toBe(true);
+  });
+
+  test("ADVERSARIAL: un punto que falla al instante se escribe como fallo, no como buscando", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    planDeDos();
+    // El primer punto falla con cero resultados y cero ms: la misma terna que
+    // el marcador. Si "en curso" se infiriera de ella, esa parte de la
+    // pregunta se quedaría con el reloj girando hasta el final del turno.
+    porPunto = { e0: { fragmentos: [], recuperacion: "error" }, e1: { fragmentos: [frag("c2")] } };
+    ejecutarPlan.mockImplementation(async (_ctx, _propietario, plan, _modo, _filtros, _tel, _limite, opciones) => {
+      const ev = evidenciaDe(plan);
+      ev.puntos[0] = { ...ev.puntos[0], ms: 0 };
+      opciones?.alTerminarPunto?.(ev.puntos[0], 0);
+      opciones?.alTerminarPunto?.(ev.puntos[1], 1);
+      return ev;
+    });
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids, { modo: EXTENDIDO.nombre }));
+
+    const ultima = escrituraDeHops(escrituras).pop();
+    expect(ultima).toEqual(["sin_resultados/error", "cubierto/hibrida"]);
+    const fallado = hopsDe(await fila(t, ids.messageId))[0];
+    expect(fallado.en_curso).toBe(false);
+    expect(fallado.ms).toBe(0);
+  });
+
+  test("ADVERSARIAL: si el aviso de un punto no llega, el estado final sale igual del retorno", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    planDeDos();
+    porPunto = { e0: { fragmentos: [frag("c1")] }, e1: { fragmentos: [frag("c2")] } };
+    // Solo avisa del segundo, y del primero avisa con un valor equivocado.
+    ejecutarPlan.mockImplementation(async (_ctx, _propietario, plan, _modo, _filtros, _tel, _limite, opciones) => {
+      const ev = evidenciaDe(plan);
+      opciones?.alTerminarPunto?.({ ...ev.puntos[0], fragmentos: [], estado: "sin_resultados" }, 0);
+      return ev;
+    });
+    const { ctx } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids, { modo: EXTENDIDO.nombre }));
+
+    const finales = hopsDe(await fila(t, ids.messageId));
+    expect(finales.map((h) => [h.plan_item, h.resultados, h.estado])).toEqual([
+      ["e0", 1, "cubierto"],
+      ["e1", 1, "cubierto"],
+    ]);
+    expect(finales.some((h) => h.en_curso === true)).toBe(false);
+  });
+
+  test("ADVERSARIAL: una escritura de avance que llega tarde no puede pisar el estado final", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    planDeDos();
+    porPunto = { e0: { fragmentos: [frag("c1")] }, e1: { fragmentos: [frag("c2")] } };
+    ejecutarPlan.mockImplementation(async (_ctx, _propietario, plan, _modo, _filtros, _tel, _limite, opciones) => {
+      const ev = evidenciaDe(plan);
+      // Los dos avisos, sin ceder el turno: sus escrituras se encolan y se
+      // resuelven mientras el bucle sigue.
+      opciones?.alTerminarPunto?.(ev.puntos[0], 0);
+      opciones?.alTerminarPunto?.(ev.puntos[1], 1);
+      return ev;
+    });
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids, { modo: EXTENDIDO.nombre }));
+
+    // Ninguna escritura posterior a la de las fuentes deja un hop en curso.
+    const conFuentes = escrituras.findIndex((c) => Array.isArray(c.sources) && (c.sources as unknown[]).length > 0);
+    expect(conFuentes).toBeGreaterThan(0);
+    for (const c of escrituras.slice(conFuentes)) {
+      if (!Array.isArray(c.hops)) continue;
+      expect((c.hops as Hop[]).some((h) => h.en_curso)).toBe(false);
+    }
+    const m = await fila(t, ids.messageId);
+    expect(hopsDe(m).every((h) => !h.en_curso)).toBe(true);
     expect(m.estado).toBe("listo");
   });
 });

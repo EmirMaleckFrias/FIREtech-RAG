@@ -149,18 +149,21 @@ export function puntosDelPlan(plan: PlanItem[]): PlanItem[] {
 /**
  * Si la búsqueda de este hop aún no ha terminado.
  *
- * El agente inserta un hop extra ANTES de buscar, como marcador, con
- * `recuperacion: "error"`, `resultados: 0` y `ms: 0`, y lo completa al
- * terminar. Mientras el turno está en curso, esa combinación es "buscando";
- * en un turno ya cerrado nadie va a completarla, así que es un fallo real.
+ * El agente escribe un hop marcador ANTES de buscar, con `en_curso: true`, y
+ * lo sustituye (los puntos del plan) o lo completa con `en_curso: false` (los
+ * extra) al terminar. En un turno ya cerrado nadie va a completar un
+ * marcador, así que ahí es un fallo real y no "buscando".
+ *
+ * Sin el campo (mensajes escritos antes de que existiera) se infiere de la
+ * marca antigua: recuperación en error, cero resultados y cero ms. Esa
+ * inferencia NO se aplica cuando el campo viene, porque una búsqueda que
+ * falla al instante deja exactamente esos tres valores y se quedaba pintada
+ * como "buscando" hasta el final del turno.
  */
 export function hopEnCurso(h: Hop, turnoEnCurso: boolean): boolean {
-  return (
-    turnoEnCurso &&
-    h.recuperacion === 'error' &&
-    (h.resultados ?? 0) === 0 &&
-    (h.ms ?? 0) === 0
-  );
+  if (!turnoEnCurso) return false;
+  if (typeof h.en_curso === 'boolean') return h.en_curso;
+  return h.recuperacion === 'error' && (h.resultados ?? 0) === 0 && (h.ms ?? 0) === 0;
 }
 
 /** La búsqueda de este hop falló: no se pudo comprobar el punto. Distinto de

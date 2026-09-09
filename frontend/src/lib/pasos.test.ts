@@ -191,3 +191,43 @@ describe('progreso y alcance en los pasos', () => {
     expect(desconocido[1].detalle).toContain('no se reconoció «el PDF de Smith»');
   });
 });
+
+describe('las partes de la pregunta se van marcando', () => {
+  const plan = [
+    { id: 'e0', query: 'todo', query_en: '', evidence_needed: 'la pregunta entera' },
+    { id: 'e1', query: 'auc', query_en: '', evidence_needed: 'AUC' },
+    { id: 'e2', query: 'coste', query_en: '', evidence_needed: 'coste' },
+  ];
+  const marcador = (plan_item: string, n: number): Hop => ({
+    n, query: plan_item, origen: 'plan', plan_item, resultados: 0, documentos: [], estado: 'sin_resultados',
+    recuperacion: 'error', relevancia_verificada: false, ms: 0, en_curso: true,
+  });
+  const hecho = (plan_item: string, n: number): Hop =>
+    ({ ...hop({ n, plan_item }), en_curso: false });
+
+  it('buscando: el detalle cuenta cuántas partes van, y el ancla no cuenta', () => {
+    const arrancando = pasosDelTurno(
+      mensaje({ estado: 'buscando', plan, hops: [marcador('e0', 1), marcador('e1', 2), marcador('e2', 3)] }),
+    );
+    expect(arrancando[1]).toMatchObject({ estado: 'en_curso', detalle: '0 de 2 partes listas' });
+
+    // Una parte terminada (y el ancla, que no se cuenta porque no se enseña).
+    const aMedias = pasosDelTurno(
+      mensaje({ estado: 'buscando', plan, hops: [hecho('e0', 1), marcador('e1', 2), hecho('e2', 3)] }),
+    );
+    expect(aMedias[1].detalle).toBe('1 de 2 partes listas');
+  });
+
+  it('cerrado: el detalle vuelve a decir en cuántas partes se dividió la pregunta', () => {
+    const listo = pasosDelTurno(
+      mensaje({ estado: 'listo', streaming: false, plan, hops: [hecho('e0', 1), hecho('e1', 2), hecho('e2', 3)] }),
+    );
+    expect(listo[1]).toMatchObject({ estado: 'hecho', titulo: 'Buscado por partes', detalle: '2 partes de la pregunta' });
+  });
+
+  it('ADVERSARIAL: una parte que falló al instante cuenta como lista, no como pendiente', () => {
+    const fallada: Hop = { ...marcador('e1', 2), en_curso: false };
+    const pasos = pasosDelTurno(mensaje({ estado: 'buscando', plan, hops: [hecho('e0', 1), fallada, marcador('e2', 3)] }));
+    expect(pasos[1].detalle).toBe('1 de 2 partes listas');
+  });
+});

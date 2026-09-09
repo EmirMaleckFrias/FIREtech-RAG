@@ -108,10 +108,13 @@ type EstadoVivo = 'pendiente' | 'buscando' | 'encontrado' | 'sin_resultados' | '
 
 /** Estado en vivo de un punto a partir del hop que lo representa.
  *
- *  Los hops del plan llegan todos a la vez, ya cerrados, cuando termina la
- *  busqueda paralela: hasta entonces el punto esta pendiente. Un hop extra
- *  que declara el punto entra como marcador antes de buscar (buscando) y se
- *  completa al terminar. */
+ *  Los hops del plan entran como marcador ANTES de buscar (buscando) y el
+ *  agente sustituye el de cada punto en cuanto ESE punto termina, no cuando
+ *  termina el plan entero: los puntos se buscan en paralelo pero acaban a
+ *  ratos distintos, y esta lista los va marcando de uno en uno. `pendiente`
+ *  queda para el punto del plan que aun no tiene hop (el plan llego antes de
+ *  que la busqueda arrancara, o el turno murio antes). Un hop extra que
+ *  declara el punto entra igual, como marcador, y se completa al terminar. */
 function estadoVivo(h: Hop | undefined, buscandoAhora: boolean): EstadoVivo {
   if (buscandoAhora) return 'buscando';
   if (!h) return 'pendiente';

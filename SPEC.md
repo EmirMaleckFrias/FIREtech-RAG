@@ -200,7 +200,7 @@ no recrea el mensaje si la conversación se borró mientras tanto):
 | `estado` | Qué se escribe | Cuándo |
 |---|---|---|
 | `pensando` | nada más | al crear el mensaje; durante la clasificación |
-| `buscando` | `plan` (ids, consultas, `query_en`, `evidence_needed`); después `hops` y `sources` | plan y recuperación de evidencia |
+| `buscando` | `plan` (ids, consultas, `query_en`, `evidence_needed`); un `hops` marcador por punto y después el hop de CADA punto en cuanto ese punto acaba; `sources` al terminar el plan | plan y recuperación de evidencia |
 | `redactando` | `hops` y `sources` se actualizan con cada búsqueda extra; `progreso` con las afirmaciones ya juzgadas sobre la marcha | mientras el modelo escribe |
 | `revisando` | `progreso`: "Comprobando N afirmaciones · k de N listas", "Corrigiendo N afirmaciones sin respaldo · ronda r de R" | barrera de fidelidad |
 | `listo` | `content`, `sources`, `hops` (con `estado_final` y `usado_en_respuesta` en los del plan), `verificacion`, `metrics` | publicación |
@@ -720,12 +720,21 @@ plan_items[], grado` (`directa` | `parcial` | vacío = sin calificar, que no sig
 **`hops[]`**: `n, query, origen` (`plan` | `extra`), `plan_item` (id del plan o vacío),
 `evidence_needed, resultados, nuevos?, documentos[]` (nombres únicos), `estado` (`cubierto` |
 `sin_resultados`), `recuperacion` (`hibrida` | `densa` | `lexica` | `error`),
-`relevancia_verificada, ms`, y en los del plan tras la barrera `estado_final`
-(`cubierto` | `parcial` | `evidencia_no_usada` | `sin_resultados`) y `usado_en_respuesta`. Un hop
-extra se inserta **antes** de buscar como marcador (`recuperacion: "error"`, `resultados: 0`,
-`ms: 0`) y se completa al terminar; la interfaz lo pinta "buscando" mientras el turno sigue y
-"no se pudo comprobar" si el turno cerró así. Un hop extra con `plan_item` actualiza el estado
-de ese punto. El inventario aparece como hop extra con `query: "inventario de documentos"`.
+`relevancia_verificada, ms`, `en_curso` (la búsqueda sigue en marcha), y en los del plan tras la
+barrera `estado_final` (`cubierto` | `parcial` | `evidencia_no_usada` | `sin_resultados`) y
+`usado_en_respuesta`.
+
+Los hops **se insertan antes de buscar** como marcadores con `en_curso: true`, y se completan (o
+se sustituyen, en los del plan) en cuanto la búsqueda de ESE hop termina, con `en_curso: false`.
+Los puntos del plan se buscan en paralelo pero acaban en momentos distintos, así que la interfaz
+va marcando cada parte de la pregunta de una en una en vez de pasar de "todo pendiente" a "todo
+hecho" cuando acaba el plan entero. `en_curso` es un campo y no una inferencia: antes se deducía
+de "recuperación en error, cero resultados y cero ms", y una búsqueda que falla al instante deja
+exactamente esos tres valores y se quedaba pintada como "buscando" hasta que cerraba el turno
+(cazado con un test adversarial). En un turno ya cerrado un marcador es un fallo real, porque
+nadie va a completarlo. Los mensajes anteriores al campo se siguen leyendo con la inferencia
+antigua. Un hop extra con `plan_item` actualiza el estado de ese punto. El inventario aparece
+como hop extra con `query: "inventario de documentos"`.
 
 **`verificacion`**: `afirmaciones[]` (`texto, cita, veredicto, motivo, fragmento_id,
 fragmentos[]`, y opcionales `entidad_distinta` y `encabezado`), `evidencia_sin_cubrir[]`, `cobertura[]` (`id, evidence_needed, estado,

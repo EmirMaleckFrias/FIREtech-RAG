@@ -871,3 +871,98 @@ describe("variantes y candidatos", () => {
     expect(roto.candidatos).toEqual([]);
   });
 });
+
+describe("aviso por punto (alTerminarPunto)", () => {
+  test("avisa de cada punto en cuanto ESE punto acaba, con su índice, y el retorno mantiene el orden del plan", async () => {
+    busqueda.porConsulta = {
+      lenta: () => new Promise<Fragmento[]>((r) => setTimeout(() => r([frag("l")]), 60)),
+      rapida: [frag("r")],
+    };
+    const avisos: Array<[string, number, string]> = [];
+    const ev = await evidencia.ejecutarPlan(
+      ctx,
+      DUENO,
+      [item("e0", "lenta", "d0"), item("e1", "rapida", "d1")],
+      modo(4),
+      filtros,
+      new Telemetria(),
+      5000,
+      { alTerminarPunto: (p, i) => avisos.push([p.id, i, p.estado]) },
+    );
+    // El rápido avisa PRIMERO aunque sea el segundo del plan: es lo que
+    // permite marcar esa parte de la pregunta sin esperar a la otra.
+    expect(avisos).toEqual([
+      ["e1", 1, "cubierto"],
+      ["e0", 0, "cubierto"],
+    ]);
+    expect(ev.puntos.map((p) => p.id)).toEqual(["e0", "e1"]);
+  });
+
+  test("ADVERSARIAL: el punto que falla y el que vence avisan igual, una sola vez cada uno", async () => {
+    let tardia: Promise<Fragmento[]> | null = null;
+    busqueda.porConsulta = {
+      rota: new Error("índice caído"),
+      lenta: () => {
+        tardia = new Promise((r) => setTimeout(() => r([frag("tarde")]), 300));
+        return tardia;
+      },
+    };
+    const avisos: Array<[number, string, number]> = [];
+    await evidencia.ejecutarPlan(
+      ctx,
+      DUENO,
+      [item("e0", "rota", "d0"), item("e1", "lenta", "d1")],
+      modo(4),
+      filtros,
+      new Telemetria(),
+      50,
+      { alTerminarPunto: (p, i) => avisos.push([i, p.recuperacion, p.ms]) },
+    );
+    expect(avisos.map(([i]) => i).sort()).toEqual([0, 1]);
+    expect(avisos.every(([, rec]) => rec === "error")).toBe(true);
+    // Ojo con el `ms`: el de un punto que falla al instante puede salir 0
+    // (depende del reloj), igual que el del marcador que el bucle escribe
+    // ANTES de buscar. Por eso "en curso" es un campo explícito del hop
+    // (`en_curso`) y no se infiere de la terna error/cero resultados/cero ms;
+    // si se infiriera, un punto ya fallado se quedaría pintado como
+    // "buscando" hasta el final del turno. Lo garantiza `bucle.test.ts`, que
+    // mira el hop escrito; aquí no se afirma nada del reloj.
+    expect(avisos.every(([, , ms]) => ms >= 0)).toBe(true);
+    await tardia;
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  test("ADVERSARIAL: un aviso que lanza no tumba el plan, y sin tiempo se avisa de todos los puntos", async () => {
+    busqueda.porConsulta = { q: [frag("ok")] };
+    const ev = await evidencia.ejecutarPlan(
+      ctx,
+      DUENO,
+      [item("e0", "q", "d0")],
+      modo(4),
+      filtros,
+      new Telemetria(),
+      5000,
+      {
+        alTerminarPunto: () => {
+          throw new Error("la base se cayó");
+        },
+      },
+    );
+    expect(ev.puntos[0].estado).toBe("cubierto");
+    expect(ids(ev.puntos[0].fragmentos)).toEqual(["ok"]);
+
+    const avisos: number[] = [];
+    const sinTiempo = await evidencia.ejecutarPlan(
+      ctx,
+      DUENO,
+      [item("e0", "q", "d0"), item("e1", "q", "d1")],
+      modo(4),
+      filtros,
+      new Telemetria(),
+      0,
+      { alTerminarPunto: (_p, i) => avisos.push(i) },
+    );
+    expect(avisos).toEqual([0, 1]);
+    expect(sinTiempo.puntos.map((p) => p.recuperacion)).toEqual(["error", "error"]);
+  });
+});

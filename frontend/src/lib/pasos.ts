@@ -13,7 +13,8 @@
 // Sin React: lo prueba vitest tal cual.
 
 import { formatoDe, type FamiliaFormato } from './biblioteca';
-import { puntosDelPlan } from './mensajes';
+import { ANCLA } from './cobertura';
+import { esFinal, hopEnCurso, puntosDelPlan } from './mensajes';
 import type { AlcanceTurno, ChatMessage, EstadoTurno, Hop, Source } from '../types';
 
 export type EstadoPaso = 'hecho' | 'en_curso' | 'pendiente';
@@ -139,6 +140,17 @@ export function pasosDelTurno(
   const progreso = (msg.progreso ?? '').trim();
   const alcance = msg.alcance ?? null;
   const partes = puntosDelPlan(msg.plan).length;
+  // Partes cuya búsqueda ya terminó. El agente escribe un hop marcador por
+  // punto antes de buscar y lo sustituye por el de verdad en cuanto ese punto
+  // acaba (los puntos se buscan en paralelo pero acaban a ratos distintos),
+  // así que las listas son las que ya no llevan la marca de "buscando".
+  const partesListas = msg.hops.filter(
+    (h) =>
+      h.origen === 'plan' &&
+      (h.plan_item ?? '') !== '' &&
+      h.plan_item !== ANCLA &&
+      !hopEnCurso(h, !esFinal(msg.estado)),
+  ).length;
   const hopsCerrados = msg.hops.filter((h) => typeof h.resultados === 'number');
   const fragmentos = hopsCerrados.reduce((n, h) => n + (h.resultados ?? 0), 0);
   const documentos = documentosDelTurno(msg.hops).length;
@@ -148,7 +160,11 @@ export function pasosDelTurno(
     titulo: partes > 0 ? 'Buscando cada parte' : 'Buscando en tus documentos',
     detalle:
       partes > 0
-        ? `${partes} ${partes === 1 ? 'parte' : 'partes'} de la pregunta`
+        ? // Buscando: cuántas partes van, que es lo que cambia mientras se
+          // espera. Hecho: cuántas partes tenía la pregunta.
+          estadoDe(1, actual, cerrado) === 'en_curso'
+          ? `${partesListas} de ${partes} ${partes === 1 ? 'parte lista' : 'partes listas'}`
+          : `${partes} ${partes === 1 ? 'parte' : 'partes'} de la pregunta`
         : msg.hops.length > 0
           ? `${msg.hops.length} ${msg.hops.length === 1 ? 'búsqueda' : 'búsquedas'}`
           : '',

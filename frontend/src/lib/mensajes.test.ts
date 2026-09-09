@@ -3,6 +3,7 @@
 // turno colgado, el hop marcador que el agente inserta antes de buscar.
 import { describe, expect, it } from 'vitest';
 import type { Id } from '../../convex/_generated/dataModel';
+import type { Hop } from '../types';
 import {
   TIMEOUT_MSG,
   TURNO_MAX_MS,
@@ -218,5 +219,32 @@ describe('progreso y alcance del mensaje', () => {
     expect(
       mensajeDesdeDoc({ ...base, estado: 'listo', alcance: { pista: 'el PDF', documento: null, candidatos: 3 } }, AHORA, null).alcance,
     ).toEqual({ pista: 'el PDF', documento: null, candidatos: 3, encontrado: true });
+  });
+});
+
+describe('hopEnCurso con la marca explícita', () => {
+  const base: Hop = { n: 1, query: 'q', origen: 'plan', plan_item: 'e1', resultados: 0, ms: 0, recuperacion: 'error' };
+
+  it('la marca explícita manda sobre la inferencia antigua', () => {
+    // El marcador que el agente escribe antes de buscar.
+    expect(hopEnCurso({ ...base, en_curso: true }, true)).toBe(true);
+    // ADVERSARIAL: una búsqueda que FALLÓ al instante deja la misma terna que
+    // el marcador (error, cero resultados, cero ms). Con la marca explícita se
+    // lee como fallo y no como "buscando", que era el fallo de la inferencia.
+    expect(hopEnCurso({ ...base, en_curso: false }, true)).toBe(false);
+    expect(hopFallido({ ...base, en_curso: false }, true)).toBe(true);
+    // Un hop cerrado con evidencia tampoco está en curso.
+    expect(hopEnCurso({ ...base, en_curso: false, resultados: 3, ms: 900, recuperacion: 'hibrida' }, true)).toBe(false);
+  });
+
+  it('sin la marca (mensajes anteriores al campo) se sigue infiriendo de la terna', () => {
+    expect(hopEnCurso(base, true)).toBe(true);
+    expect(hopEnCurso({ ...base, ms: 900 }, true)).toBe(false);
+    expect(hopEnCurso({ ...base, resultados: 2 }, true)).toBe(false);
+  });
+
+  it('un turno cerrado no tiene ninguna búsqueda en curso, ni con la marca puesta', () => {
+    expect(hopEnCurso({ ...base, en_curso: true }, false)).toBe(false);
+    expect(hopFallido({ ...base, en_curso: true }, false)).toBe(true);
   });
 });

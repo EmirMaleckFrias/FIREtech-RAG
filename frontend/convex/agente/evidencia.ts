@@ -525,6 +525,22 @@ const VENCIDO = Symbol("vencido");
  *  resto se entrega igual. Con `limiteMs <= 0` no se lanza ninguna búsqueda:
  *  no hay tiempo que gastar en llamadas cuyo resultado se va a descartar.
  *  Nunca lanza. */
+export interface OpcionesEjecucion {
+  /** Aviso de que un punto del plan acaba de terminar, con su posición en el
+   *  plan. Existe para que el bucle escriba ESE hop en el mensaje en cuanto
+   *  ocurre, en vez de escribir los de todos los puntos juntos cuando termina
+   *  el plan entero: los puntos se buscan en paralelo pero acaban en momentos
+   *  distintos (el calificador de cada uno lee sus propios candidatos), así
+   *  que sin este aviso la interfaz pasaba de "todo pendiente" a "todo hecho"
+   *  de golpe, sin enseñar nada durante el minuto y medio de en medio.
+   *
+   *  Se llama UNA vez por índice. En un punto que falló el valor puede ser
+   *  provisional (su `ms` es el transcurrido en ese instante); el definitivo
+   *  es el del retorno, que el llamador reescribe al final. No debe lanzar:
+   *  si lanza, se traga aquí y la búsqueda sigue. */
+  alTerminarPunto?: (punto: PuntoEvidencia, indice: number) => void;
+}
+
 export async function ejecutarPlan(
   ctx: ActionCtx,
   propietario: Id<"users">,
@@ -533,6 +549,7 @@ export async function ejecutarPlan(
   filtros: FiltrosBusqueda,
   tel: Telemetria,
   limiteMs: number,
+  opciones: OpcionesEjecucion = {},
 ): Promise<EvidenciaPlan> {
   const evidencia: EvidenciaPlan = {
     puntos: [],
@@ -552,9 +569,20 @@ export async function ejecutarPlan(
   if (prefetchMs > 0) tope = Math.min(tope, prefetchMs);
   tope = Math.min(tope, MAX_TIMEOUT_MS);
   const t0 = Date.now();
+  const avisar = (punto: PuntoEvidencia, indice: number) => {
+    try {
+      opciones.alTerminarPunto?.(punto, indice);
+    } catch (exc) {
+      console.warn("aviso de punto del plan fallido", String(exc).slice(0, 120));
+    }
+  };
   let puntos: PuntoEvidencia[];
   if (tope <= 0) {
-    puntos = plan.map((it) => puntoFallido(it, 0, "sin tiempo para buscar"));
+    puntos = plan.map((it, i) => {
+      const punto = puntoFallido(it, 0, "sin tiempo para buscar");
+      avisar(punto, i);
+      return punto;
+    });
   } else {
     let reloj: ReturnType<typeof setTimeout> | undefined;
     const vencimiento = new Promise<typeof VENCIDO>((r) => {
@@ -562,14 +590,28 @@ export async function ejecutarPlan(
     });
     try {
       const resultados = await Promise.all(
-        plan.map((it) =>
+        plan.map((it, i) =>
           Promise.race([
             ejecutarPunto(ctx, propietario, it, modo, filtros, tel).then(
               (punto) => ({ punto }),
               (error: unknown) => ({ error }),
             ),
             vencimiento,
-          ]),
+          ]).then((r) => {
+            // El aviso va aquí, en cuanto ESTE punto se resuelve, y no en el
+            // recorrido de abajo, que no corre hasta que se resuelven todos.
+            if (r !== VENCIDO && "punto" in r) avisar(r.punto, i);
+            else {
+              const ms = Date.now() - t0;
+              avisar(
+                r === VENCIDO
+                  ? puntoFallido(it, ms, `no llegó en ${Math.round(tope / 1000)} s`)
+                  : puntoFallido(it, ms, `excepción: ${String(r.error).slice(0, 160)}`),
+                i,
+              );
+            }
+            return r;
+          }),
         ),
       );
       const ms = Date.now() - t0;

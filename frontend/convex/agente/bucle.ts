@@ -68,6 +68,14 @@ interface Hop {
   recuperacion: string;
   relevancia_verificada: boolean;
   ms: number;
+  /** La búsqueda de este hop está en marcha. Lo llevan los marcadores que se
+   *  escriben ANTES de buscar y se apaga al completarlos. Antes esto se
+   *  INFERÍA de "recuperación en error, cero resultados y cero ms", y eso
+   *  confundía un marcador con un punto cuya búsqueda falló al instante
+   *  (medido con un test adversarial: un índice caído devuelve el error en
+   *  menos de un milisegundo), que se quedaba pintado como "buscando" hasta
+   *  el final del turno. */
+  en_curso?: boolean;
   estado_final?: string;
   usado_en_respuesta?: boolean;
 }
@@ -83,6 +91,30 @@ function documentosUnicos(fragmentos: Fragmento[], max = 8): string[] {
   return vistos;
 }
 
+/** El hop de un punto del plan ANTES de buscarlo: la misma marca de "en
+ *  curso" que usan los hops extra (recuperación "error", cero resultados,
+ *  cero ms), que la interfaz pinta como "buscando" mientras el turno vive y
+ *  como "no se pudo comprobar" si el turno cerró así (ver `hopEnCurso` en
+ *  `src/lib/mensajes.ts`). Se escribe al empezar y se sustituye por el hop de
+ *  verdad en cuanto el punto termina, para que cada parte de la pregunta se
+ *  vaya marcando sola en vez de aparecer hecha de golpe. */
+function hopMarcador(p: planner.PuntoPlan, n: number): Hop {
+  return {
+    n,
+    query: p.queryEn && p.queryEn !== p.query ? `${p.query} · en: ${p.queryEn}` : p.query,
+    origen: "plan",
+    plan_item: p.id,
+    evidence_needed: p.evidenceNeeded,
+    resultados: 0,
+    documentos: [],
+    estado: "sin_resultados",
+    recuperacion: "error",
+    relevancia_verificada: false,
+    ms: 0,
+    en_curso: true,
+  };
+}
+
 function hopDePunto(p: evidencia.PuntoEvidencia, n: number, origen: "plan" | "extra", etiqueta?: string): Hop {
   return {
     n,
@@ -96,6 +128,10 @@ function hopDePunto(p: evidencia.PuntoEvidencia, n: number, origen: "plan" | "ex
     recuperacion: p.recuperacion,
     relevancia_verificada: p.relevanciaVerificada,
     ms: Math.round(p.ms),
+    // Explícito y siempre presente: este hop ya terminó. TODO hop que escribe
+    // el agente lleva `en_curso`, para que la interfaz no tenga que adivinarlo
+    // (ver el comentario del campo).
+    en_curso: false,
   };
 }
 
@@ -378,6 +414,25 @@ export const correr = internalAction({
       //    modelo. Aquí es donde la variación entre corridas deja de existir:
       //    la misma pregunta recupera la misma evidencia.
       const limiteEvidenciaMs = Math.min(a.prefetchTimeoutS * 1000, restanteS() * 1000);
+      // Los hops del plan se escriben en cuanto cada punto termina, no todos
+      // al final: primero un marcador por punto (la interfaz los pinta
+      // "buscando") y luego el hop de verdad según llegan. Las escrituras van
+      // en serie para que dos puntos que acaban a la vez no lleguen a la base
+      // en el orden contrario y una parte ya hecha vuelva a "buscando".
+      const hops: Hop[] = plan.map((p, i) => hopMarcador(p, i + 1));
+      let cola: Promise<void> = Promise.resolve();
+      const enSerie = (f: () => Promise<unknown>): void => {
+        cola = cola.then(
+          () => f().then(() => undefined),
+          () => undefined,
+        );
+      };
+      const marcarPunto = (punto: evidencia.PuntoEvidencia, i: number) => {
+        hops[i] = hopDePunto(punto, i + 1, "plan");
+        enSerie(() => actualizar({ hops: [...hops] }));
+      };
+      await actualizar({ hops: [...hops] });
+      if (abandonado) return;
       let ev = await evidencia.ejecutarPlan(
         ctx,
         args.userId,
@@ -386,6 +441,7 @@ export const correr = internalAction({
         filtrosAlcance,
         tel,
         limiteEvidenciaMs,
+        { alTerminarPunto: marcarPunto },
       );
       // La búsqueda acotada al documento pedido no encontró NADA: puede que
       // el documento no hable de eso, o que la pista se resolviera al
@@ -398,12 +454,25 @@ export const correr = internalAction({
         tel.incr("alcance_sin_resultados");
         alcanceEncontrado = false;
         filtrosAlcance = {};
-        ev = await evidencia.ejecutarPlan(ctx, args.userId, plan, modo, {}, tel, Math.min(limiteEvidenciaMs, restanteS() * 1000));
+        // Se vuelve a buscar: las partes ya marcadas vuelven a "buscando",
+        // porque lo que se enseñaba (nada en ese documento) ya no es lo que
+        // se va a responder.
+        plan.forEach((p, i) => { hops[i] = hopMarcador(p, i + 1); });
+        enSerie(() => actualizar({ hops: [...hops] }));
+        ev = await evidencia.ejecutarPlan(
+          ctx, args.userId, plan, modo, {}, tel, Math.min(limiteEvidenciaMs, restanteS() * 1000),
+          { alTerminarPunto: marcarPunto },
+        );
       }
       const acumulado = new Map<string, Fragmento>(ev.acumulado);
       const mapa: Record<string, string[]> = { ...ev.mapa };
       const grados: Record<string, string> = { ...ev.grados };
-      const hops: Hop[] = ev.puntos.map((p, i) => hopDePunto(p, i + 1, "plan"));
+      // El estado final de los hops del plan es el del retorno, no el de los
+      // avisos: un punto que venció recibió un `ms` provisional, y un aviso
+      // pudo perderse. Y se espera a que la cola vacíe ANTES de la escritura
+      // de abajo, para que ninguna escritura de avance la pise.
+      ev.puntos.forEach((p, i) => { hops[i] = hopDePunto(p, i + 1, "plan"); });
+      await cola;
       tel.incr("hops_plan", ev.puntos.length);
       tel.incr("puntos_sin_resultados", ev.puntos.filter((p) => p.estado === "sin_resultados").length);
       // Los ids y sus grados van a la telemetría para poder MEDIR el
@@ -661,6 +730,7 @@ export const correr = internalAction({
                 recuperacion: inventarioOk ? "hibrida" : "error",
                 relevancia_verificada: inventarioOk,
                 ms: Date.now() - t1,
+                en_curso: false,
               });
               mensajes.push({ role: "tool", tool_call_id: tc.id, content: contenidoTool });
               await actualizar({ hops });
@@ -702,6 +772,7 @@ export const correr = internalAction({
               recuperacion: "error",
               relevancia_verificada: false,
               ms: 0,
+              en_curso: true,
             };
             hops.push(hop);
             await actualizar({ hops });

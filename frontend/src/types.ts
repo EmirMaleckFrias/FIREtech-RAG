@@ -194,6 +194,11 @@ export interface Hop {
   recuperacion?: Recuperacion;
   relevancia_verificada?: boolean;
   ms?: number;
+  /** La busqueda de este hop esta en marcha: es un marcador que el agente
+   *  escribio antes de buscar y todavia no ha completado. Ausente en los
+   *  mensajes anteriores a este campo, donde se infiere de la marca antigua
+   *  (ver `hopEnCurso`). */
+  en_curso?: boolean;
   /** Solo en hops de plan ya cerrados: estado de cobertura que le dio el
    *  verificador. Permite reconstruir la cobertura de un mensaje antiguo
    *  aunque el informe no se hubiera guardado. */

@@ -84,6 +84,9 @@ operación diaria (cuentas, documentos, telemetría, variables) en
   respuesta empieza diciéndolo. Cuando la pista no identifica uno ("el PDF" con varios PDF) se
   busca en todos y la respuesta dice de qué documento sale cada dato. El paso de buscar enseña a
   qué se acotó.
+- **Cada parte de la pregunta se marca al terminar.** Las partes se buscan en paralelo pero
+  acaban en momentos distintos, y cada una pasa a verde en cuanto cierra la suya, con sus
+  fragmentos y sus documentos, en vez de aparecer todas hechas de golpe al final.
 - **Cada fase larga cuenta lo que hace.** Mientras se comprueba la respuesta, el paso enseña
   "Comprobando 31 afirmaciones · 12 de 31 listas" o "Corrigiendo 3 afirmaciones sin respaldo ·
   ronda 1 de 2", y mientras se redacta, cuántas afirmaciones ya se juzgaron sobre la marcha.

@@ -1353,6 +1353,18 @@ textarea {
   color: var(--accent);
 }
 
+.plan-encontrado .plan-icon,
+.plan-sin_resultados .plan-icon,
+.plan-parcial .plan-icon,
+.plan-error .plan-icon {
+  /* El agente marca cada parte de la pregunta en cuanto ESA parte termina
+     (los hops del plan se escriben uno por uno), asi que el icono cambia con
+     la fila ya pintada: un pop corto avisa de que esa parte acaba de cerrarse
+     sin mover nada de sitio. `pop-in` se anula solo con
+     prefers-reduced-motion (regla global del final del fichero). */
+  animation: pop-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 .plan-encontrado .plan-icon {
   color: var(--green);
 }

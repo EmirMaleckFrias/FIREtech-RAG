@@ -308,7 +308,8 @@ Nombres de las exportaciones que consume el frontend:
 ### Estado del turno del asistente
 El agente actualiza el mensaje del asistente por `estado`:
 `pensando` → `buscando` → `redactando` → `revisando` → `listo` | `error`,
-y va escribiendo `plan`, `hops`, `sources`, `content`, `verificacion`,
+y va escribiendo `plan`, `hops` (marcador con `en_curso: true` antes de
+buscar y el hop de cada punto en cuanto ese punto acaba), `sources`, `content`, `verificacion`,
 `metrics`, `progreso` (frase de avance dentro de la fase: "Comprobando 31
 afirmaciones · 12 de 31 listas") y `alcance` (si la pregunta pidió limitarse a
 un documento: `{pista, documento, candidatos?, encontrado}`) en la misma fila. **El borrador NO se publica hasta que la barrera

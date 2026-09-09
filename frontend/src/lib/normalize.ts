@@ -120,6 +120,7 @@ export function normalizeHop(raw: unknown): Hop | null {
     hop.relevancia_verificada = raw.relevancia_verificada;
   }
   if (typeof raw.ms === 'number') hop.ms = raw.ms;
+  if (typeof raw.en_curso === 'boolean') hop.en_curso = raw.en_curso;
   const estadoFinal = estadoCobertura(raw.estado_final);
   if (estadoFinal !== null) hop.estado_final = estadoFinal;
   if (typeof raw.usado_en_respuesta === 'boolean') hop.usado_en_respuesta = raw.usado_en_respuesta;
