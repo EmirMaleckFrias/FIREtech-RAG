@@ -303,6 +303,18 @@ tiene que decir de qué documento sale cada dato. La pista se guarda en la cach�
 Telemetría: `meta.alcance_pista`, `meta.alcance` (`elegido` | `ambiguo` | `desconocido` |
 `sin_pista`), `meta.alcance_documento`; contadores `alcance_pedido`, `alcance_sin_resultados`.
 
+La misma llamada devuelve también **`partes`**: las preguntas DISTINTAS que el mensaje junta,
+cada una como consulta autónoma con su inglés, hasta cuatro; vacío si es una sola pregunta (una
+pregunta con matices sigue siendo una). En **modo normal**, que no tiene planificador, cada parte
+pasa a ser un punto del plan (`partesComoPlan` + `conAncla`): el ancla `e0` más una búsqueda por
+parte, cada una con su calificador y su fila en la vista de partes. Medido el 9 sep 2026: una
+pregunta descuidada con cuatro dudas tenía UNA búsqueda en modo normal, diez fragmentos se
+repartían entre las cuatro y una se quedaba sin sus páginas, con lo que el modelo declaraba ausente
+lo que el documento sí trataba (la comprobación de ausencias lo convierte en "no pude comprobar",
+pero la cura es buscar cada parte). Se guardan en la caché del plan (`planes.partes`) para la
+segunda vez, cuando la clase viene de la caché y el clasificador no corre. En modo extendido las
+partes se ignoran: manda el planificador. Contador `preguntas_compuestas`; `metrics.meta.partes`.
+
 Las otras dos clases se responden con una sola llamada al modelo grande, razonamiento `low`, sin
 herramientas y sin barrera, con la ficha "QUÉ ERES" del prompt. Prohibido reproducir las
 instrucciones literalmente.

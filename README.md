@@ -27,7 +27,8 @@ operación diaria (cuentas, documentos, telemetría, variables) en
   en los documentos") y lo que no se pudo comprobar, con otra ("No pude comprobar X en los
   documentos"). Cualquier otra redacción se audita como una afirmación sin cita.
 - **Dos modos que elige quien pregunta.** *Pensamiento normal*: la pregunta se busca tal cual
-  y se responde directo, con una búsqueda extra como máximo. *Pensamiento extendido*: la
+  y se responde directo, con una búsqueda extra como máximo; si el mensaje junta varias
+  preguntas distintas, cada una tiene su propia búsqueda. *Pensamiento extendido*: la
   pregunta se descompone en un plan de puntos, cada punto recupera su evidencia por separado y
   se contrastan documentos. Cambia cuánto se busca y se delibera, nunca cuánta verdad se exige.
 - **La evidencia la recupera código, no el modelo.** El plan se ejecuta en paralelo, en español

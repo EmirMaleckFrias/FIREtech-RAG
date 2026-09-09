@@ -2152,3 +2152,83 @@ describe("comprobación de ausencias contra el índice", () => {
     expect(typeof opciones.dondeAparecen).toBe("function");
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Modo normal: una búsqueda por cada parte de una pregunta compuesta
+// ---------------------------------------------------------------------------
+describe("partes de una pregunta compuesta en modo normal", () => {
+  const partes = [
+    { consulta: "cuántos contactores trifásicos lleva", consultaEn: "how many contactors" },
+    { consulta: "qué dice de la corrosión", consultaEn: "corrosion" },
+    { consulta: "cómo era el sistema doble de 28 V", consultaEn: "dual 28 V system" },
+  ];
+
+  test("el plan lleva el ancla y una consulta por parte, y la interfaz recibe las partes", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t, "cuantos contactores lleva? y la corrosion? y el sistema de 28 v?");
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, partes });
+    porPunto = { e0: { fragmentos: [frag("c1")] }, e1: { fragmentos: [frag("c2", { page: 12 })] }, e3: { fragmentos: [frag("c3", { page: 6 })] } };
+    const { ctx, escrituras } = ctxDirecto(t);
+
+    await handlerDirecto(ctx, argsDe(ids));
+
+    expect(planificar).not.toHaveBeenCalled();
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; query: string; queryEn: string }>;
+    expect(plan.map((p) => [p.id, p.query, p.queryEn])).toEqual([
+      ["e0", PREGUNTA, ""],
+      ["e1", "cuántos contactores trifásicos lleva", "how many contactors"],
+      ["e2", "qué dice de la corrosión", "corrosion"],
+      ["e3", "cómo era el sistema doble de 28 V", "dual 28 V system"],
+    ]);
+    const publicado = escrituras.find((c) => c.plan)?.plan as Array<{ id: string; evidence_needed: string }>;
+    expect(publicado.map((p) => p.id)).toEqual(["e0", "e1", "e2", "e3"]);
+    expect(publicado[2].evidence_needed).toBe("qué dice de la corrosión");
+    const m = await fila(t, ids.messageId);
+    expect(m.estado).toBe("listo");
+    expect(metricasDe(m).meta.partes).toBe(3);
+    expect(hopsDe(m)).toHaveLength(4);
+  });
+
+  test("la segunda vez, con la clase en caché y sin clasificador, las partes siguen ahí", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, partes });
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    await handlerDirecto(ctxDirecto(t).ctx, argsDe(ids));
+    expect(clasificar).toHaveBeenCalledTimes(1);
+
+    const ids2 = await t.run(async (ctx) => {
+      const sessionId = await ctx.db.insert("sessions", { titulo: "otra", userId: ids.userId, creadoEn: 2 });
+      const messageId = await ctx.db.insert("messages", { sessionId, userId: ids.userId, role: "assistant", content: "", estado: "pensando", creadoEn: 3 });
+      return { userId: ids.userId, sessionId, messageId };
+    });
+    await handlerDirecto(ctxDirecto(t).ctx, argsDe(ids2));
+    expect(clasificar).toHaveBeenCalledTimes(1);
+    const plan = ejecutarPlan.mock.calls[1][2] as Array<{ id: string }>;
+    expect(plan.map((p) => p.id)).toEqual(["e0", "e1", "e2", "e3"]);
+  });
+
+  test("ADVERSARIAL: en modo extendido las partes del clasificador no sustituyen al planificador", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    clasificar.mockResolvedValue({ clase: "documental", consulta: PREGUNTA, partes });
+    planificar.mockResolvedValue({
+      items: [{ id: "x", query: "especificidad de p-tau217", queryEn: "specificity", evidenceNeeded: "especificidad" }],
+      preguntaEn: "",
+    });
+    porPunto = { e0: { fragmentos: [frag("c1")] }, e1: { fragmentos: [frag("c2")] } };
+    await handlerDirecto(ctxDirecto(t).ctx, argsDe(ids, { modo: EXTENDIDO.nombre }));
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string; query: string }>;
+    expect(plan.map((p) => p.query)).toEqual([PREGUNTA, "especificidad de p-tau217"]);
+  });
+
+  test("sin partes, el modo normal sigue siendo una sola búsqueda", async () => {
+    const t = nuevaBase();
+    const ids = await sembrar(t);
+    porPunto = { e0: { fragmentos: [frag("c1")] } };
+    await handlerDirecto(ctxDirecto(t).ctx, argsDe(ids));
+    const plan = ejecutarPlan.mock.calls[0][2] as Array<{ id: string }>;
+    expect(plan.map((p) => p.id)).toEqual(["e0"]);
+  });
+});

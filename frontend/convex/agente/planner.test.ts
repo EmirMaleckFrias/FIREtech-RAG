@@ -5,6 +5,7 @@ import * as gateway from "../lib/gateway";
 import { ajustes, modeloRerankResuelto } from "../lib/config";
 import { Telemetria } from "../lib/telemetry";
 import {
+  partesComoPlan,
   ANCLA_EVIDENCE_NEEDED,
   clasificar,
   conAncla,
@@ -372,5 +373,64 @@ describe("clasificar: la pista del documento", () => {
     const r = await clasificar("q", []);
     expect(r.clase).toBe("documental");
     expect(r.documento ?? "").toBe("");
+  });
+});
+
+
+describe("clasificar: las partes de una pregunta compuesta", () => {
+  test("acepta hasta cuatro partes limpias, con su inglés, y las cuenta", async () => {
+    const tel = new Telemetria();
+    espia.mockResolvedValueOnce(respuesta({
+      clase: "documental", consulta: "q", consulta_en: "",
+      partes: [
+        { consulta: "cuántos contactores trifásicos lleva", consulta_en: "how many three-phase contactors" },
+        { consulta: "qué dice de la corrosión en cables", consulta_en: "corrosion in cables" },
+        { consulta: "cómo era el sistema doble de 28 V", consulta_en: "the dual 28 V system" },
+      ],
+    }));
+    const r = await clasificar("cuantos contactores lleva? y la corrosion? y el sistema de 28 v?", [], tel);
+    expect(r.partes).toEqual([
+      { consulta: "cuántos contactores trifásicos lleva", consultaEn: "how many three-phase contactors" },
+      { consulta: "qué dice de la corrosión en cables", consultaEn: "corrosion in cables" },
+      { consulta: "cómo era el sistema doble de 28 V", consultaEn: "the dual 28 V system" },
+    ]);
+    expect(tel.contadores.preguntas_compuestas).toBe(1);
+    const kwargs = espia.mock.calls[0][0] as { messages: Array<{ content: string }> };
+    expect(kwargs.messages[0].content).toContain('"partes"');
+  });
+
+  test("ADVERSARIAL: una sola parte, partes repetidas, la pregunta entera disfrazada o basura no dividen nada", async () => {
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", partes: [{ consulta: "solo una" }] }));
+    expect((await clasificar("q", [])).partes).toEqual([]);
+    espia.mockResolvedValueOnce(respuesta({
+      clase: "documental", consulta: "¿cuál es el AUC?",
+      partes: [{ consulta: "¿Cuál es el AUC?" }, { consulta: "cual es el auc" }, { consulta: "cuál es el AUC" }],
+    }));
+    expect((await clasificar("¿cuál es el AUC?", [])).partes).toEqual([]);
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", partes: "no es una lista" }));
+    expect((await clasificar("q", [])).partes).toEqual([]);
+    espia.mockResolvedValueOnce(respuesta({ clase: "documental", consulta: "q", partes: [42, null, { consulta: "" }, { consulta: "x".repeat(601) }] }));
+    expect((await clasificar("q", [])).partes).toEqual([]);
+    // Más de cuatro: se quedan las cuatro primeras.
+    espia.mockResolvedValueOnce(respuesta({
+      clase: "documental", consulta: "q",
+      partes: ["a", "b", "c", "d", "e", "f"].map((x) => ({ consulta: `parte ${x}`, consulta_en: `part ${x}` })),
+    }));
+    expect((await clasificar("q", [])).partes?.map((p) => p.consulta)).toEqual(["parte a", "parte b", "parte c", "parte d"]);
+    // Con el clasificador caído no hay partes.
+    espia.mockRejectedValueOnce(new Error("caído"));
+    expect((await clasificar("q", [])).partes ?? []).toEqual([]);
+  });
+
+  test("partesComoPlan + conAncla: el ancla más una consulta por parte, renumeradas", () => {
+    const plan = conAncla("q entera", "whole q", partesComoPlan([
+      { consulta: "parte uno", consultaEn: "part one" },
+      { consulta: "parte dos", consultaEn: "" },
+    ]));
+    expect(plan.map((p) => [p.id, p.query, p.queryEn, p.evidenceNeeded])).toEqual([
+      ["e0", "q entera", "whole q", plan[0].evidenceNeeded],
+      ["e1", "parte uno", "part one", "parte uno"],
+      ["e2", "parte dos", "", "parte dos"],
+    ]);
   });
 });

@@ -24,6 +24,7 @@
 //
 // Nada de aquí inyecta un checklist en la conversación: la estructura de la
 // respuesta, si hace falta, la monta el bucle a partir del plan.
+import { normalizarPregunta } from "./cachePlan";
 import * as gateway from "../lib/gateway";
 import { ajustes, modeloRerankResuelto } from "../lib/config";
 import type { Telemetria } from "../lib/telemetry";
@@ -145,7 +146,14 @@ no lo nombre ("el PDF indexado" también vale: dice que es uno y de qué
 formato). Nombrar un documento sin pedir limitarse a él ("¿qué dice Allegri
 de esto?" puede compararse con otros) NO cuenta: deja "". Si no pide
 limitarse a ninguno, "".
-Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional","consulta":"...","consulta_en":"...","documento":""}`;
+Y "partes": SOLO si el mensaje junta varias preguntas DISTINTAS, que necesitan
+información distinta para responderse ("¿cuántos contactores lleva? ¿y qué
+dice de la corrosión? ¿y cómo era el sistema antiguo de 28 V?" son tres),
+devuelve cada una como una consulta corta que se entienda sola, con su versión
+en inglés, hasta cuatro. Una pregunta con matices o condiciones sigue siendo
+UNA pregunta ("¿el AUC de p-tau217 en pacientes con APOE4?" es una parte, no
+dos): si no hay varias preguntas de verdad, devuelve una lista vacía.
+Devuelve solo JSON: {"clase":"documental"|"sobre_el_asistente"|"conversacional","consulta":"...","consulta_en":"...","documento":"","partes":[{"consulta":"...","consulta_en":"..."}]}`;
 
 /** Forma normalizada de una consulta para detectar equivalentes.
  *
@@ -364,6 +372,57 @@ export interface Clasificacion {
    *  pruebas externas el 8 sep 2026: "únicamente con el PDF X" se buscaba en
    *  todo el corpus y la respuesta mezclaba otros documentos. */
   documento?: string;
+  /** Las preguntas distintas que el mensaje junta, si junta varias; vacío si
+   *  es una sola. En modo normal cada una tiene su propia búsqueda (ver
+   *  `partesComoPlan`). Medido el 9 sep 2026: una pregunta descuidada con
+   *  cuatro dudas tenía UNA búsqueda en modo normal, diez fragmentos se
+   *  repartían entre las cuatro y una se quedaba sin sus páginas, con lo que el
+   *  modelo declaraba ausente lo que el documento sí trataba. */
+  partes?: ParteDePregunta[];
+}
+
+/** Una de las preguntas de un mensaje compuesto, en español y en inglés. */
+export interface ParteDePregunta {
+  consulta: string;
+  consultaEn: string;
+}
+
+/** Tope de partes: más de cuatro dudas en un mensaje no es una pregunta, es
+ *  un cuestionario, y cada parte es una búsqueda con su calificador. */
+export const MAX_PARTES = 4;
+
+/** Las partes que devolvió el clasificador, ya limpias: cada una con tamaño
+ *  de consulta, sin repetir, sin la pregunta entera disfrazada de parte, y
+ *  solo si quedan al menos dos (una sola parte ES la pregunta). */
+export function partesDe(crudo: unknown, consulta: string): ParteDePregunta[] {
+  if (!Array.isArray(crudo)) return [];
+  // La misma pregunta sin los signos de interrogación o sin acentos es la
+  // misma pregunta: se compara con el normalizador de la caché, que los quita
+  // (`clave` no, y "cual es el auc" pasaba por una parte distinta de "¿cuál
+  // es el AUC?"; lo cazó el test adversarial).
+  const misma = (t: string) => normalizarPregunta(t);
+  const vistas = new Set<string>([misma(consulta)]);
+  const salida: ParteDePregunta[] = [];
+  for (const item of crudo) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    const texto = textoDe(o.consulta).replace(/\s+/g, " ").trim();
+    if (texto === "" || texto.length > MAX_CONSULTA) continue;
+    const k = misma(texto);
+    if (!k || vistas.has(k)) continue;
+    vistas.add(k);
+    const en = textoDe(o.consulta_en).replace(/\s+/g, " ").trim();
+    salida.push({ consulta: texto, consultaEn: en !== "" && en.length <= MAX_CONSULTA && misma(en) !== k ? en : "" });
+    if (salida.length >= MAX_PARTES) break;
+  }
+  return salida.length >= 2 ? salida : [];
+}
+
+/** Las partes como puntos del plan, para `conAncla`: cada parte es lo que se
+ *  busca y lo que se necesita. `conAncla` las renumera y quita la que
+ *  coincida con el ancla. */
+export function partesComoPlan(partes: ParteDePregunta[]): PuntoPlan[] {
+  return partes.map((p, i) => ({ id: `p${i + 1}`, query: p.consulta, queryEn: p.consultaEn, evidenceNeeded: p.consulta }));
 }
 
 /** Tope de la consulta reformulada: más largo que esto no es una consulta,
@@ -459,7 +518,9 @@ export async function clasificar(
     const pista = textoDe(r.datos?.documento).replace(/\s+/g, " ").trim();
     const documento = pista !== "" && pista.length <= MAX_PISTA_DOCUMENTO ? pista : "";
     if (documento) tel?.incr("alcance_pedido");
-    return { clase, consulta, consultaEn, documento };
+    const partes = partesDe(r.datos?.partes, consulta);
+    if (partes.length) tel?.incr("preguntas_compuestas");
+    return { clase, consulta, consultaEn, documento, partes };
   } catch (exc) {
     tel?.anota("clasificador", modelo, null, {
       ms: Date.now() - t0,

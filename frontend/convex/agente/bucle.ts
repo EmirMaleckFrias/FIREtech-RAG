@@ -273,7 +273,10 @@ export const correr = internalAction({
       //    una repregunta ("y en la otra cohorte?") depende de la conversación.
       const cacheable = args.historial.length === 0;
       const clavePlan = claveDePlan(args.texto, a.modelo, VERSION_PROMPT);
-      let enCache: { items: unknown[]; preguntaEn: string; clase: string | null; variantes?: string[]; documento?: string } | null = null;
+      let enCache: {
+        items: unknown[]; preguntaEn: string; clase: string | null; variantes?: string[]; documento?: string;
+        partes?: planner.ParteDePregunta[];
+      } | null = null;
       if (cacheable) {
         try {
           enCache = await ctx.runQuery(internal.agente.cachePlan.leer, { clave: clavePlan, ahora: Date.now() });
@@ -305,7 +308,10 @@ export const correr = internalAction({
           : null;
       const clasificacion: planner.Clasificacion =
         (enCache?.clase ?? null) !== null
-          ? { clase: enCache!.clase as planner.Clase, consulta: args.texto, consultaEn: enCache!.preguntaEn ?? "", documento: enCache!.documento ?? "" }
+          ? {
+              clase: enCache!.clase as planner.Clase, consulta: args.texto, consultaEn: enCache!.preguntaEn ?? "",
+              documento: enCache!.documento ?? "", partes: enCache!.partes ?? [],
+            }
           : await planner.clasificar(args.texto, args.historial, tel);
       const clase = clasificacion.clase;
       const consulta = clasificacion.consulta;
@@ -434,22 +440,33 @@ export const correr = internalAction({
             try {
               await ctx.runMutation(internal.agente.cachePlan.guardar, {
                 clave: clavePlan, pregunta: args.texto, modelo: a.modelo, version: VERSION_PROMPT,
-                clase, items, preguntaEn, variantes, documento: pistaDocumento,
+                clase, items, preguntaEn, variantes, documento: pistaDocumento, partes: clasificacion.partes ?? [],
               });
             } catch (exc) {
               console.warn("no se pudo guardar el plan en caché", exc);
             }
           }
         }
-      } else if (cacheable && !enCache) {
-        // En modo normal no hay plan, pero la clase y el inglés del ancla sí
-        // vale la pena recordarlos.
-        void ctx
-          .runMutation(internal.agente.cachePlan.guardar, {
-            clave: clavePlan, pregunta: args.texto, modelo: a.modelo, version: VERSION_PROMPT,
-            clase, items: [], preguntaEn, variantes: [], documento: pistaDocumento,
-          })
-          .catch(() => undefined);
+      } else {
+        // Modo normal: sin planificador, pero una pregunta que junta varias
+        // dudas tiene una búsqueda por duda (las partes las da el
+        // clasificador, o la caché la segunda vez). Antes era UNA búsqueda
+        // para todo, y con cuatro dudas los diez fragmentos se repartían y
+        // alguna se quedaba sin sus páginas: el modelo la declaraba ausente
+        // aunque el documento la tratara (medido el 9 sep 2026).
+        const partes = clasificacion.partes ?? [];
+        items = planner.partesComoPlan(partes);
+        if (partes.length) tel.fija({ partes: partes.length });
+        if (cacheable && !enCache) {
+          // La clase, el inglés del ancla y las partes sí vale la pena
+          // recordarlos.
+          void ctx
+            .runMutation(internal.agente.cachePlan.guardar, {
+              clave: clavePlan, pregunta: args.texto, modelo: a.modelo, version: VERSION_PROMPT,
+              clase, items: [], preguntaEn, variantes: [], documento: pistaDocumento, partes,
+            })
+            .catch(() => undefined);
+        }
       }
       const plan = planner.conAncla(consulta, preguntaEn, items, variantes);
       const planPublicable = () =>

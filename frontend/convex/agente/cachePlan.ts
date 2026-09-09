@@ -49,6 +49,7 @@ export const leer = internalQuery({
       clase: fila.clase ?? null,
       variantes: fila.variantes ?? [],
       documento: fila.documento ?? "",
+      partes: fila.partes ?? [],
     };
   },
 });
@@ -64,6 +65,7 @@ export const guardar = internalMutation({
     preguntaEn: v.string(),
     variantes: v.optional(v.array(v.string())),
     documento: v.optional(v.string()),
+    partes: v.optional(v.array(v.object({ consulta: v.string(), consultaEn: v.string() }))),
   },
   handler: async (ctx, args) => {
     const previa = await ctx.db
@@ -75,6 +77,7 @@ export const guardar = internalMutation({
         items: args.items, preguntaEn: args.preguntaEn, clase: args.clase,
         variantes: args.variantes ?? [],
         documento: args.documento ?? "",
+        partes: args.partes ?? [],
         creadoEn: Date.now(), usos: previa.usos + 1,
       });
       return previa._id;

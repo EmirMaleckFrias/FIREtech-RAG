@@ -630,6 +630,10 @@ export default defineSchema({
     // `documento`), para que la segunda vez que se hace la misma pregunta,
     // con la clase en caché y sin clasificador, el alcance no se pierda.
     documento: v.optional(v.string()),
+    // Las partes de una pregunta compuesta (clasificador `partes`), para que en
+    // modo normal cada una tenga su propia búsqueda también la segunda vez,
+    // cuando la clase viene de la caché y el clasificador no corre.
+    partes: v.optional(v.array(v.object({ consulta: v.string(), consultaEn: v.string() }))),
     creadoEn: v.number(),
     usos: v.number(),
   }).index("porClave", ["clave"]),
